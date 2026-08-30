@@ -143,6 +143,15 @@ local function service_rpc(req, prefix, service)
         return resp_text(500, service .. ' failed\n')
     end
 
+    -- A push can create the repository's first branch, or a branch other than
+    -- the one HEAD names. Fix HEAD up now, while we know a push just landed.
+    if spec.write then
+        local sok, serr = pcall(repo_sync_head, rec)
+        if not sok then
+            log_warn('HEAD sync after push failed: %s', tostring(serr))
+        end
+    end
+
     local resp = resp_file(out_path, 'application/x-git-' .. spec.verb .. '-result',
                            no_cache({}))
     -- Not os.remove: the C layer holds this file open until the response has

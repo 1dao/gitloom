@@ -17,6 +17,13 @@
 --   GET    /api/v1/users                  admin only
 --   POST   /api/v1/users                  admin only
 --   POST   /api/v1/user/tokens            issue an access token for the caller
+--
+--   GET    /api/v1/repos/:owner/:name/branches
+--   GET    /api/v1/repos/:owner/:name/tags
+--   GET    /api/v1/repos/:owner/:name/commits           ?ref= &limit= &skip= &path=
+--   GET    /api/v1/repos/:owner/:name/commits/:oid
+--   GET    /api/v1/repos/:owner/:name/tree/:ref/*path   directory listing
+--   GET    /api/v1/repos/:owner/:name/raw/:ref/*path    file contents
 
 local codec = dofile('scripts/core/share/xhttp_codec.lua')
 
@@ -36,6 +43,26 @@ local function require_user(req)
         return nil, auth_challenge('invalid username or password')
     end
     return nil, auth_challenge('authentication required')
+end
+
+-- Identify the caller on an endpoint that also serves anonymous requests.
+-- Returns (user_or_nil, nil) to proceed, or (nil, response) to stop.
+--
+-- The distinction that matters: NO credentials is anonymous and fine, WRONG
+-- credentials is a failed authentication and must be a 401. Collapsing the two
+-- — which is what a bare `auth_identify(req)` does, since both return nil —
+-- silently downgrades a caller who thinks they are authenticated to the public
+-- view, so a typo'd password looks like an empty account rather than a login
+-- failure, and a revoked token keeps appearing to work.
+local function identify_optional(req)
+    local user, why, retry = auth_identify(req)
+    if not user and why == 'rate limited' then
+        return nil, auth_too_many(retry)
+    end
+    if not user and why == 'bad credentials' then
+        return nil, auth_challenge('invalid username or password')
+    end
+    return user
 end
 
 local function require_admin(req)
@@ -69,6 +96,37 @@ local function repo_public(rec, req, ctx)
     }
 end
 
+-- Resolve the repository named in the path and check the caller may read it.
+-- Returns (rec, dir) or (nil, response).
+--
+-- Every browsing route funnels through here, so the read check lives in one
+-- place rather than once per endpoint -- the shape that eventually lets one of
+-- them be forgotten.
+local function readable_repo(req, ctx)
+    local user, bad = identify_optional(req)
+    if bad then return nil, bad end
+
+    local owner = ctx.params.owner
+    local name  = tostring(ctx.params.name):gsub('%.git$', '')
+    local rec   = repo_get(owner, name)
+    if not rec or not repo_exists_of(rec) or not auth_can_read(rec, user) then
+        return nil, resp_error(404, 'no such repository')
+    end
+    return rec, repo_dir_of(rec)
+end
+
+-- Resolve a ref against the repository, defaulting to its own default branch.
+-- Returns (oid, ref_used) or (nil, response).
+local function resolve_ref(dir, rec, ref)
+    ref = (ref and ref ~= '') and ref or (rec.default_branch or 'HEAD')
+    local oid, resolved = browse_resolve(dir, ref)
+    if not oid then
+        -- `resolved` is the error message on this branch.
+        return nil, resp_error(404, tostring(resolved) .. ': ' .. tostring(ref))
+    end
+    return oid, resolved
+end
+
 -- ---------------------------------------------------------------------------
 -- Handlers
 -- ---------------------------------------------------------------------------
@@ -97,26 +155,6 @@ local function h_version(_req, _ctx)
         version = VERSION,
         git = git_version_cached() or 'unavailable',
     })
-end
-
--- Identify the caller on an endpoint that also serves anonymous requests.
--- Returns (user_or_nil, nil) to proceed, or (nil, response) to stop.
---
--- The distinction that matters: NO credentials is anonymous and fine, WRONG
--- credentials is a failed authentication and must be a 401. Collapsing the two
--- — which is what a bare `auth_identify(req)` does, since both return nil —
--- silently downgrades a caller who thinks they are authenticated to the public
--- view, so a typo'd password looks like an empty account rather than a login
--- failure, and a revoked token keeps appearing to work.
-local function identify_optional(req)
-    local user, why, retry = auth_identify(req)
-    if not user and why == 'rate limited' then
-        return nil, auth_too_many(retry)
-    end
-    if not user and why == 'bad credentials' then
-        return nil, auth_challenge('invalid username or password')
-    end
-    return user
 end
 
 local function h_repo_list(req, ctx)
@@ -248,6 +286,141 @@ local function h_token_create(req, _ctx)
 end
 
 -- ---------------------------------------------------------------------------
+-- Browsing
+-- ---------------------------------------------------------------------------
+
+local function h_branches(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+    local list, err = browse_refs(dir, 'branches')
+    if not list then return resp_error(500, safe_error(err)) end
+    return resp_json(200, { branches = json_array(list), count = #list })
+end
+
+local function h_tags(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+    local list, err = browse_refs(dir, 'tags')
+    if not list then return resp_error(500, safe_error(err)) end
+    return resp_json(200, { tags = json_array(list), count = #list })
+end
+
+local function h_commits(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+
+    local q = req.query or {}
+    local oid, refused = resolve_ref(dir, rec, q.ref)
+    if not oid then return refused end
+
+    -- A path filter reaches a git command line like any other caller input.
+    local path, perr = browse_decode_path(q.path)
+    if path == nil then return resp_error(400, perr) end
+
+    local list, err = browse_log(dir, oid, { limit = q.limit, skip = q.skip, path = path })
+    if not list then return resp_error(500, safe_error(err)) end
+    return resp_json(200, {
+        ref = refused, oid = oid, path = path,
+        commits = json_array(list), count = #list,
+    })
+end
+
+local function h_commit(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+
+    -- Resolved, not trusted: this value reaches `git show`.
+    local oid, refused = resolve_ref(dir, rec, ctx.params.oid)
+    if not oid then return refused end
+
+    local commit, err = browse_commit(dir, oid)
+    if not commit then return resp_error(404, safe_error(err)) end
+    return resp_json(200, commit)
+end
+
+local function h_tree(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+
+    local oid, refused = resolve_ref(dir, rec, ctx.params.ref)
+    if not oid then return refused end
+
+    local path, perr = browse_decode_path(ctx.params.path)
+    if path == nil then return resp_error(400, perr) end
+
+    local entries, err = browse_tree(dir, oid, path)
+    if not entries then return resp_error(404, safe_error(err)) end
+    return resp_json(200, {
+        ref = refused, oid = oid, path = path,
+        entries = json_array(entries), count = #entries,
+    })
+end
+
+-- Types a browser may render inline. Everything else is octet-stream with an
+-- attachment disposition.
+--
+-- This is a security decision, not a convenience. A repository can contain an
+-- .html or .svg file, and serving that inline with a renderable type turns the
+-- gitloom origin into attacker-controlled script -- which is why GitHub serves
+-- raw content from a separate domain. We have one origin, so the answer is to
+-- never hand the browser something it will execute.
+local INLINE_TYPES = {
+    txt = 'text/plain; charset=utf-8',
+    md   = 'text/plain; charset=utf-8',
+    lua  = 'text/plain; charset=utf-8',
+    c    = 'text/plain; charset=utf-8',
+    h    = 'text/plain; charset=utf-8',
+    json = 'text/plain; charset=utf-8',
+    png  = 'image/png',
+    jpg  = 'image/jpeg',
+    jpeg = 'image/jpeg',
+    gif  = 'image/gif',
+}
+
+local function h_raw(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+
+    local oid, refused = resolve_ref(dir, rec, ctx.params.ref)
+    if not oid then return refused end
+
+    local path, perr = browse_decode_path(ctx.params.path)
+    if path == nil then return resp_error(400, perr) end
+    if path == '' then return resp_error(400, 'no file named') end
+
+    local info, ierr = browse_blob_info(dir, oid, path)
+    if not info then return resp_error(404, safe_error(ierr)) end
+
+    local max = cfg_int('MAX_BLOB_MB', 32) * 1024 * 1024
+    if info.size > max then
+        return resp_error(413, string.format(
+            'file is %d bytes; MAX_BLOB_MB allows %d', info.size, max))
+    end
+
+    local out, berr = browse_blob_file(dir, info.oid)
+    if not out then return resp_error(500, safe_error(berr)) end
+
+    local ext = path:match('%.([%w]+)$')
+    local ctype = ext and INLINE_TYPES[ext:lower()] or nil
+    -- Alongside the allowlist: nosniff stops a browser second-guessing
+    -- octet-stream, and the sandbox CSP neuters anything still treated as a
+    -- document.
+    local headers = {
+        ['X-Content-Type-Options']  = 'nosniff',
+        ['Content-Security-Policy'] = "default-src 'none'; sandbox",
+    }
+    if not ctype then
+        ctype = 'application/octet-stream'
+        local base = (path:match('([^/]+)$') or 'file'):gsub('"', '')
+        headers['Content-Disposition'] = 'attachment; filename="' .. base .. '"'
+    end
+
+    local resp = resp_file(out, ctype, headers)
+    resp.release_file = out
+    return resp
+end
+
+-- ---------------------------------------------------------------------------
 
 function api_install()
     http_get('/', h_index)
@@ -261,6 +434,16 @@ function api_install()
     http_get('/api/v1/users', h_user_list)
     http_post('/api/v1/users', h_user_create)
     http_post('/api/v1/user/tokens', h_token_create)
+
+    -- Browsing. The tree and raw routes end in a wildcard because a file path
+    -- inside a repository has no fixed segment count.
+    http_get('/api/v1/repos/:owner/:name/branches', h_branches)
+    http_get('/api/v1/repos/:owner/:name/tags', h_tags)
+    http_get('/api/v1/repos/:owner/:name/commits', h_commits)
+    http_get('/api/v1/repos/:owner/:name/commits/:oid', h_commit)
+    http_get('/api/v1/repos/:owner/:name/tree/:ref', h_tree)
+    http_get('/api/v1/repos/:owner/:name/tree/:ref/*path', h_tree)
+    http_get('/api/v1/repos/:owner/:name/raw/:ref/*path', h_raw)
 
     log_info('management API installed')
 end

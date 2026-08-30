@@ -89,12 +89,28 @@ Estimate: 2–3 weeks, ~1.5k lines of C, ~1.5k of Lua.
 
 ## Phase 2 — repository browsing
 
-`git ls-tree` / `cat-file` / `log` / `diff` behind JSON endpoints, then a
-single-page front end: file tree, blob view with highlighting, commit list,
-diff view. No server-side templates — that is what lets us skip gitea's 571
-`.tmpl` files entirely.
+**API layer: done** (2026-08-30). `app/browse.lua` wraps the plumbing —
+`rev-parse`, `ls-tree -z -l`, `cat-file`, `log`, `diff-tree -z --root`,
+`for-each-ref` — behind branches / tags / commits / tree / raw endpoints. The
+router grew `*wildcard` segments, since a file path has no fixed segment count.
+Covered by 27 new smoke cases, including ref-injection and path-traversal
+attempts driven with `curl --path-as-is` (without it curl collapses the dot
+segments itself and the test proves nothing about the server).
 
-Estimate: 4–6 weeks.
+Two things surfaced while building it and are fixed here rather than deferred:
+`HEAD` is now corrected after a push whose branch is not the repository's
+recorded default — otherwise a `git init -b master` client left a repository
+that cloned to an empty worktree and answered 404 on every browsing endpoint —
+and `diff-tree` gained `--root`, without which the initial commit of every
+repository reported that it changed nothing.
+
+**Still to do: the front end.** A single-page app over exactly these endpoints —
+file tree, blob view with highlighting, commit list, diff view. No server-side
+templates, which is what lets us skip gitea's 571 `.tmpl` files entirely.
+There is no diff-content endpoint yet either; `commits/:ref` returns the file
+list and status letters, not hunks.
+
+Estimate for the remainder: 3–5 weeks.
 
 ## Phase 3 — collaboration
 

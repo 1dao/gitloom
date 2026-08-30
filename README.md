@@ -68,6 +68,7 @@ gitloom/
     auth.lua             accounts, HTTP Basic, access decisions
     auth_ratelimit.lua   credential-failure backoff
     http.lua             routing, the serve loop, responses
+    browse.lua           reading repository contents (trees, blobs, log)
     smart.lua            the git smart-HTTP transport
     api.lua              the JSON management API
   worker/                scripts that run on their own thread and Lua state
@@ -201,5 +202,37 @@ missing `/bin/sh`.
 | `POST /api/v1/users` | administrator only |
 | `POST /api/v1/user/tokens` | issue an access token; shown once |
 
+Browsing a repository's contents:
+
+| | |
+|---|---|
+| `GET /api/v1/repos/:owner/:name/branches` | |
+| `GET /api/v1/repos/:owner/:name/tags` | |
+| `GET .../commits` | `?ref=` `&limit=` `&skip=` `&path=` |
+| `GET .../commits/:ref` | one commit, with the files it touched |
+| `GET .../tree/:ref` and `.../tree/:ref/<path>` | directory listing, directories first |
+| `GET .../raw/:ref/<path>` | file contents |
+
 Authentication is HTTP Basic, with either a password or an access token as the
-password field.
+password field. Browsing obeys the same visibility rule as the transport: a
+private repository is 404 to anyone who may not read it.
+
+`:ref` is a branch, tag, or object id. A branch containing a slash has to be
+percent-encoded (`feature%2Fwork`), because it occupies one URL segment.
+Omitting `?ref=` uses the repository's default branch.
+
+### Handling refs and paths
+
+Both reach a `git` command line, so both are treated as hostile. A ref is
+resolved to an object id by `rev-parse` **once**, and only the hex id travels
+any further — a ref beginning with `-` is otherwise read by git as an option,
+which is the shape behind several real CVEs in git-hosting front ends. Paths
+are percent-decoded first and validated second (`%2e%2e` is `..`), and every
+command that takes one is given `--` before it. The reasoning is written out at
+the top of [app/browse.lua](app/browse.lua).
+
+Raw file responses never carry a renderable content type unless the extension is
+on a short allowlist, and always carry `nosniff` and a sandbox CSP. A repository
+can contain an `.html` or `.svg` file, and serving that inline would make the
+gitloom origin attacker-controlled script — GitHub uses a separate domain for
+raw content for the same reason; gitloom has one origin, so it refuses instead.

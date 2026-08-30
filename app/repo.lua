@@ -2,7 +2,7 @@
 --
 -- Exports: repo_root, repo_name_ok, repo_parse_url, repo_dir, repo_dir_of,
 --          repo_exists, repo_exists_of, repo_get, repo_list, repo_create,
---          repo_delete, repo_index_load, repo_index_save
+--          repo_delete, repo_sync_head, repo_index_load, repo_index_save
 --
 -- ON-DISK LAYOUT
 --   <REPO_ROOT>/<owner>/<name>.git     one bare repository per directory
@@ -292,6 +292,61 @@ function repo_create(owner, name, opts)
     end
     log_system('created repository %s/%s at %s', owner, name, dir)
     return rec
+end
+
+-- Point HEAD at a branch that actually exists, after a push.
+--
+-- A bare repository is created with HEAD -> refs/heads/<DEFAULT_BRANCH>, but a
+-- push does not move HEAD. So a client whose local branch is called something
+-- else -- `master` against our `main` default is the common case -- leaves the
+-- repository with a HEAD naming a branch that was never created. git clone then
+-- succeeds but checks out nothing, and every browsing endpoint that defaults to
+-- the repository's own default branch answers 404 on a repository that is
+-- visibly full of commits.
+--
+-- Called after a successful receive-pack. The common case costs one rev-parse:
+-- if HEAD resolves, there is nothing to do.
+--
+-- Coroutine-only.
+function repo_sync_head(rec)
+    local dir = repo_dir_of(rec)
+
+    -- Does HEAD point at something that exists?
+    local r = git_exec({ 'rev-parse', '--verify', '--quiet', 'HEAD' }, { cwd = dir })
+    if r.ok and str_trim(r.stdout or '') ~= '' then return false end
+
+    local branches = browse_refs(dir, 'branches')
+    if not branches or #branches == 0 then return false end   -- still empty
+
+    -- Prefer what the record says, then the conventional names, then whatever
+    -- exists -- sorted, so the choice is deterministic rather than depending on
+    -- ref enumeration order.
+    local have = {}
+    for _, b in ipairs(branches) do have[b.name] = true end
+
+    local pick
+    for _, want in ipairs({ rec.default_branch, 'main', 'master' }) do
+        if want and have[want] then pick = want; break end
+    end
+    pick = pick or branches[1].name
+
+    r = git_exec({ 'symbolic-ref', 'HEAD', 'refs/heads/' .. pick }, { cwd = dir })
+    if not r.ok then
+        log_warn('could not point HEAD at %s in %s/%s: %s',
+            pick, rec.owner, rec.name, str_trim(r.stderr or ''))
+        return false
+    end
+
+    if rec.default_branch ~= pick then
+        rec.default_branch = pick
+        local sok, serr = repo_index_save()
+        if not sok then
+            log_warn('HEAD moved to %s but the index was not saved: %s',
+                pick, tostring(serr))
+        end
+    end
+    log_info('%s/%s: HEAD now points at %s', rec.owner, rec.name, pick)
+    return true
 end
 
 -- Remove a repository from the index and from disk. The on-disk removal is a

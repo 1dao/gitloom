@@ -106,15 +106,32 @@ end
 -- Routing table
 -- ---------------------------------------------------------------------------
 
+-- Segment kinds: a literal string, PARAM for ':name', or WILD for '*name'.
+-- WILD is only meaningful as the last segment and swallows everything left,
+-- slashes included — file paths inside a repository need it, since
+-- `tree/main/src/app.lua` has no fixed segment count.
+local PARAM, WILD = false, true
+
 local function compile(pattern)
     local segs, names = {}, {}
     for seg in tostring(pattern):gmatch('[^/]+') do
+        local wild = seg:match('^%*(.+)$')
         local param = seg:match('^:(.+)$')
-        if param then
-            segs[#segs + 1] = false
+        if wild then
+            segs[#segs + 1] = WILD
+            names[#segs] = wild
+        elseif param then
+            segs[#segs + 1] = PARAM
             names[#segs] = param
         else
             segs[#segs + 1] = seg
+        end
+    end
+    for i = 1, #segs - 1 do
+        if segs[i] == WILD then
+            error(string.format(
+                "http_route: '*%s' must be the last segment of %q",
+                names[i], pattern), 3)
         end
     end
     return segs, names
@@ -144,16 +161,30 @@ local function match_route(method, path)
     local list = routes[method:upper()]
     if not list then return nil end
     local parts = str_split(path, '/')
+
     for _, r in ipairs(list) do
-        if #r.segs == #parts then
+        local n = #r.segs
+        local wild_at = (n > 0 and r.segs[n] == WILD) and n or nil
+        -- A wildcard route matches when everything before the wildcard lines up
+        -- and there is at least nothing left over; an exact route needs the
+        -- same number of segments.
+        local viable = wild_at and (#parts >= wild_at - 1) or (#parts == n)
+
+        if viable then
             local params, ok = {}, true
-            for i, seg in ipairs(r.segs) do
-                if seg == false then
+            local fixed = wild_at and (wild_at - 1) or n
+            for i = 1, fixed do
+                local seg = r.segs[i]
+                if seg == PARAM then
                     params[r.names[i]] = parts[i]
                 elseif seg ~= parts[i] then
                     ok = false
                     break
                 end
+            end
+            if ok and wild_at then
+                params[r.names[wild_at]] =
+                    table.concat(parts, '/', wild_at, #parts)
             end
             if ok then return r.handler, params end
         end

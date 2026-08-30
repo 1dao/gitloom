@@ -198,6 +198,82 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H 'Content-Type: text/plain' -d 'x' "$BASE/admin/demo.git/git-upload-pack")
 check 'wrong content type is 415' "$code" '415'
 
+# == Browsing =================================================================
+# The demo repository already has two commits, a subdirectory and a binary blob
+# from the transport section above.
+
+DEMO="$BASE/api/v1/repos/admin/demo"
+
+curl -s "$DEMO/branches" | grep -q '"name":"main"' \
+    && ok 'branches lists main' || bad 'branches lists main' "$(curl -s "$DEMO/branches")"
+
+# HEAD is corrected after a push whose branch is not the recorded default, so a
+# clone checks out a worktree instead of landing on a dangling ref.
+curl -s "$DEMO" | grep -q '"default_branch":"main"' \
+    && ok 'default branch tracks what was pushed' || bad 'default branch tracks what was pushed' "$(curl -s "$DEMO")"
+
+curl -s "$DEMO/tree/main" | grep -q '"name":"src"' \
+    && ok 'tree lists the root' || bad 'tree lists the root' "$(curl -s "$DEMO/tree/main")"
+curl -s "$DEMO/tree/main/src" | grep -q '"name":"app.lua"' \
+    && ok 'tree lists a subdirectory' || bad 'tree lists a subdirectory' "$(curl -s "$DEMO/tree/main/src")"
+
+# Directories sort before files, which git does not do for us.
+first=$(curl -s "$DEMO/tree/main" | sed -n 's/.*"entries":\[{[^}]*"type":"\([a-z]*\)".*/\1/p')
+check 'tree sorts directories first' "$first" 'tree'
+
+curl -s "$DEMO/raw/main/README.md" | grep -q 'hello gitloom' \
+    && ok 'raw serves file contents' || bad 'raw serves file contents' "$(curl -s "$DEMO/raw/main/README.md" | head -c 60)"
+
+# A blob is streamed byte-for-byte, same as the packfile path.
+curl -s "$DEMO/raw/main/binary.dat" -o "$WORK/raw.dat"
+cmp -s "$WORK/raw.dat" "$WORK/w1/binary.dat" \
+    && ok 'raw blob is byte-identical' || bad 'raw blob is byte-identical' 'files differ'
+
+# An unknown extension must not be renderable by the browser.
+curl -s -D- -o /dev/null "$DEMO/raw/main/binary.dat" | grep -qi 'content-type: application/octet-stream' \
+    && ok 'unknown type is octet-stream' || bad 'unknown type is octet-stream' 'wrong content type'
+curl -s -D- -o /dev/null "$DEMO/raw/main/binary.dat" | grep -qi 'x-content-type-options: nosniff' \
+    && ok 'raw sends nosniff' || bad 'raw sends nosniff' 'header missing'
+
+curl -s "$DEMO/commits?ref=main&limit=1" | grep -q '"count":1' \
+    && ok 'commits honours limit' || bad 'commits honours limit' "$(curl -s "$DEMO/commits?ref=main&limit=1")"
+
+# The initial commit must list its files. diff-tree compares against the first
+# parent, and a root commit has none, so this is zero without --root.
+root=$(curl -s "$DEMO/commits?ref=main&limit=50" | grep -o '"oid":"[0-9a-f]*"' | tail -1 | cut -d'"' -f4)
+curl -s "$DEMO/commits/$root" | grep -q '"files":\[{' \
+    && ok 'root commit lists its files' || bad 'root commit lists its files' "$(curl -s "$DEMO/commits/$root" | grep -o '"files":[^]]*.')"
+
+# An empty list stays an array, like refs.
+curl -s "$DEMO/tags" | grep -q '"tags":\[\]' \
+    && ok 'empty tag list is []' || bad 'empty tag list is []' "$(curl -s "$DEMO/tags")"
+
+# -- injection --------------------------------------------------------------
+# A ref beginning with '-' is read by git as an option; --output= would write a
+# file. Every one of these must be refused, and none may have a side effect.
+rm -f "$WORK/pwned"
+for r in '--output=%2Ftmp%2Fpwned' '-a' '--upload-pack=touch' 'HEAD%40%7B1%7D' '%2e%2e'; do
+    code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/tree/$r")
+    check "ref injection refused: $r" "$code" '404'
+done
+[ -e "$WORK/pwned" ] && bad 'ref injection had no side effect' 'a file was created' \
+                     || ok 'ref injection had no side effect'
+
+# --path-as-is, or curl collapses the dot segments before they reach us and the
+# test proves nothing about the server.
+for pth in '..%2f..%2fgitloom.cfg' '%2e%2e/%2e%2e/etc/passwd' '.git/config' '-rf'; do
+    code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/raw/main/$pth")
+    check "path traversal refused: $pth" "$code" '400'
+done
+
+# Browsing obeys the same visibility rule as the transport.
+for ep in branches tags commits tree/main; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/repos/admin/secret/$ep")
+    check "private repo hidden from browsing: $ep" "$code" '404'
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" "$BASE/api/v1/repos/admin/secret/branches")
+check 'owner can browse a private repository' "$code" '200'
+
 # == Regressions ==============================================================
 # One case per finding from the 2026-08-30 review. Each of these passed silently
 # before the fix, so they are the cheapest guard against a reintroduction.

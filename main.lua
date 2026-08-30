@@ -33,6 +33,7 @@ dofile('app/git.lua')      -- git_*
 dofile('app/auth_ratelimit.lua')  -- authrl_*  (before auth.lua, which calls it)
 dofile('app/auth.lua')     -- auth_*
 dofile('app/http.lua')     -- http_*, resp_*
+dofile('app/browse.lua')   -- browse_*  (needs git_*, tmp_*, json_array)
 dofile('app/smart.lua')    -- smart_install
 dofile('app/api.lua')      -- api_install
 
