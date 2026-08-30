@@ -1,0 +1,22 @@
+# Runtime state, not source.
+repos/
+data/
+tmp/
+logs/
+*.log
+
+# Local overrides: DB passwords, ADMIN_PASSWORD, TLS key paths. Loaded before
+# gitloom.cfg and therefore wins over it.
+gitloom.local.cfg
+
+# bin/ is deliberately TRACKED: the xnet2lua runtime binaries for Windows and
+# Linux are committed so a clone runs with no toolchain (see README's Upstream
+# section).
+#
+# The negation is required, not decorative. This machine's global gitignore
+# (core.excludesFile) carries a Visual Studio ruleset with *.exe and *.dll, so
+# without it `git add bin/xnet.exe` is silently a no-op and the binary quietly
+# never reaches the repository. A rule in the repository's own .gitignore
+# outranks core.excludesFile, so this wins — but only here, and only for bin/.
+!bin/
+!bin/*

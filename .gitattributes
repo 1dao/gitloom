@@ -1,0 +1,13 @@
+# LF in the repository and in the working tree, on every platform.
+#
+# Not a style preference: test/smoke.sh and start.sh are run by /bin/sh, and a
+# CRLF shebang line makes Linux report "bad interpreter: No such file or
+# directory" — naming the interpreter, not the line ending, so it reads as a
+# missing shell. Checking these out with CRLF on a Windows box and copying the
+# tree to a server reproduces it every time.
+* text=auto eol=lf
+
+# Never touch the runtime binaries. bin/xnet has no extension, so name the
+# directory rather than relying on content sniffing.
+*.exe  binary
+bin/*  binary
