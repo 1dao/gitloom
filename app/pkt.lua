@@ -20,7 +20,7 @@ local MAX_PAYLOAD = 65516   -- 65520 byte packet - 4 byte length prefix
 -- One pkt-line carrying `payload`. Callers that need a trailing newline (git's
 -- text lines all have one) must include it themselves — it counts toward the
 -- length.
-function pkt_line(payload)
+function g_exports.pkt_line(payload)
     payload = tostring(payload or '')
     if #payload > MAX_PAYLOAD then
         error(string.format('pkt_line: payload too long (%d > %d)', #payload, MAX_PAYLOAD), 2)
@@ -28,11 +28,11 @@ function pkt_line(payload)
     return string.format('%04x', #payload + 4) .. payload
 end
 
-function pkt_flush() return '0000' end
-function pkt_delim() return '0001' end
+function g_exports.pkt_flush() return '0000' end
+function g_exports.pkt_delim() return '0001' end
 
 -- Encode a list of payloads, appending a flush-pkt.
-function pkt_encode(lines)
+function g_exports.pkt_encode(lines)
     local out = {}
     for _, l in ipairs(lines or {}) do out[#out + 1] = pkt_line(l) end
     out[#out + 1] = pkt_flush()
@@ -46,7 +46,7 @@ end
 -- Only used for inspection — logging what a client asked for, and reading the
 -- ref updates out of a receive-pack request so a push can be reported. The
 -- bytes themselves always reach git unmodified.
-function pkt_parse(data)
+function g_exports.pkt_parse(data)
     local out, pos, n = {}, 1, #data
     while pos <= n do
         if pos + 3 > n then return nil, 'truncated length prefix' end
@@ -85,6 +85,6 @@ end
 -- transport treats its absence as "not a smart server" and falls back to the
 -- dumb protocol — which we do not serve, so the clone fails. Matches what
 -- gitea's GetInfoRefs does unconditionally.
-function pkt_service_header(service)
+function g_exports.pkt_service_header(service)
     return pkt_line('# service=' .. service .. '\n') .. pkt_flush()
 end

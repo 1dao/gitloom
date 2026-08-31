@@ -62,9 +62,9 @@ gitloom/
   gitloom.cfg            every knob, with the reasoning next to it
   gitloom.local.cfg      your overrides (gitignored; loaded FIRST, so it wins)
   app/                   the application, one concern per file
-    boot.lua             the module convention + the strict-globals guard
-    cfg.lua              cfg*/log*
-    util.lua             str_*/path_*/file_*/dir_*
+    boot.lua             isolated module loader + g_exports registry
+    cfg.lua              cfg_*
+    util.lua             util_*
     proc.lua             the process pool and the scratch directory
     pkt.lua              git's pkt-line framing
     repo.lua             repository naming, on-disk layout, the index
@@ -88,30 +88,41 @@ gitloom/
 
 ## Module convention
 
-gitloom does **not** use `local M = {} … return M`. Each `app/` module installs
-its public functions onto `_G` under a per-module prefix, the way a C
-translation unit exports a few `modname_verb()` symbols and keeps the rest
-`static`:
+gitloom exposes one application-owned global, `g_exports`. Every `app/` file is
+loaded into a separate environment, so its ordinary top-level names remain
+private to that file. Only assignments through `g_exports` form the public API,
+similar to a C translation unit with an explicit export table:
 
 ```lua
 -- app/repo.lua
-local function normalise(name) … end     -- static: file-local
-function repo_dir(owner, name) … end     -- exported
+local function normalise(name) … end               -- lexical/file-private
+cache = {}                                         -- environment/file-private
+function g_exports.repo_dir(owner, name) … end     -- exported
 ```
 
-Call sites read as `repo_dir(...)`, `git_advertise(...)`, `pkt_line(...)` with
-no import block and no aliasing, and there is exactly one instance of every
-module regardless of load order.
+Every application file, including the callable part of `main.lua`, resolves API
+names through `g_exports`, so call sites stay direct: `repo_dir(...)`,
+`git_advertise(...)`, and `pkt_line(...)`. Those short names are environment
+lookups, not root globals. The export registry is a proxy: a second module
+cannot silently replace an existing API, and the loader rejects loading the
+same app file twice.
 
-The cost of a flat namespace is that a mistyped name is a silent `nil` rather
-than a load error. `strict_enable()` buys that back: once every module has
-loaded, `_G` is locked, and reading an undefined global raises with the
-offending name. Creating one afterwards goes through `global(name, value)`. It
-is on by default (`STRICT_GLOBALS=1`). The full rules are in
-[app/boot.lua](app/boot.lua).
+Export names are checked while the file loads and must follow
+`module_function`, where `module` is the lowercase filename without `.lua`.
+The function description may contain more underscores. For example,
+`app/stream.lua` may export `stream_is_committed` and
+`stream_response_is_streamed`; `app/auth_ratelimit.lua` may export
+`auth_ratelimit_record_failure`. A mismatched prefix is a load error.
 
-`main.lua`'s load order is the dependency order — a module may call anything
-loaded before it at run time, never at load time.
+The loader supports Lua 5.1 with `loadfile` + `setfenv`, and Lua 5.2+ with
+`loadfile(..., env)`. An unresolved name in a module raises with that module's
+path. `STRICT_GLOBALS=1` additionally locks the root `_G` after startup; module
+isolation and duplicate-export checks remain active even when that development
+guard is disabled. The full rules are in [app/boot.lua](app/boot.lua).
+
+Calling an earlier export by its short name still reads from `g_exports`; no
+individual API function is copied onto the root `_G`. Only the declaration site
+uses the registry explicitly: `function g_exports.module_function(...)`.
 
 ## How a clone works
 

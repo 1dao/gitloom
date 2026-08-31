@@ -39,7 +39,7 @@ local users = nil          -- username -> record
 local verify_cache = {}    -- cache key -> { verdict = 'ok'|'bad', expires = ts }
 
 local function users_path()
-    return cfg('USERS_FILE', 'data/users.json')
+    return cfg_get('USERS_FILE', 'data/users.json')
 end
 
 -- ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ end
 local KDF_TID = xthread.COMPUTE
 local kdf_started = false
 
-function auth_kdf_setup()
+function g_exports.auth_kdf_setup()
     if kdf_started then return true end
     local ok, err = xthread.create_thread(KDF_TID, 'gitloom-kdf', 'worker/kdf.lua')
     if not ok then return nil, err end
@@ -86,7 +86,7 @@ local function pbkdf2_hex(password, salt, iterations)
         -- A transport failure must not silently downgrade to "password wrong";
         -- fall through to the inline path so the request still gets a truthful
         -- answer, and say so, because it means the worker is in trouble.
-        log_error('kdf worker did not answer (%s); hashing inline on the event loop',
+        cfg_log_error('kdf worker did not answer (%s); hashing inline on the event loop',
             tostring(hex))
     end
     return pbkdf2_inline(password, salt, iterations)
@@ -94,7 +94,7 @@ end
 
 local function password_hash(password, salt, iterations)
     iterations = iterations or cfg_int('AUTH_PBKDF2_ITER', 10000)
-    salt = salt or rand_hex(16)
+    salt = salt or util_rand_hex(16)
     return string.format('pbkdf2$%d$%s$%s', iterations, salt,
                          pbkdf2_hex(password, salt, iterations))
 end
@@ -119,13 +119,13 @@ end
 -- Storage
 -- ---------------------------------------------------------------------------
 
-function auth_load()
+function g_exports.auth_load()
     users = {}
-    local raw = file_read(users_path())
+    local raw = util_file_read(users_path())
     if not raw or raw == '' then return users end
     local parsed = xutils.json_unpack(raw)
     if type(parsed) ~= 'table' or type(parsed.users) ~= 'table' then
-        log_warn('account file %s is unreadable; starting with no accounts',
+        cfg_log_warn('account file %s is unreadable; starting with no accounts',
             users_path())
         return users
     end
@@ -138,7 +138,7 @@ function auth_load()
     return users
 end
 
-function auth_save()
+function g_exports.auth_save()
     local list = {}
     for _, u in pairs(users or {}) do list[#list + 1] = u end
     table.sort(list, function(a, b) return a.username < b.username end)
@@ -146,18 +146,18 @@ function auth_save()
     local json = xutils.json_pack({ version = 1, users = list })
     if not json then return nil, 'account serialisation failed' end
 
-    dir_make(cfg('DATA_DIR', 'data'))
-    local ok, err = file_write_atomic(users_path(), json)
+    util_dir_make(cfg_get('DATA_DIR', 'data'))
+    local ok, err = util_file_write_atomic(users_path(), json)
     if not ok then return nil, 'account save failed: ' .. tostring(err) end
     return true
 end
 
-function auth_user_get(username)
+function g_exports.auth_user_get(username)
     if not users then auth_load() end
     return users[tostring(username or '')]
 end
 
-function auth_user_list()
+function g_exports.auth_user_list()
     if not users then auth_load() end
     local out = {}
     for _, u in pairs(users) do
@@ -169,7 +169,7 @@ function auth_user_list()
     return out
 end
 
-function auth_user_create(username, password, opts)
+function g_exports.auth_user_create(username, password, opts)
     opts = opts or {}
     if not repo_name_ok(username) then
         return nil, 'username must match ' .. '[A-Za-z0-9_][A-Za-z0-9._-]*'
@@ -197,7 +197,7 @@ function auth_user_create(username, password, opts)
     return users[username]
 end
 
-function auth_user_set_password(username, password)
+function g_exports.auth_user_set_password(username, password)
     local u = auth_user_get(username)
     if not u then return nil, 'no such user' end
     if type(password) ~= 'string' or #password < cfg_int('AUTH_MIN_PASSWORD', 8) then
@@ -208,7 +208,7 @@ function auth_user_set_password(username, password)
     return auth_save()
 end
 
-function auth_user_delete(username)
+function g_exports.auth_user_delete(username)
     if not users then auth_load() end
     if not users[username] then return nil, 'no such user' end
     users[username] = nil
@@ -218,10 +218,10 @@ end
 
 -- Issue an access token. Returns the CLEAR token exactly once — only its digest
 -- is stored, so a lost token is reissued rather than recovered.
-function auth_token_create(username, label)
+function g_exports.auth_token_create(username, label)
     local u = auth_user_get(username)
     if not u then return nil, 'no such user' end
-    local clear = rand_hex(32)
+    local clear = util_rand_hex(32)
     u.tokens = u.tokens or {}
     u.tokens[#u.tokens + 1] = {
         label      = tostring(label or 'token'),
@@ -233,7 +233,7 @@ function auth_token_create(username, label)
     return clear
 end
 
-function auth_token_revoke(username, label)
+function g_exports.auth_token_revoke(username, label)
     local u = auth_user_get(username)
     if not u then return nil, 'no such user' end
     local kept, removed = {}, 0
@@ -282,7 +282,7 @@ end
 -- from 'bad credentials' (a failed authentication) and 'rate limited'. Callers
 -- must not collapse them: anonymous may proceed to the public view, the other
 -- two may not.
-function auth_identify(req)
+function g_exports.auth_identify(req)
     local hdr = req.headers and req.headers['authorization']
     if not hdr or hdr == '' then return nil, 'anonymous' end
 
@@ -310,7 +310,7 @@ function auth_identify(req)
     -- lock out a user for a single typo.
     if cached == 'bad' then return nil, 'bad credentials' end
 
-    local allowed, retry_after = authrl_check(ip, username)
+    local allowed, retry_after = auth_ratelimit_check(ip, username)
     if not allowed then
         return nil, 'rate limited', retry_after
     end
@@ -319,7 +319,7 @@ function auth_identify(req)
     -- from the caller's point of view: returning early without recording it
     -- would turn this into a free username oracle.
     if not u then
-        authrl_record_failure(ip, username)
+        auth_ratelimit_record_failure(ip, username)
         return nil, 'bad credentials'
     end
 
@@ -335,12 +335,12 @@ function auth_identify(req)
         -- the same wrong credential on every request of a clone, so without this
         -- one mistyped password costs a full KDF several times over.
         cache_put(k, 'bad', cfg_int('AUTH_NEG_CACHE_SEC', 10))
-        authrl_record_failure(ip, username)
+        auth_ratelimit_record_failure(ip, username)
         return nil, 'bad credentials'
     end
 
     cache_put(k, 'ok', cfg_int('AUTH_CACHE_SEC', 60))
-    authrl_record_success(ip, username)
+    auth_ratelimit_record_success(ip, username)
     return u
 end
 
@@ -350,7 +350,7 @@ end
 -- exactly the loop we are trying to break, and some clients will retry several
 -- times per operation. Retry-After tells a well-behaved client when to come
 -- back, and the body says why so a locked-out human is not left guessing.
-function auth_too_many(retry_after)
+function g_exports.auth_too_many(retry_after)
     return {
         status = 429,
         body = string.format(
@@ -365,13 +365,13 @@ end
 
 -- The 401 that makes a git client prompt for, or re-send, credentials. Without
 -- WWW-Authenticate the client reports the failure and stops.
-function auth_challenge(message)
+function g_exports.auth_challenge(message)
     return {
         status = 401,
         body = (message or 'authentication required') .. '\n',
         headers = {
             ['WWW-Authenticate'] = string.format('Basic realm="%s"',
-                cfg('AUTH_REALM', 'gitloom')),
+                cfg_get('AUTH_REALM', 'gitloom')),
             ['Content-Type'] = 'text/plain; charset=utf-8',
         },
     }
@@ -388,7 +388,7 @@ local function collaborator_level(rec, user)
     return rec.collaborators[user.username]
 end
 
-function auth_can_read(rec, user)
+function g_exports.auth_can_read(rec, user)
     if not rec then return false end
     if not rec.private then
         -- A public repository is readable anonymously only when the instance
@@ -403,7 +403,7 @@ function auth_can_read(rec, user)
     return level == 'read' or level == 'write'
 end
 
-function auth_can_write(rec, user)
+function g_exports.auth_can_write(rec, user)
     if not rec or not user then return false end
     if user.admin then return true end
     if rec.owner == user.username then return true end
@@ -418,23 +418,23 @@ end
 -- Runs at boot. Doing nothing when accounts already exist is what makes it safe
 -- to leave ADMIN_PASSWORD in the config file across restarts — it will not
 -- silently reset a password that has since been changed.
-function auth_bootstrap()
+function g_exports.auth_bootstrap()
     if not users then auth_load() end
     if next(users) ~= nil then return false end
 
-    local name = cfg('ADMIN_USER', '')
-    local pass = cfg('ADMIN_PASSWORD', '')
+    local name = cfg_get('ADMIN_USER', '')
+    local pass = cfg_get('ADMIN_PASSWORD', '')
     if name == '' or pass == '' then
-        log_warn('no accounts exist and ADMIN_USER/ADMIN_PASSWORD are unset — ' ..
+        cfg_log_warn('no accounts exist and ADMIN_USER/ADMIN_PASSWORD are unset — ' ..
                  'every authenticated route will refuse until an account is created')
         return false
     end
 
     local u, err = auth_user_create(name, pass, { admin = true })
     if not u then
-        log_error('admin bootstrap failed: %s', tostring(err))
+        cfg_log_error('admin bootstrap failed: %s', tostring(err))
         return false
     end
-    log_system('bootstrapped administrator account %q', name)
+    cfg_log_system('bootstrapped administrator account %q', name)
     return true
 end

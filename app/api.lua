@@ -68,7 +68,7 @@ end
 local function require_admin(req)
     local user, resp = require_user(req)
     if not user then return nil, resp end
-    if not user.admin then return nil, resp_error(403, 'administrator only') end
+    if not user.admin then return nil, http_response_error(403, 'administrator only') end
     return user
 end
 
@@ -83,7 +83,7 @@ end
 local function repo_public(rec, req, ctx)
     local scheme = ctx.https and 'https' or 'http'
     local host = (req.headers and req.headers['host']) or
-                 (cfg('LISTEN_HOST', '0.0.0.0') .. ':' .. cfg('LISTEN_PORT', '8686'))
+                 (cfg_get('LISTEN_HOST', '0.0.0.0') .. ':' .. cfg_get('LISTEN_PORT', '8686'))
     return {
         owner          = rec.owner,
         name           = rec.name,
@@ -110,7 +110,7 @@ local function readable_repo(req, ctx)
     local name  = tostring(ctx.params.name):gsub('%.git$', '')
     local rec   = repo_get(owner, name)
     if not rec or not repo_exists_of(rec) or not auth_can_read(rec, user) then
-        return nil, resp_error(404, 'no such repository')
+        return nil, http_response_error(404, 'no such repository')
     end
     return rec, repo_dir_of(rec)
 end
@@ -122,7 +122,7 @@ local function resolve_ref(dir, rec, ref)
     local oid, resolved = browse_resolve(dir, ref)
     if not oid then
         -- `resolved` is the error message on this branch.
-        return nil, resp_error(404, tostring(resolved) .. ': ' .. tostring(ref))
+        return nil, http_response_error(404, tostring(resolved) .. ': ' .. tostring(ref))
     end
     return oid, resolved
 end
@@ -132,10 +132,10 @@ end
 -- ---------------------------------------------------------------------------
 
 local function h_index(_req, _ctx)
-    return resp_text(200, table.concat({
+    return http_response_text(200, table.concat({
         'gitloom ' .. VERSION,
         '',
-        'Clone:   git clone http://<host>:' .. cfg('LISTEN_PORT', '8686') .. '/<owner>/<repo>.git',
+        'Clone:   git clone http://<host>:' .. cfg_get('LISTEN_PORT', '8686') .. '/<owner>/<repo>.git',
         'API:     GET /api/v1/version',
         '         GET /api/v1/repos',
         '',
@@ -150,7 +150,7 @@ end
 -- of a binary does not change while the process runs, so there is nothing to
 -- re-read.
 local function h_version(_req, _ctx)
-    return resp_json(200, {
+    return http_response_json(200, {
         name = 'gitloom',
         version = VERSION,
         git = git_version_cached() or 'unavailable',
@@ -166,7 +166,7 @@ local function h_repo_list(req, ctx)
             out[#out + 1] = repo_public(rec, req, ctx)
         end
     end
-    return resp_json(200, { repos = out, count = #out })
+    return http_response_json(200, { repos = out, count = #out })
 end
 
 local function h_repo_create(req, ctx)
@@ -174,13 +174,13 @@ local function h_repo_create(req, ctx)
     if not user then return resp end
 
     local b, err = body_json(req)
-    if not b then return resp_error(400, err) end
+    if not b then return http_response_error(400, err) end
 
     -- Creating under another account is an administrator action; everyone else
     -- creates under their own name whatever they ask for.
     local owner = b.owner or user.username
     if owner ~= user.username and not user.admin then
-        return resp_error(403, 'cannot create a repository under another account')
+        return http_response_error(403, 'cannot create a repository under another account')
     end
 
     local rec, cerr = repo_create(owner, tostring(b.name or ''), {
@@ -188,8 +188,8 @@ local function h_repo_create(req, ctx)
         private        = b.private,
         default_branch = b.default_branch,
     })
-    if not rec then return resp_error(400, safe_error(cerr)) end
-    return resp_json(201, repo_public(rec, req, ctx))
+    if not rec then return http_response_error(400, http_safe_error(cerr)) end
+    return http_response_json(201, repo_public(rec, req, ctx))
 end
 
 local function h_repo_get(req, ctx)
@@ -200,7 +200,7 @@ local function h_repo_get(req, ctx)
 
     local rec = repo_get(owner, name)
     if not rec or not repo_exists_of(rec) or not auth_can_read(rec, user) then
-        return resp_error(404, 'no such repository')
+        return http_response_error(404, 'no such repository')
     end
 
     local info = repo_public(rec, req, ctx)
@@ -211,9 +211,9 @@ local function h_repo_get(req, ctx)
     -- An empty Lua table is indistinguishable from an empty object, and
     -- json_pack serialises it as {} — so `refs` changed shape from [] to {}
     -- depending on whether the repository had commits, and every client would
-    -- have to special-case it. json_array keeps the type stable.
-    info.refs = json_array(refs)
-    return resp_json(200, info)
+    -- have to special-case it. util_json_array keeps the type stable.
+    info.refs = util_json_array(refs)
+    return http_response_json(200, info)
 end
 
 local function h_repo_delete(req, ctx)
@@ -225,7 +225,7 @@ local function h_repo_delete(req, ctx)
     if not rec or not repo_exists_of(rec) then
         -- Same reasoning as the transport: do not confirm existence to someone
         -- who could not have read it anyway.
-        return resp_error(404, 'no such repository')
+        return http_response_error(404, 'no such repository')
     end
     -- 404, not 403. A stranger who may not even read this repository must not
     -- learn that it exists, and h_repo_get already answers 404 for exactly the
@@ -237,20 +237,20 @@ local function h_repo_delete(req, ctx)
     if not auth_can_write(rec, user) or
        (rec.owner ~= user.username and not user.admin) then
         if auth_can_read(rec, user) then
-            return resp_error(403, 'only the owner or an administrator may delete')
+            return http_response_error(403, 'only the owner or an administrator may delete')
         end
-        return resp_error(404, 'no such repository')
+        return http_response_error(404, 'no such repository')
     end
 
     local ok, derr = repo_delete(rec.owner, rec.name)
-    if not ok then return resp_error(500, safe_error(derr)) end
-    return resp_json(200, { deleted = owner .. '/' .. name })
+    if not ok then return http_response_error(500, http_safe_error(derr)) end
+    return http_response_json(200, { deleted = owner .. '/' .. name })
 end
 
 local function h_user_list(req, _ctx)
     local _, resp = require_admin(req)
     if resp then return resp end
-    return resp_json(200, { users = auth_user_list() })
+    return http_response_json(200, { users = auth_user_list() })
 end
 
 local function h_user_create(req, _ctx)
@@ -258,13 +258,13 @@ local function h_user_create(req, _ctx)
     if resp then return resp end
 
     local b, err = body_json(req)
-    if not b then return resp_error(400, err) end
+    if not b then return http_response_error(400, err) end
 
     local u, cerr = auth_user_create(tostring(b.username or ''),
                                      tostring(b.password or ''),
                                      { admin = b.admin, email = b.email })
-    if not u then return resp_error(400, cerr) end
-    return resp_json(201, { username = u.username, admin = u.admin, email = u.email })
+    if not u then return http_response_error(400, cerr) end
+    return http_response_json(201, { username = u.username, admin = u.admin, email = u.email })
 end
 
 local function h_token_create(req, _ctx)
@@ -275,10 +275,10 @@ local function h_token_create(req, _ctx)
     local label = type(b) == 'table' and b.label or 'token'
 
     local clear, err = auth_token_create(user.username, label)
-    if not clear then return resp_error(400, err) end
+    if not clear then return http_response_error(400, err) end
     -- Shown once. Only the digest is stored, so there is no endpoint that can
     -- ever return this value again.
-    return resp_json(201, {
+    return http_response_json(201, {
         label = label,
         token = clear,
         note = 'store this now; it cannot be retrieved again',
@@ -293,16 +293,16 @@ local function h_branches(req, ctx)
     local rec, dir = readable_repo(req, ctx)
     if not rec then return dir end
     local list, err = browse_refs(dir, 'branches')
-    if not list then return resp_error(500, safe_error(err)) end
-    return resp_json(200, { branches = json_array(list), count = #list })
+    if not list then return http_response_error(500, http_safe_error(err)) end
+    return http_response_json(200, { branches = util_json_array(list), count = #list })
 end
 
 local function h_tags(req, ctx)
     local rec, dir = readable_repo(req, ctx)
     if not rec then return dir end
     local list, err = browse_refs(dir, 'tags')
-    if not list then return resp_error(500, safe_error(err)) end
-    return resp_json(200, { tags = json_array(list), count = #list })
+    if not list then return http_response_error(500, http_safe_error(err)) end
+    return http_response_json(200, { tags = util_json_array(list), count = #list })
 end
 
 local function h_commits(req, ctx)
@@ -315,13 +315,13 @@ local function h_commits(req, ctx)
 
     -- A path filter reaches a git command line like any other caller input.
     local path, perr = browse_decode_path(q.path)
-    if path == nil then return resp_error(400, perr) end
+    if path == nil then return http_response_error(400, perr) end
 
     local list, err = browse_log(dir, oid, { limit = q.limit, skip = q.skip, path = path })
-    if not list then return resp_error(500, safe_error(err)) end
-    return resp_json(200, {
+    if not list then return http_response_error(500, http_safe_error(err)) end
+    return http_response_json(200, {
         ref = refused, oid = oid, path = path,
-        commits = json_array(list), count = #list,
+        commits = util_json_array(list), count = #list,
     })
 end
 
@@ -334,8 +334,8 @@ local function h_commit(req, ctx)
     if not oid then return refused end
 
     local commit, err = browse_commit(dir, oid)
-    if not commit then return resp_error(404, safe_error(err)) end
-    return resp_json(200, commit)
+    if not commit then return http_response_error(404, http_safe_error(err)) end
+    return http_response_json(200, commit)
 end
 
 local function h_tree(req, ctx)
@@ -346,13 +346,13 @@ local function h_tree(req, ctx)
     if not oid then return refused end
 
     local path, perr = browse_decode_path(ctx.params.path)
-    if path == nil then return resp_error(400, perr) end
+    if path == nil then return http_response_error(400, perr) end
 
     local entries, err = browse_tree(dir, oid, path)
-    if not entries then return resp_error(404, safe_error(err)) end
-    return resp_json(200, {
+    if not entries then return http_response_error(404, http_safe_error(err)) end
+    return http_response_json(200, {
         ref = refused, oid = oid, path = path,
-        entries = json_array(entries), count = #entries,
+        entries = util_json_array(entries), count = #entries,
     })
 end
 
@@ -385,20 +385,20 @@ local function h_raw(req, ctx)
     if not oid then return refused end
 
     local path, perr = browse_decode_path(ctx.params.path)
-    if path == nil then return resp_error(400, perr) end
-    if path == '' then return resp_error(400, 'no file named') end
+    if path == nil then return http_response_error(400, perr) end
+    if path == '' then return http_response_error(400, 'no file named') end
 
     local info, ierr = browse_blob_info(dir, oid, path)
-    if not info then return resp_error(404, safe_error(ierr)) end
+    if not info then return http_response_error(404, http_safe_error(ierr)) end
 
     local max = cfg_int('MAX_BLOB_MB', 32) * 1024 * 1024
     if info.size > max then
-        return resp_error(413, string.format(
+        return http_response_error(413, string.format(
             'file is %d bytes; MAX_BLOB_MB allows %d', info.size, max))
     end
 
     local out, berr = browse_blob_file(dir, info.oid)
-    if not out then return resp_error(500, safe_error(berr)) end
+    if not out then return http_response_error(500, http_safe_error(berr)) end
 
     local ext = path:match('%.([%w]+)$')
     local ctype = ext and INLINE_TYPES[ext:lower()] or nil
@@ -415,14 +415,14 @@ local function h_raw(req, ctx)
         headers['Content-Disposition'] = 'attachment; filename="' .. base .. '"'
     end
 
-    local resp = resp_file(out, ctype, headers)
+    local resp = http_response_file(out, ctype, headers)
     resp.release_file = out
     return resp
 end
 
 -- ---------------------------------------------------------------------------
 
-function api_install()
+function g_exports.api_install()
     http_get('/', h_index)
     http_get('/api/v1/version', h_version)
 
@@ -445,5 +445,5 @@ function api_install()
     http_get('/api/v1/repos/:owner/:name/tree/:ref/*path', h_tree)
     http_get('/api/v1/repos/:owner/:name/raw/:ref/*path', h_raw)
 
-    log_info('management API installed')
+    cfg_log_info('management API installed')
 end

@@ -35,15 +35,15 @@ local MAX_NAME     = 100
 local index = nil     -- { ["owner/name"] = { owner, name, description, ... } }
 
 local function index_path()
-    return path_join(repo_root(), 'index.json')
+    return util_path_join(repo_root(), 'index.json')
 end
 
 -- ---------------------------------------------------------------------------
 -- Naming
 -- ---------------------------------------------------------------------------
 
-function repo_root()
-    return cfg('REPO_ROOT', 'repos')
+function g_exports.repo_root()
+    return cfg_get('REPO_ROOT', 'repos')
 end
 
 -- Windows device names. These are reserved at every path level and with any
@@ -63,13 +63,13 @@ for i = 1, 9 do
 end
 
 -- Is this a usable owner or repository segment?
-function repo_name_ok(s)
+function g_exports.repo_name_ok(s)
     s = tostring(s or '')
     if s == '' or #s > MAX_NAME then return false end
     if s:match(NAME_PATTERN) == nil then return false end
     if s == '.' or s == '..' then return false end
     -- '.git' would collide with the suffix we append; '.lock' is git's own.
-    if s:lower() == '.git' or str_ends(s:lower(), '.lock') then return false end
+    if s:lower() == '.git' or util_str_ends(s:lower(), '.lock') then return false end
 
     -- A trailing dot or space is silently stripped by the Windows filesystem,
     -- so `demo.` and `demo` would be one directory but two index entries — the
@@ -91,8 +91,8 @@ end
 --
 -- Returns nil plus a reason when the path names nothing valid. `rest` is '' when
 -- the path is exactly the repository.
-function repo_parse_url(path)
-    local segs = str_split(tostring(path or ''), '/')
+function g_exports.repo_parse_url(path)
+    local segs = util_str_split(tostring(path or ''), '/')
     if #segs == 0 then return nil, 'empty path' end
 
     -- Find the segment that ends the repository name. With an explicit .git
@@ -100,7 +100,7 @@ function repo_parse_url(path)
     -- (owner/name), or the first when only one is left.
     local repo_at = nil
     for i, s in ipairs(segs) do
-        if str_ends(s, '.git') then repo_at = i; break end
+        if util_str_ends(s, '.git') then repo_at = i; break end
     end
     if not repo_at then
         repo_at = math.min(2, #segs)
@@ -108,7 +108,7 @@ function repo_parse_url(path)
 
     local owner, name
     if repo_at == 1 then
-        owner = cfg('DEFAULT_OWNER', 'root')
+        owner = cfg_get('DEFAULT_OWNER', 'root')
         name  = segs[1]
     elseif repo_at == 2 then
         owner = segs[1]
@@ -129,29 +129,29 @@ end
 -- Directory for an owner/name pair exactly as given. Callers that already hold
 -- an index record must use repo_dir_of instead: the record carries the casing
 -- the directory was actually created with, and a URL may differ from it.
-function repo_dir(owner, name)
-    return path_join(repo_root(), owner, name .. '.git')
+function g_exports.repo_dir(owner, name)
+    return util_path_join(repo_root(), owner, name .. '.git')
 end
 
 -- Directory of an existing repository, from its index record.
-function repo_dir_of(rec)
-    return path_join(repo_root(), rec.owner, rec.name .. '.git')
+function g_exports.repo_dir_of(rec)
+    return util_path_join(repo_root(), rec.owner, rec.name .. '.git')
 end
 
 -- Does this record's directory exist on disk?
-function repo_exists_of(rec)
+function g_exports.repo_exists_of(rec)
     local dir = repo_dir_of(rec)
-    return file_exists(path_join(dir, 'HEAD'))
-       and file_exists(path_join(dir, 'config'))
+    return util_file_exists(util_path_join(dir, 'HEAD'))
+       and util_file_exists(util_path_join(dir, 'config'))
 end
 
 -- A directory is a repository when it has the three things every bare repo has.
 -- Cheaper and stricter than shelling out to `git rev-parse`, and it runs on the
 -- request path so it must not block.
-function repo_exists(owner, name)
+function g_exports.repo_exists(owner, name)
     local dir = repo_dir(owner, name)
-    return file_exists(path_join(dir, 'HEAD'))
-       and file_exists(path_join(dir, 'config'))
+    return util_file_exists(util_path_join(dir, 'HEAD'))
+       and util_file_exists(util_path_join(dir, 'config'))
 end
 
 -- ---------------------------------------------------------------------------
@@ -173,13 +173,13 @@ local function key(owner, name)
     return owner:lower() .. '/' .. name:lower()
 end
 
-function repo_index_load()
+function g_exports.repo_index_load()
     index = {}
-    local raw = file_read(index_path())
+    local raw = util_file_read(index_path())
     if not raw or raw == '' then return index end
     local parsed = xutils.json_unpack(raw)
     if type(parsed) ~= 'table' or type(parsed.repos) ~= 'table' then
-        log_warn('repository index at %s is unreadable; starting empty', index_path())
+        cfg_log_warn('repository index at %s is unreadable; starting empty', index_path())
         return index
     end
     for _, r in ipairs(parsed.repos) do
@@ -190,10 +190,10 @@ function repo_index_load()
     return index
 end
 
--- Rewrite the index through file_write_atomic, so a crash can never leave the
+-- Rewrite the index through util_file_write_atomic, so a crash can never leave the
 -- listing without an index — see the note there on why the obvious
 -- delete-then-rename is worse than no atomicity at all.
-function repo_index_save()
+function g_exports.repo_index_save()
     local list = {}
     for _, r in pairs(index or {}) do list[#list + 1] = r end
     table.sort(list, function(a, b)
@@ -209,19 +209,19 @@ function repo_index_save()
         return nil, 'index serialisation failed (invalid UTF-8 in a field?)'
     end
 
-    local ok, err = file_write_atomic(index_path(), json)
+    local ok, err = util_file_write_atomic(index_path(), json)
     if not ok then return nil, 'index save failed: ' .. tostring(err) end
     return true
 end
 
-function repo_get(owner, name)
+function g_exports.repo_get(owner, name)
     if not index then repo_index_load() end
     return index[key(owner, name)]
 end
 
 -- Every repository, optionally filtered by owner. Sorted, so the listing is
 -- stable between calls.
-function repo_list(owner)
+function g_exports.repo_list(owner)
     if not index then repo_index_load() end
     local out = {}
     for _, r in pairs(index) do
@@ -241,7 +241,7 @@ end
 -- ---------------------------------------------------------------------------
 
 -- opts = { description, private, default_branch }
-function repo_create(owner, name, opts)
+function g_exports.repo_create(owner, name, opts)
     opts = opts or {}
     if not repo_name_ok(owner) then return nil, 'bad owner name' end
     if not repo_name_ok(name)  then return nil, 'bad repository name' end
@@ -251,15 +251,15 @@ function repo_create(owner, name, opts)
     end
 
     local dir = repo_dir(owner, name)
-    dir_make(path_join(repo_root(), owner))
+    util_dir_make(util_path_join(repo_root(), owner))
 
-    local branch = opts.default_branch or cfg('DEFAULT_BRANCH', 'main')
+    local branch = opts.default_branch or cfg_get('DEFAULT_BRANCH', 'main')
     if not repo_name_ok(branch) then return nil, 'bad default branch name' end
 
     local r = git_exec({ 'init', '--bare', '-q',
                          '--initial-branch=' .. branch, dir })
     if not r.ok then
-        return nil, 'git init failed: ' .. tostring(r.err) .. ' ' .. str_trim(r.stderr)
+        return nil, 'git init failed: ' .. tostring(r.err) .. ' ' .. util_str_trim(r.stderr)
     end
 
     -- Without this a push over HTTP is refused by git with "cannot lock ref"
@@ -283,14 +283,14 @@ function repo_create(owner, name, opts)
         -- concerned. Roll the directory back and fail, rather than returning
         -- 201 for something that will have vanished by the next restart.
         index[key(owner, name)] = nil
-        local dok = proc_exec(IS_WIN
-            and { argv = { 'cmd', '/c', 'rmdir', '/s', '/q', path_native(dir) } }
+        local dok = proc_exec(util_is_windows
+            and { argv = { 'cmd', '/c', 'rmdir', '/s', '/q', util_path_native(dir) } }
             or  { argv = { 'rm', '-rf', dir } })
-        log_error('index save failed for %s/%s (%s); rolled the directory back (%s)',
+        cfg_log_error('index save failed for %s/%s (%s); rolled the directory back (%s)',
             owner, name, tostring(serr), dok.ok and 'ok' or 'FAILED — orphan left on disk')
         return nil, 'could not persist the repository index: ' .. tostring(serr)
     end
-    log_system('created repository %s/%s at %s', owner, name, dir)
+    cfg_log_system('created repository %s/%s at %s', owner, name, dir)
     return rec
 end
 
@@ -308,12 +308,12 @@ end
 -- if HEAD resolves, there is nothing to do.
 --
 -- Coroutine-only.
-function repo_sync_head(rec)
+function g_exports.repo_sync_head(rec)
     local dir = repo_dir_of(rec)
 
     -- Does HEAD point at something that exists?
     local r = git_exec({ 'rev-parse', '--verify', '--quiet', 'HEAD' }, { cwd = dir })
-    if r.ok and str_trim(r.stdout or '') ~= '' then return false end
+    if r.ok and util_str_trim(r.stdout or '') ~= '' then return false end
 
     local branches = browse_refs(dir, 'branches')
     if not branches or #branches == 0 then return false end   -- still empty
@@ -332,8 +332,8 @@ function repo_sync_head(rec)
 
     r = git_exec({ 'symbolic-ref', 'HEAD', 'refs/heads/' .. pick }, { cwd = dir })
     if not r.ok then
-        log_warn('could not point HEAD at %s in %s/%s: %s',
-            pick, rec.owner, rec.name, str_trim(r.stderr or ''))
+        cfg_log_warn('could not point HEAD at %s in %s/%s: %s',
+            pick, rec.owner, rec.name, util_str_trim(r.stderr or ''))
         return false
     end
 
@@ -341,11 +341,11 @@ function repo_sync_head(rec)
         rec.default_branch = pick
         local sok, serr = repo_index_save()
         if not sok then
-            log_warn('HEAD moved to %s but the index was not saved: %s',
+            cfg_log_warn('HEAD moved to %s but the index was not saved: %s',
                 pick, tostring(serr))
         end
     end
-    log_info('%s/%s: HEAD now points at %s', rec.owner, rec.name, pick)
+    cfg_log_info('%s/%s: HEAD now points at %s', rec.owner, rec.name, pick)
     return true
 end
 
@@ -353,7 +353,7 @@ end
 -- recursive delete through the shell — the one operation here with no undo, so
 -- it re-validates the names right before building the command rather than
 -- trusting that whoever called us did.
-function repo_delete(owner, name)
+function g_exports.repo_delete(owner, name)
     if not repo_name_ok(owner) or not repo_name_ok(name) then
         return nil, 'bad repository name'
     end
@@ -364,13 +364,13 @@ function repo_delete(owner, name)
 
     local dir = repo_dir(owner, name)
     local r
-    if IS_WIN then
-        r = proc_exec({ argv = { 'cmd', '/c', 'rmdir', '/s', '/q', path_native(dir) } })
+    if util_is_windows then
+        r = proc_exec({ argv = { 'cmd', '/c', 'rmdir', '/s', '/q', util_path_native(dir) } })
     else
         r = proc_exec({ argv = { 'rm', '-rf', dir } })
     end
     if not r.ok then
-        return nil, 'delete failed: ' .. tostring(r.err) .. ' ' .. str_trim(r.stderr or '')
+        return nil, 'delete failed: ' .. tostring(r.err) .. ' ' .. util_str_trim(r.stderr or '')
     end
 
     index[key(owner, name)] = nil
@@ -380,10 +380,10 @@ function repo_delete(owner, name)
         -- truthful one and re-adding the record would be a lie. Report the
         -- failure instead of swallowing it: on restart the stale index comes
         -- back and lists a repository that is not there.
-        log_error('repository %s/%s was deleted from disk but the index save failed: %s',
+        cfg_log_error('repository %s/%s was deleted from disk but the index save failed: %s',
             owner, name, tostring(serr))
         return nil, 'repository deleted, but the index could not be saved: ' .. tostring(serr)
     end
-    log_system('deleted repository %s/%s', owner, name)
+    cfg_log_system('deleted repository %s/%s', owner, name)
     return true
 end

@@ -44,7 +44,7 @@ end
 -- read it is itself a disclosure.
 local function authorise(req, prefix, want_write)
     local owner, name = repo_parse_url(prefix)
-    if not owner then return nil, resp_error(404, 'not found') end
+    if not owner then return nil, http_response_error(404, 'not found') end
 
     local user, why, retry = auth_identify(req)
     if not user and why == 'rate limited' then
@@ -60,7 +60,7 @@ local function authorise(req, prefix, want_write)
         -- might have been different, and this way a typo'd password on a real
         -- repository does not read as "no such repository".
         if not user then return nil, auth_challenge('authentication required') end
-        return nil, resp_error(404, 'no such repository')
+        return nil, http_response_error(404, 'no such repository')
     end
 
     -- Spelled out rather than `want_write and can_write or can_read`: that
@@ -76,7 +76,7 @@ local function authorise(req, prefix, want_write)
 
     if not allowed then
         if not user then return nil, auth_challenge('authentication required') end
-        return nil, resp_error(404, 'no such repository')
+        return nil, http_response_error(404, 'no such repository')
     end
 
     -- From the record, not from the URL: the index is case-folded, so the
@@ -91,12 +91,12 @@ end
 local function info_refs(req, prefix)
     local service = req.query and req.query.service
     if not service or service == '' then
-        return resp_text(403, 'gitloom serves the smart HTTP protocol only ' ..
+        return http_response_text(403, 'gitloom serves the smart HTTP protocol only ' ..
                               '(no ?service= in this request)\n')
     end
     local spec = SERVICES[service]
     if not spec then
-        return resp_text(403, 'unsupported service: ' .. tostring(service) .. '\n')
+        return http_response_text(403, 'unsupported service: ' .. tostring(service) .. '\n')
     end
 
     local rec, dir_or_resp, user = authorise(req, prefix, spec.write)
@@ -105,8 +105,8 @@ local function info_refs(req, prefix)
     local body, err = git_advertise(dir_or_resp, service,
                                     git_env_for_request(req, user))
     if not body then
-        log_error('advertise failed for %s: %s', prefix, tostring(err))
-        return resp_text(500, 'ref advertisement failed\n')
+        cfg_log_error('advertise failed for %s: %s', prefix, tostring(err))
+        return http_response_text(500, 'ref advertisement failed\n')
     end
 
     return {
@@ -130,8 +130,8 @@ local function service_rpc(req, ctx, prefix, service)
     -- keeps a stray cross-origin POST from reaching receive-pack.
     local ctype = (req.headers['content-type'] or ''):lower()
     local want  = 'application/x-git-' .. spec.verb .. '-request'
-    if not str_starts(ctype, want) then
-        return resp_text(415, 'expected Content-Type: ' .. want .. '\n')
+    if not util_str_starts(ctype, want) then
+        return http_response_text(415, 'expected Content-Type: ' .. want .. '\n')
     end
 
     local rec, dir_or_resp, user = authorise(req, prefix, spec.write)
@@ -162,20 +162,20 @@ local function service_rpc(req, ctx, prefix, service)
         if ok then
             if spec.write then
                 local hok, herr = pcall(repo_sync_head, rec)
-                if not hok then log_warn('HEAD sync after push failed: %s', tostring(herr)) end
+                if not hok then cfg_log_warn('HEAD sync after push failed: %s', tostring(herr)) end
             end
-            return resp_streamed()
+            return stream_response()
         end
         if ok == nil then
-            log_error('%s stream failed for %s: %s', service, prefix, tostring(serr))
-            return resp_text(500, service .. ' failed\n')
+            cfg_log_error('%s stream failed for %s: %s', service, prefix, tostring(serr))
+            return http_response_text(500, service .. ' failed\n')
         end
     end
 
     local out_path, err = git_service(dir_or_resp, service, req.body or '', env)
     if not out_path then
-        log_error('%s failed for %s: %s', service, prefix, tostring(err))
-        return resp_text(500, service .. ' failed\n')
+        cfg_log_error('%s failed for %s: %s', service, prefix, tostring(err))
+        return http_response_text(500, service .. ' failed\n')
     end
 
     -- A push can create the repository's first branch, or a branch other than
@@ -183,11 +183,11 @@ local function service_rpc(req, ctx, prefix, service)
     if spec.write then
         local sok, serr = pcall(repo_sync_head, rec)
         if not sok then
-            log_warn('HEAD sync after push failed: %s', tostring(serr))
+            cfg_log_warn('HEAD sync after push failed: %s', tostring(serr))
         end
     end
 
-    local resp = resp_file(out_path, 'application/x-git-' .. spec.verb .. '-result',
+    local resp = http_response_file(out_path, 'application/x-git-' .. spec.verb .. '-result',
                            no_cache({}))
     -- Not os.remove: the C layer holds this file open until the response has
     -- drained. The serve loop releases it to the sweeper once the send is queued.
@@ -214,9 +214,9 @@ local function smart_dispatch(req, ctx)
     local path = req.path or '/'
 
     for _, s in ipairs(SUFFIXES) do
-        if str_ends(path, s.suffix) then
+        if util_str_ends(path, s.suffix) then
             if req.method ~= s.method then
-                return resp_text(405, s.method .. ' required for ' .. s.suffix .. '\n')
+                return http_response_text(405, s.method .. ' required for ' .. s.suffix .. '\n')
             end
             local prefix = path:sub(1, #path - #s.suffix)
             if s.fn == 'info_refs' then return info_refs(req, prefix) end
@@ -225,15 +225,15 @@ local function smart_dispatch(req, ctx)
     end
 
     for _, hint in ipairs(DUMB_HINTS) do
-        if str_ends(path, hint) or path:find('/objects/[0-9a-f][0-9a-f]/') then
-            return resp_text(403, 'gitloom serves the smart HTTP protocol only\n')
+        if util_str_ends(path, hint) or path:find('/objects/[0-9a-f][0-9a-f]/') then
+            return http_response_text(403, 'gitloom serves the smart HTTP protocol only\n')
         end
     end
 
     return nil    -- not ours; let the next fallback look
 end
 
-function smart_install()
+function g_exports.smart_install()
     http_fallback(smart_dispatch)
-    log_info('git smart-HTTP transport installed')
+    cfg_log_info('git smart-HTTP transport installed')
 end

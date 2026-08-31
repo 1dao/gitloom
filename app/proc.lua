@@ -1,7 +1,7 @@
 -- app/proc.lua — the process pool, and the scratch directory it works in.
 --
 -- Exports: proc_setup, proc_exec, proc_selftest,
---          tmp_path, tmp_release, tmp_sweep, tmp_purge
+--          proc_tmp_path, proc_tmp_release, proc_tmp_sweep, proc_tmp_purge
 --
 -- Thin wrapper over scripts/core/server/xproc.lua so the rest of the app never
 -- names the underlying module. That indirection is the point: when a real xproc
@@ -15,24 +15,24 @@ local xproc = dofile('scripts/core/server/xproc.lua')
 
 local swept_at = 0
 
-function proc_setup()
-    dir_make(cfg('TMP_DIR', 'tmp'))
+function g_exports.proc_setup()
+    util_dir_make(cfg_get('TMP_DIR', 'tmp'))
     local ok, err = xproc.setup({
         workers  = cfg_int('GIT_WORKERS', 4),
-        tmp_dir  = cfg('TMP_DIR', 'tmp'),
+        tmp_dir  = cfg_get('TMP_DIR', 'tmp'),
         base_tid = xthread.WORKER_GRP1,
         name     = 'gitloom-proc',
     })
     if not ok then return nil, err end
-    log_system('process pool up: %d worker(s)', xproc.size())
+    cfg_log_system('process pool up: %d worker(s)', xproc.size())
     return true
 end
 
-function proc_exec(spec)
+function g_exports.proc_exec(spec)
     return xproc.exec(spec)
 end
 
-function proc_selftest()
+function g_exports.proc_selftest()
     return xproc.selftest()
 end
 
@@ -47,13 +47,13 @@ end
 
 local pending = {}     -- path -> unix time it became eligible for deletion
 
-function tmp_path(suffix)
-    return path_join(cfg('TMP_DIR', 'tmp'), rand_hex(12) .. '.' .. (suffix or 'bin'))
+function g_exports.proc_tmp_path(suffix)
+    return util_path_join(cfg_get('TMP_DIR', 'tmp'), util_rand_hex(12) .. '.' .. (suffix or 'bin'))
 end
 
 -- Hand a scratch file to the sweeper. Call it once the file is no longer needed
 -- by name — including right after queueing it for send_file_response.
-function tmp_release(path)
+function g_exports.proc_tmp_release(path)
     if path then pending[path] = os.time() end
 end
 
@@ -67,13 +67,13 @@ end
 -- file that is still open simply stays on the list for the next sweep.
 --
 -- Pure Lua: no shell, so it is safe to call from the timer without a coroutine.
-function tmp_sweep()
+function g_exports.proc_tmp_sweep()
     local ttl = cfg_int('TMP_TTL_SEC', 600)
     local now = os.time()
     local removed, held = 0, 0
     for path, released_at in pairs(pending) do
         if now - released_at >= ttl then
-            if file_remove(path) and not file_exists(path) then
+            if util_file_remove(path) and not util_file_exists(path) then
                 pending[path] = nil
                 removed = removed + 1
             else
@@ -82,7 +82,7 @@ function tmp_sweep()
         end
     end
     if removed > 0 or held > 0 then
-        log_debug('scratch sweep: %d removed, %d still held open', removed, held)
+        cfg_log_debug('scratch sweep: %d removed, %d still held open', removed, held)
     end
     swept_at = now
 end
@@ -91,13 +91,13 @@ end
 -- left there is debris from a previous run — a crash mid-clone leaves a
 -- half-written packfile that nothing will ever come back for.
 -- Coroutine-only (it shells out).
-function tmp_purge()
-    local dir = cfg('TMP_DIR', 'tmp')
+function g_exports.proc_tmp_purge()
+    local dir = cfg_get('TMP_DIR', 'tmp')
     local r
-    if IS_WIN then
+    if util_is_windows then
         -- del needs the shell for its own globbing, and exits non-zero on an
         -- empty directory, which is not a failure.
-        r = proc_exec({ cmd = string.format('del /q "%s\\*.*" >nul 2>nul', path_native(dir)) })
+        r = proc_exec({ cmd = string.format('del /q "%s\\*.*" >nul 2>nul', util_path_native(dir)) })
     else
         -- argv rather than `rm -f "$dir"/*`: a glob needs the shell, and a
         -- shell would also expand $ and backticks in TMP_DIR. find takes the
@@ -106,6 +106,6 @@ function tmp_purge()
         r = proc_exec({ argv = { 'find', dir, '-maxdepth', '1', '-type', 'f', '-delete' } })
     end
     if r and r.exit_code and r.exit_code > 1 then
-        log_warn('scratch purge returned %d', r.exit_code)
+        cfg_log_warn('scratch purge returned %d', r.exit_code)
     end
 end

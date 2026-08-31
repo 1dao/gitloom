@@ -3,7 +3,7 @@
 --
 -- Exports: stream_begin, stream_write, stream_finish, stream_abort,
 --          stream_is_committed, stream_reset,
---          resp_streamed, resp_is_streamed
+--          stream_response, stream_response_is_streamed
 --
 -- Every other response in gitloom is built completely and then handed to the
 -- codec, which sets Content-Length. That is impossible for a fetch: the
@@ -20,7 +20,7 @@
 --   stream_begin(ctx.conn, 200, { ['Content-Type'] = '...' })
 --   stream_write(ctx.conn, chunk)          -- as many times as needed
 --   stream_finish(ctx.conn)
---   return resp_streamed()                 -- tells the serve loop to send nothing
+--   return stream_response()                 -- tells the serve loop to send nothing
 --
 -- The handler runs on a coroutine, so it may yield between writes and be
 -- resumed by an event callback. That is exactly what the git streaming path
@@ -33,9 +33,9 @@ local codec = dofile('scripts/core/share/xhttp_codec.lua')
 -- send_response, because the handler has already written everything.
 local STREAMED = { streamed = true }
 
-function resp_streamed() return STREAMED end
+function g_exports.stream_response() return STREAMED end
 
-function resp_is_streamed(resp)
+function g_exports.stream_response_is_streamed(resp)
     return type(resp) == 'table' and resp.streamed == true
 end
 
@@ -49,7 +49,7 @@ end
 -- status line and headers land INSIDE the packfile — the client then reports a
 -- corrupt transfer instead of a failed one, and the 500 is never seen.
 --
--- Returning resp_streamed() is not enough on its own: it only says what the
+-- Returning stream_response() is not enough on its own: it only says what the
 -- handler MEANT to do, and a handler that raises after its first chunk never
 -- returns anything at all.
 --
@@ -58,7 +58,7 @@ end
 
 local committed = setmetatable({}, { __mode = 'k' })
 
-function stream_is_committed(conn)
+function g_exports.stream_is_committed(conn)
     return conn ~= nil and committed[conn] == true
 end
 
@@ -66,7 +66,7 @@ end
 -- request STARTS, not when a stream ends: a failure after stream_finish must
 -- still be answered by closing rather than by a second response, while the next
 -- request on a keep-alive connection has to start uncommitted.
-function stream_reset(conn)
+function g_exports.stream_reset(conn)
     if conn ~= nil then committed[conn] = nil end
 end
 
@@ -75,7 +75,7 @@ end
 -- Content-Length is deliberately impossible to set here: the two are mutually
 -- exclusive in HTTP/1.1, and a response carrying both is a request-smuggling
 -- primitive rather than merely invalid. Any caller-supplied one is dropped.
-function stream_begin(conn, status, headers)
+function g_exports.stream_begin(conn, status, headers)
     local out = {
         string.format('HTTP/1.1 %d %s\r\n',
             status or 200, codec.STATUS_TEXT[status or 200] or 'OK'),
@@ -110,7 +110,7 @@ end
 -- failure and lets the caller abort the connection.
 --
 -- Returns true, or false plus the reason.
-function stream_write(conn, data)
+function g_exports.stream_write(conn, data)
     if not data or #data == 0 then return true end
 
     local ok, err = conn:send_raw(string.format('%x\r\n', #data))
@@ -130,7 +130,7 @@ end
 -- Checked like every other write: if the terminator cannot even be queued the
 -- client never learns the body ended, so reporting success here would turn a
 -- visible failure into a clone that hangs. Returns true, or false plus why.
-function stream_finish(conn)
+function g_exports.stream_finish(conn)
     local ok, err = conn:send_raw('0\r\n\r\n')
     if not ok then return false, tostring(err or 'send failed') end
     return true
@@ -143,7 +143,7 @@ end
 -- chunk is the only honest option: the client sees a truncated chunked stream
 -- and reports a failed transfer, which is true. Finishing cleanly instead would
 -- hand it a short packfile that looks complete.
-function stream_abort(conn, reason)
-    log_warn('aborting a streamed response: %s', tostring(reason or 'unknown'))
+function g_exports.stream_abort(conn, reason)
+    cfg_log_warn('aborting a streamed response: %s', tostring(reason or 'unknown'))
     conn:close('stream aborted')
 end

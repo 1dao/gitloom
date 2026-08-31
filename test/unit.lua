@@ -11,18 +11,25 @@
 
 package.path = 'app/?.lua;' .. package.path
 
-dofile('app/boot.lua')
-dofile('app/cfg.lua')
-dofile('app/util.lua')
-dofile('app/proc.lua')
-dofile('app/pkt.lua')
-dofile('app/repo.lua')
-dofile('app/git.lua')
-dofile('app/auth_ratelimit.lua')
-dofile('app/auth.lua')
-dofile('app/http.lua')
-dofile('app/stream.lua')
-dofile('app/browse.lua')
+local root_globals = _G
+local boot = dofile('app/boot.lua')
+
+boot.load_script('app/cfg.lua')
+boot.load_script('app/util.lua')
+boot.load_script('app/proc.lua')
+boot.load_script('app/pkt.lua')
+boot.load_script('app/repo.lua')
+boot.load_script('app/git.lua')
+boot.load_script('app/auth_ratelimit.lua')
+boot.load_script('app/auth.lua')
+boot.load_script('app/http.lua')
+boot.load_script('app/stream.lua')
+boot.load_script('app/browse.lua')
+boot.load_script('test/module_scope.lua')
+
+local unit_env = boot.new_environment('test/unit.lua')
+if _VERSION == 'Lua 5.1' then setfenv(1, unit_env) end
+local _ENV = unit_env
 
 local fails, total = 0, 0
 local function out(s) io.write(s); io.flush() end
@@ -33,6 +40,55 @@ local function check(name, cond, detail)
 end
 local function eq(name, got, want)
     check(name, got == want, string.format('got %q want %q', tostring(got), tostring(want)))
+end
+
+-- ── module isolation and exports ───────────────────────────────────────────
+check('g_exports is the only app registry in root _G',
+    rawget(root_globals, 'g_exports') == g_exports,
+    'registry missing or replaced')
+check('an exported function is not copied onto root _G',
+    rawget(root_globals, 'repo_dir') == nil,
+    'repo_dir leaked into _G')
+check('a bare module variable stays out of root _G',
+    rawget(root_globals, 'private_value') == nil,
+    'private_value leaked into _G')
+check('a bare module function stays out of root _G',
+    rawget(root_globals, 'private_increment') == nil,
+    'private_increment leaked into _G')
+eq('an export can be called directly and reach file-private state',
+    module_scope_private_api(), 42)
+
+do
+    boot.strict_enable()
+    local read_ok, read_err = pcall(function() return root_globals.__gitloom_missing_test end)
+    local write_ok, write_err = pcall(function()
+        root_globals.__gitloom_new_test = true
+    end)
+    boot.strict_disable()
+    check('strict mode rejects undefined global reads',
+        not read_ok and tostring(read_err):find('undefined global read') ~= nil, read_err)
+    check('strict mode rejects new global writes',
+        not write_ok and tostring(write_err):find('undefined global write') ~= nil, write_err)
+end
+
+do
+    local before = repo_dir
+    local ok, err = pcall(function() g_exports.repo_dir = function() end end)
+    check('duplicate exports are rejected', not ok and tostring(err):find('duplicate export') ~= nil,
+        err)
+    check('a rejected duplicate keeps the original', repo_dir == before, 'export changed')
+end
+
+do
+    local ok, err = pcall(boot.load_script, 'app/pkt.lua')
+    check('duplicate module loads are rejected',
+        not ok and tostring(err):find('already loaded') ~= nil, err)
+end
+
+do
+    local ok, err = pcall(boot.load_script, 'test/module_bad_export.lua')
+    check('exports must use the filename as their module prefix',
+        not ok and tostring(err):find("invalid export 'wrong_prefix'") ~= nil, err)
 end
 
 -- A stand-in for a connection: records every byte send_raw is given.
@@ -156,11 +212,11 @@ end
 -- ── JSON array typing ──────────────────────────────────────────────────────
 do
     local xutils = require('xutils')
-    local packed = xutils.json_pack({ refs = json_array({}) })
-    eq('an empty array survives packing as []', json_fix_arrays(packed), '{"refs":[]}')
+    local packed = xutils.json_pack({ refs = util_json_array({}) })
+    eq('an empty array survives packing as []', util_json_fix_arrays(packed), '{"refs":[]}')
 
-    local full = xutils.json_pack({ refs = json_array({ 'a', 'b' }) })
-    eq('a non-empty array is untouched', json_fix_arrays(full), '{"refs":["a","b"]}')
+    local full = xutils.json_pack({ refs = util_json_array({ 'a', 'b' }) })
+    eq('a non-empty array is untouched', util_json_fix_arrays(full), '{"refs":["a","b"]}')
 end
 
 -- ── name and path rules ────────────────────────────────────────────────────
@@ -194,21 +250,21 @@ end
 -- ── atomic file replace ────────────────────────────────────────────────────
 do
     local dir = 'tmp/unit'
-    dir_make(dir)
+    util_dir_make(dir)
     local path = dir .. '/atomic.txt'
 
-    file_remove(path)
-    check('atomic write creates', file_write_atomic(path, 'first') == true, 'failed')
-    eq('content is what was written', file_read(path), 'first')
+    util_file_remove(path)
+    check('atomic write creates', util_file_write_atomic(path, 'first') == true, 'failed')
+    eq('content is what was written', util_file_read(path), 'first')
 
-    check('atomic write replaces', file_write_atomic(path, 'second') == true, 'failed')
-    eq('replacement content', file_read(path), 'second')
+    check('atomic write replaces', util_file_write_atomic(path, 'second') == true, 'failed')
+    eq('replacement content', util_file_read(path), 'second')
 
     -- The failure mode this replaced was a window where the file did not exist
     -- at all; whatever happens, a reader must never see it missing.
-    check('no .tmp is left behind', file_exists(path .. '.tmp') == false, 'leftover .tmp')
-    check('no .bak is left behind', file_exists(path .. '.bak') == false, 'leftover .bak')
-    file_remove(path)
+    check('no .tmp is left behind', util_file_exists(path .. '.tmp') == false, 'leftover .tmp')
+    check('no .bak is left behind', util_file_exists(path .. '.bak') == false, 'leftover .bak')
+    util_file_remove(path)
 end
 
 -- ── pkt-line ───────────────────────────────────────────────────────────────

@@ -54,7 +54,7 @@ end
 
 -- Decode a whole '/'-joined path from the URL. Returns nil when it decodes to
 -- something we will not touch.
-function browse_decode_path(raw)
+function g_exports.browse_decode_path(raw)
     if raw == nil or raw == '' then return '' end
     local out = {}
     for seg in tostring(raw):gmatch('[^/]+') do
@@ -69,7 +69,7 @@ end
 --
 -- Checked AFTER percent-decoding, which is the only order that works: '%2e%2e'
 -- is '..' and a check done before decoding would wave it through.
-function browse_path_ok(p)
+function g_exports.browse_path_ok(p)
     p = tostring(p or '')
     if p == '' then return true end                       -- the tree root
     if #p > MAX_PATH_LEN then return false end
@@ -116,7 +116,7 @@ end
 -- Returns (oid, decoded_ref) or (nil, message). The decoded ref goes back so a
 -- caller can echo what it actually resolved, rather than the encoded form the
 -- client happened to send.
-function browse_resolve(dir, ref)
+function g_exports.browse_resolve(dir, ref)
     -- Decode first, validate second — the same order the path helpers use, and
     -- for the same reason: '%2e%2e' is '..', and a check run before decoding
     -- waves it through. Decoding here also makes a slashed branch name usable,
@@ -127,7 +127,7 @@ function browse_resolve(dir, ref)
 
     local r = git_exec({ 'rev-parse', '--verify', '--quiet', '--end-of-options',
                          ref .. '^{commit}' }, { cwd = dir })
-    local oid = str_trim(r.stdout or '')
+    local oid = util_str_trim(r.stdout or '')
     if not r.ok or not oid:match('^%x+$') then
         return nil, 'unknown ref'
     end
@@ -144,7 +144,7 @@ end
 -- Returns an array of { name, path, type, mode, oid, size } sorted directories
 -- first, then by name — the order a file listing is expected in, which git does
 -- not provide.
-function browse_tree(dir, oid, path)
+function g_exports.browse_tree(dir, oid, path)
     local spec = oid .. ':' .. (path == '' and '' or (path .. '/'))
     -- -z: NUL-terminated records and UNQUOTED names. Without it a file called
     -- `we"ird` or one containing a newline comes back quoted and escaped, and
@@ -184,34 +184,34 @@ end
 
 -- Metadata for one blob, without reading it: type, size, and whether it looks
 -- binary. Returns nil plus a message when the path is not a blob.
-function browse_blob_info(dir, oid, path)
+function g_exports.browse_blob_info(dir, oid, path)
     if path == '' then return nil, 'not a file' end
     local spec = oid .. ':' .. path
 
     local r = git_exec({ 'cat-file', '-t', '--end-of-options', spec }, { cwd = dir })
-    local kind = str_trim(r.stdout or '')
+    local kind = util_str_trim(r.stdout or '')
     if not r.ok or kind ~= 'blob' then return nil, 'not a file' end
 
     r = git_exec({ 'cat-file', '-s', '--end-of-options', spec }, { cwd = dir })
-    local size = tonumber(str_trim(r.stdout or ''))
+    local size = tonumber(util_str_trim(r.stdout or ''))
     if not r.ok or not size then return nil, 'could not size the file' end
 
     return { path = path, size = size, oid = spec }
 end
 
--- Write a blob to a scratch file and return its path, for resp_file to stream.
+-- Write a blob to a scratch file and return its path, for http_response_file to stream.
 --
 -- Through a file rather than captured into a string on purpose: this is the one
 -- browsing endpoint whose response can be arbitrarily large, and the same
 -- send_file_response path the packfiles use costs nothing extra here.
 --
--- The caller MUST tmp_release() the returned path once the response is queued.
-function browse_blob_file(dir, spec)
-    local out = tmp_path('blob')
+-- The caller MUST proc_tmp_release() the returned path once the response is queued.
+function g_exports.browse_blob_file(dir, spec)
+    local out = proc_tmp_path('blob')
     local r = git_exec({ 'cat-file', 'blob', '--end-of-options', spec },
                        { cwd = dir, stdout_file = out })
     if not r.ok then
-        tmp_release(out)
+        proc_tmp_release(out)
         return nil, 'could not read the file'
     end
     return out
@@ -251,9 +251,9 @@ local function parse_log(text)
                     oid = f[1], short = f[2],
                     author    = { name = f[3], email = f[4], date = f[5] },
                     committer = { name = f[6], email = f[7], date = f[8] },
-                    parents = json_array(parents),
+                    parents = util_json_array(parents),
                     subject = f[10] or '',
-                    body = str_trim(f[11] or ''),
+                    body = util_str_trim(f[11] or ''),
                 }
             end
         end
@@ -263,7 +263,7 @@ end
 
 -- Commit list reachable from `oid`, newest first.
 -- opts = { limit, skip, path }
-function browse_log(dir, oid, opts)
+function g_exports.browse_log(dir, oid, opts)
     opts = opts or {}
     local limit = math.min(math.max(tonumber(opts.limit) or 30, 1), MAX_LOG)
     local skip  = math.max(tonumber(opts.skip) or 0, 0)
@@ -285,7 +285,7 @@ function browse_log(dir, oid, opts)
 end
 
 -- One commit, with the list of files it touched.
-function browse_commit(dir, oid)
+function g_exports.browse_commit(dir, oid)
     local r = git_exec({ 'show', '--no-patch', '--format=' .. LOG_FORMAT,
                          '--end-of-options', oid }, { cwd = dir })
     if not r.ok then return nil, 'unknown commit' end
@@ -320,12 +320,12 @@ function browse_commit(dir, oid)
             end
         end
     end
-    commit.files = json_array(files)
+    commit.files = util_json_array(files)
     return commit
 end
 
 -- Branches and tags, from one call each.
-function browse_refs(dir, kind)
+function g_exports.browse_refs(dir, kind)
     local prefix = (kind == 'tags') and 'refs/tags/' or 'refs/heads/'
     local r = git_exec({ 'for-each-ref', '--format=%(refname:short)\1%(objectname)\1%(creatordate:iso-strict)',
                          '--end-of-options', prefix }, { cwd = dir })

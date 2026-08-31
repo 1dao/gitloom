@@ -18,25 +18,25 @@
 -- run on a coroutine, and why nothing in this file may call git during load.
 --
 -- MODULE CONVENTION
--- app/*.lua export their public functions onto _G under a per-module prefix
--- instead of returning a table — see app/boot.lua for the rules and for the
--- strict_enable() guard that turns a mistyped name into an error. The load
--- order below IS the dependency order.
+-- app/*.lua run in separate environments. Bare top-level names stay private;
+-- public functions are installed on the one gitloom global, g_exports. The
+-- loader returned by app/boot.lua supports both Lua 5.1 (setfenv) and 5.2+.
 
-dofile('app/boot.lua')     -- global(), strict_enable()
-dofile('app/cfg.lua')      -- cfg*, log*                 (no deps)
-dofile('app/util.lua')     -- str_*, path_*, file_*, dir_*
-dofile('app/proc.lua')     -- proc_*, tmp_*
-dofile('app/pkt.lua')      -- pkt_*
-dofile('app/repo.lua')     -- repo_*
-dofile('app/git.lua')      -- git_*
-dofile('app/auth_ratelimit.lua')  -- authrl_*  (before auth.lua, which calls it)
-dofile('app/auth.lua')     -- auth_*
-dofile('app/http.lua')     -- http_*, resp_*
-dofile('app/stream.lua')   -- stream_*, resp_streamed
-dofile('app/browse.lua')   -- browse_*  (needs git_*, tmp_*, json_array)
-dofile('app/smart.lua')    -- smart_install
-dofile('app/api.lua')      -- api_install
+local boot = dofile('app/boot.lua')
+
+boot.load_script('app/cfg.lua')      -- cfg_*                       (no deps)
+boot.load_script('app/util.lua')     -- util_*
+boot.load_script('app/proc.lua')     -- proc_*
+boot.load_script('app/pkt.lua')      -- pkt_*
+boot.load_script('app/repo.lua')     -- repo_*
+boot.load_script('app/git.lua')      -- git_*
+boot.load_script('app/auth_ratelimit.lua')  -- auth_ratelimit_*  (before auth.lua)
+boot.load_script('app/auth.lua')     -- auth_*
+boot.load_script('app/http.lua')     -- http_*
+boot.load_script('app/stream.lua')   -- stream_*, stream_response
+boot.load_script('app/browse.lua')   -- browse_*
+boot.load_script('app/smart.lua')    -- smart_install
+boot.load_script('app/api.lua')      -- api_install
 
 -- xrouter carries the xproc workers' RPC replies back to this thread. Exposing
 -- its handler as __thread_handle is the only wiring that needs; without it
@@ -44,6 +44,13 @@ dofile('app/api.lua')      -- api_install
 -- failure with no explanation.
 local router = dofile('scripts/core/share/xrouter.lua')
 router.set_log_prefix('GITLOOM')
+
+-- Direct API calls below resolve through g_exports without copying each API
+-- into `_G`. Lua 5.1 changes this chunk's function environment; Lua 5.2+ uses
+-- the lexical _ENV introduced at this point.
+local main_env = boot.new_environment('main.lua')
+if _VERSION == 'Lua 5.1' then setfenv(1, main_env) end
+local _ENV = main_env
 
 local sweep_timer = nil
 
@@ -59,37 +66,37 @@ local sweep_timer = nil
 local function boot_async()
     local ok, err = proc_selftest()
     if not ok then
-        log_error('process pool self-test failed: %s', tostring(err))
+        cfg_log_error('process pool self-test failed: %s', tostring(err))
         xthread.stop(1)
         return
     end
 
     local version, verr = git_version()
     if not version then
-        log_error('git is not usable (GIT_BIN=%q): %s', git_bin(), tostring(verr))
-        log_error('gitloom drives the real git binary; install git or set GIT_BIN')
+        cfg_log_error('git is not usable (GIT_BIN=%q): %s', git_bin(), tostring(verr))
+        cfg_log_error('gitloom drives the real git binary; install git or set GIT_BIN')
         xthread.stop(1)
         return
     end
     local vok, want = git_version_ok(version)
     if not vok then
-        log_error('git %s is too old; gitloom needs >= %s', version, want)
+        cfg_log_error('git %s is too old; gitloom needs >= %s', version, want)
         xthread.stop(1)
         return
     end
     -- Cache it: /api/v1/version is unauthenticated, and re-running git per
     -- request let anyone occupy the whole process pool from outside.
     git_version_cache_set(version)
-    log_system('git %s via %q', version, git_bin())
+    cfg_log_system('git %s via %q', version, git_bin())
     git_stream_report()
 
     -- Debris from a previous run: a crash mid-clone leaves a half-written
     -- packfile nothing will ever come back for. Safe here because no request
     -- has been served yet.
-    tmp_purge()
+    proc_tmp_purge()
 
     local n = #repo_list()
-    log_system('gitloom ready — %d repository(ies) under %s', n, repo_root())
+    cfg_log_system('gitloom ready — %d repository(ies) under %s', n, repo_root())
 end
 
 -- ---------------------------------------------------------------------------
@@ -98,9 +105,9 @@ local function __init()
     assert(xnet.init())
     xtimer.init(16)
 
-    dir_make(cfg('DATA_DIR', 'data'))
-    dir_make(cfg('TMP_DIR', 'tmp'))
-    dir_make(repo_root())
+    util_dir_make(cfg_get('DATA_DIR', 'data'))
+    util_dir_make(cfg_get('TMP_DIR', 'tmp'))
+    util_dir_make(repo_root())
 
     local ok, err = proc_setup()
     if not ok then error('process pool failed to start: ' .. tostring(err)) end
@@ -113,7 +120,7 @@ local function __init()
     -- git children run with HOME pointed here so they cannot pick up the
     -- operator's ~/.gitconfig. The directory has to exist or git warns on every
     -- invocation.
-    dir_make(git_home_dir())
+    util_dir_make(git_home_dir())
 
     repo_index_load()
     auth_load()
@@ -133,22 +140,22 @@ local function __init()
     -- a timer, and one armed inside a request coroutine fires into freed memory
     -- once that coroutine is collected.
     sweep_timer = xtimer.add(cfg_int('TMP_SWEEP_MS', 60000), function()
-        tmp_sweep()
+        proc_tmp_sweep()
         -- Rate-limit buckets are created per source address, so on a public
         -- instance the table grows without bound unless stale ones are dropped.
-        authrl_gc()
+        auth_ratelimit_gc()
     end, -1)
 
     -- Lock _G. From here a mistyped global raises instead of evaluating to nil.
     -- After every module has loaded and before any request can arrive.
     if cfg_bool('STRICT_GLOBALS', true) then
-        strict_enable()
-        log_info('strict globals on')
+        boot.strict_enable()
+        cfg_log_info('strict globals on')
     end
 
     local resumed, rerr = coroutine.resume(coroutine.create(boot_async))
     if not resumed then
-        log_error('boot coroutine crashed: %s', tostring(rerr))
+        cfg_log_error('boot coroutine crashed: %s', tostring(rerr))
         xthread.stop(1)
     end
 end
@@ -157,7 +164,7 @@ local function __uninit()
     if sweep_timer then sweep_timer:del(); sweep_timer = nil end
     http_close()
     xnet.uninit()
-    log_system('gitloom stopped')
+    cfg_log_system('gitloom stopped')
 end
 
 return {

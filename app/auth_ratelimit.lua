@@ -1,7 +1,7 @@
 -- app/auth_ratelimit.lua — failure backoff for credential checks.
 --
--- Exports: authrl_check, authrl_record_failure, authrl_record_success,
---          authrl_gc, authrl_stats
+-- Exports: auth_ratelimit_check, auth_ratelimit_record_failure, auth_ratelimit_record_success,
+--          auth_ratelimit_gc, auth_ratelimit_stats
 --
 -- Moving PBKDF2 onto its own thread (worker/kdf.lua) stops one bad login from
 -- stalling the event loop. It does not stop a thousand of them from saturating
@@ -51,7 +51,7 @@ end
 
 -- May this (address, username) pair attempt a credential check right now?
 -- Returns true, or false plus the number of seconds left on the lockout.
-function authrl_check(ip, username)
+function g_exports.auth_ratelimit_check(ip, username)
     local max, window = limits()
     if max <= 0 then return true end            -- 0 disables the whole thing
 
@@ -66,7 +66,7 @@ function authrl_check(ip, username)
     return true
 end
 
-function authrl_record_failure(ip, username)
+function g_exports.auth_ratelimit_record_failure(ip, username)
     local max, window, lockout = limits()
     if max <= 0 then return end
 
@@ -76,14 +76,14 @@ function authrl_record_failure(ip, username)
         b.count = b.count + 1
         if b.count >= max and b.until_ts <= now then
             b.until_ts = now + lockout
-            log_warn('credential failures locked out by %s (%s): %d in %ds, %ds lockout',
+            cfg_log_warn('credential failures locked out by %s (%s): %d in %ds, %ds lockout',
                 name, name == 'ip' and tostring(ip) or tostring(username),
                 b.count, window, lockout)
         end
     end
 end
 
-function authrl_record_success(ip, username)
+function g_exports.auth_ratelimit_record_success(ip, username)
     if ip then by_ip[ip] = nil end
     if username then by_user[username] = nil end
 end
@@ -91,7 +91,7 @@ end
 -- Drop buckets nobody has touched for a while. Without this the tables grow
 -- once per distinct source address, which for a public instance is unbounded.
 -- Called from the same timer as the scratch sweeper.
-function authrl_gc()
+function g_exports.auth_ratelimit_gc()
     local _, window, lockout = limits()
     local now = os.time()
     local stale = math.max(window, lockout) * 2
@@ -108,7 +108,7 @@ function authrl_gc()
 end
 
 -- For the admin endpoint and for tests.
-function authrl_stats()
+function g_exports.auth_ratelimit_stats()
     local now = os.time()
     local ips, users, locked = 0, 0, 0
     for _, b in pairs(by_ip)   do ips   = ips   + 1; if b.until_ts > now then locked = locked + 1 end end

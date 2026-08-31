@@ -30,10 +30,9 @@
 
 local GIT_TIMEOUT_MS = nil    -- resolved on first use from config
 
--- Forward declaration. git_exec below closes over this, but the definition
--- lives with the rest of the environment reasoning further down; without the
--- declaration the reference would compile as a global and, under
--- strict_enable(), raise on the first git invocation.
+-- Forward declaration. git_exec below closes over this, while the definition
+-- lives with the rest of the environment reasoning further down. Keeping it
+-- lexical makes the dependency file-private instead of an environment lookup.
 local base_env
 
 local function git_timeout()
@@ -43,8 +42,8 @@ local function git_timeout()
     return GIT_TIMEOUT_MS
 end
 
-function git_bin()
-    return cfg('GIT_BIN', 'git')
+function g_exports.git_bin()
+    return cfg_get('GIT_BIN', 'git')
 end
 
 -- ---------------------------------------------------------------------------
@@ -62,7 +61,7 @@ end
 --
 -- Returns xproc's result table: { ok, exit_code, stdout, stderr, err, ... }.
 -- Coroutine-only.
-function git_exec(args, opts)
+function g_exports.git_exec(args, opts)
     opts = opts or {}
     local argv = { git_bin() }
     for _, a in ipairs(args) do argv[#argv + 1] = tostring(a) end
@@ -102,14 +101,14 @@ local MIN_GIT = { 2, 25, 0 }
 --
 -- Only the first three components: on Windows the string is '2.52.0.windows.1',
 -- and the vendor suffix is not part of any comparison we want to make.
-function git_version()
+function g_exports.git_version()
     local r = git_exec({ '--version' })
     if not r.ok then
-        local msg = str_trim(r.stderr or '')
+        local msg = util_str_trim(r.stderr or '')
         return nil, msg ~= '' and msg or tostring(r.err)
     end
-    local v = str_trim(r.stdout):match('git version (%d+%.%d+%.%d+)')
-    return v or str_trim(r.stdout)
+    local v = util_str_trim(r.stdout):match('git version (%d+%.%d+%.%d+)')
+    return v or util_str_trim(r.stdout)
 end
 
 -- The version read once at boot. Serving it from here rather than re-running
@@ -118,11 +117,11 @@ end
 -- process pool from outside and stall every clone on the instance.
 local cached_version = nil
 
-function git_version_cache_set(v) cached_version = v end
-function git_version_cached()     return cached_version end
+function g_exports.git_version_cache_set(v) cached_version = v end
+function g_exports.git_version_cached()     return cached_version end
 
 -- Is `version` (as returned above) at least MIN_GIT? Returns ok, wanted-string.
-function git_version_ok(version)
+function g_exports.git_version_ok(version)
     local want = table.concat(MIN_GIT, '.')
     local a, b, c = tostring(version or ''):match('^(%d+)%.(%d+)%.(%d+)')
     if not a then return false, want end
@@ -167,7 +166,7 @@ end
 --   GIT_NO_REPLACE_OBJECTS  refs/replace/* must not rewrite what we serve
 --   LC_ALL                stable, parseable output regardless of server locale
 base_env = function()
-    local home = path_join(cfg('DATA_DIR', 'data'), 'githome')
+    local home = util_path_join(cfg_get('DATA_DIR', 'data'), 'githome')
     return {
         GIT_CONFIG_NOSYSTEM    = '1',
         HOME                   = home,
@@ -182,11 +181,11 @@ end
 
 -- The isolated HOME has to exist, or git warns on every invocation. Created
 -- once at boot from main.lua.
-function git_home_dir()
-    return path_join(cfg('DATA_DIR', 'data'), 'githome')
+function g_exports.git_home_dir()
+    return util_path_join(cfg_get('DATA_DIR', 'data'), 'githome')
 end
 
-function git_env_for_request(req, user)
+function g_exports.git_env_for_request(req, user)
     local env = base_env()
 
     local proto = req.headers and req.headers['git-protocol']
@@ -212,13 +211,13 @@ end
 --
 -- The repository is passed as '.' with cwd set to it, so the path never travels
 -- through the shell quoting layer at all.
-function git_advertise(dir, service, env)
+function g_exports.git_advertise(dir, service, env)
     local verb = service:gsub('^git%-', '')
     local r = git_exec({ verb, '--stateless-rpc', '--advertise-refs', '.' },
                        { cwd = dir, env = env })
     if not r.ok then
         return nil, string.format('%s --advertise-refs failed: %s %s',
-            verb, tostring(r.err), str_trim(r.stderr or ''))
+            verb, tostring(r.err), util_str_trim(r.stderr or ''))
     end
     return pkt_service_header(service) .. r.stdout
 end
@@ -235,16 +234,16 @@ end
 --   env       from git_env_for_request
 --
 -- On success returns (out_path, nil): the caller sends that file and then
--- tmp_release()s it. On failure returns (nil, message) and any scratch file has
+-- proc_tmp_release()s it. On failure returns (nil, message) and any scratch file has
 -- already been released.
-function git_service(dir, service, body, env)
+function g_exports.git_service(dir, service, body, env)
     local verb = service:gsub('^git%-', '')
-    local in_path  = tmp_path('in')
-    local out_path = tmp_path('out')
+    local in_path  = proc_tmp_path('in')
+    local out_path = proc_tmp_path('out')
 
-    local wok, werr = file_write(in_path, body)
+    local wok, werr = util_file_write(in_path, body)
     if not wok then
-        tmp_release(in_path)
+        proc_tmp_release(in_path)
         return nil, 'staging the request body failed: ' .. tostring(werr)
     end
 
@@ -256,20 +255,20 @@ function git_service(dir, service, body, env)
     })
 
     -- The input file has done its job either way.
-    tmp_release(in_path)
+    proc_tmp_release(in_path)
 
     if not r.ok then
-        tmp_release(out_path)
+        proc_tmp_release(out_path)
         return nil, string.format('%s failed: %s %s',
-            verb, tostring(r.err), str_trim(r.stderr or ''))
+            verb, tostring(r.err), util_str_trim(r.stderr or ''))
     end
 
     -- receive-pack reports hook output and per-ref results on stderr even when
     -- it succeeds; that is the only place a rejected push explains itself, so
     -- it goes to the log rather than being dropped.
-    local errtext = str_trim(r.stderr or '')
+    local errtext = util_str_trim(r.stderr or '')
     if errtext ~= '' then
-        log_info('%s %s: %s', verb, dir, errtext:gsub('\n', ' | '))
+        cfg_log_info('%s %s: %s', verb, dir, errtext:gsub('\n', ' | '))
     end
 
     return out_path
@@ -295,8 +294,8 @@ if not xproc_ok then xproc_mod = nil end
 -- file-staging path everywhere. The switch exists because this path is new and
 -- its C half has not yet run on a real Linux host -- an operator who hits
 -- trouble should be able to fall back without editing code or rebuilding.
-function git_stream_enabled()
-    local mode = tostring(cfg('GIT_STREAM', 'auto')):lower()
+function g_exports.git_stream_enabled()
+    local mode = tostring(cfg_get('GIT_STREAM', 'auto')):lower()
     if mode == 'off' or mode == '0' then return false end
     if not xproc_mod then return false end
     return xproc_mod.supported()
@@ -334,16 +333,16 @@ end
 -- Say once, at boot, which transport path is in use. Otherwise the difference
 -- between "streaming" and "staging through files" is invisible until someone
 -- measures a clone and wonders why it is slow.
-function git_stream_report()
+function g_exports.git_stream_report()
     if git_stream_enabled() then
-        log_system('smart-HTTP transport: streaming (pipes via xproc), ' ..
+        cfg_log_system('smart-HTTP transport: streaming (pipes via xproc), ' ..
                    'at most %d concurrent (then file staging)', stream_max())
     elseif not xproc_mod then
-        log_system('smart-HTTP transport: file staging ' ..
+        cfg_log_system('smart-HTTP transport: file staging ' ..
                    '(this runtime has no xproc module)')
     else
-        log_system('smart-HTTP transport: file staging (%s)',
-            tostring(cfg('GIT_STREAM', 'auto')):lower() == 'off'
+        cfg_log_system('smart-HTTP transport: file staging (%s)',
+            tostring(cfg_get('GIT_STREAM', 'auto')):lower() == 'off'
                 and 'GIT_STREAM=off' or 'xproc unsupported on this platform')
     end
 end
@@ -384,7 +383,7 @@ local function stream_rpc(dir, service, body, env, conn, headers)
         if drain_timer then drain_timer:del(); drain_timer = nil end
         local ok, e = coroutine.resume(co)
         if not ok then
-            log_error('%s stream coroutine crashed: %s', verb, tostring(e))
+            cfg_log_error('%s stream coroutine crashed: %s', verb, tostring(e))
         end
     end
 
@@ -484,7 +483,7 @@ local function stream_rpc(dir, service, body, env, conn, headers)
     if limit > 0 then
         kill_timer = xtimer.add(limit * 1000, function()
             kill_timer = nil
-            log_warn('%s exceeded %ds, killing pid %d', verb, limit, h.pid)
+            cfg_log_warn('%s exceeded %ds, killing pid %d', verb, limit, h.pid)
             xproc_mod.kill(h.pid, true)
         end, 1)
     end
@@ -499,15 +498,15 @@ local function stream_rpc(dir, service, body, env, conn, headers)
     local exited, code = xproc_mod.wait(h.pid, false)
     if not exited or type(code) ~= 'number' then
         if not exited then
-            log_warn('%s: wait on pid %d failed (%s); treating it as a failure',
+            cfg_log_warn('%s: wait on pid %d failed (%s); treating it as a failure',
                 verb, h.pid, tostring(code))
         end
         code = -1
     end
 
-    local errtext = str_trim(table.concat(errparts))
+    local errtext = util_str_trim(table.concat(errparts))
     if errtext ~= '' then
-        log_info('%s %s: %s', verb, dir, errtext:gsub('\n', ' | '))
+        cfg_log_info('%s %s: %s', verb, dir, errtext:gsub('\n', ' | '))
     end
 
     if send_failed then
@@ -551,10 +550,10 @@ end
 --                   caller should send an error response
 --
 -- Coroutine-only.
-function git_service_stream(dir, service, body, env, conn, headers)
+function g_exports.git_service_stream(dir, service, body, env, conn, headers)
     local max = stream_max()
     if max > 0 and streams_active >= max then
-        log_warn('%s: all %d streaming slot(s) busy, staging through files instead',
+        cfg_log_warn('%s: all %d streaming slot(s) busy, staging through files instead',
             service, max)
         return false
     end
@@ -570,7 +569,7 @@ function git_service_stream(dir, service, body, env, conn, headers)
     streams_active = streams_active - 1
     if ok then return a, b end
 
-    log_error('%s stream raised: %s', service, tostring(a))
+    cfg_log_error('%s stream raised: %s', service, tostring(a))
     if stream_is_committed(conn) then
         -- Part of the response is already out; there is no status left to send.
         stream_abort(conn, 'stream handler error')
@@ -585,18 +584,18 @@ end
 
 -- The branch HEAD points at, without resolving it to a commit — works on an
 -- empty repository, where rev-parse would fail.
-function git_head_ref(dir)
+function g_exports.git_head_ref(dir)
     local r = git_exec({ 'symbolic-ref', '--short', 'HEAD' }, { cwd = dir })
     if not r.ok then return nil end
-    return str_trim(r.stdout)
+    return util_str_trim(r.stdout)
 end
 
 -- Every ref as { name = 'refs/heads/main', oid = '...', type = 'commit' }.
 -- Empty table on an empty repository — not an error.
-function git_refs(dir)
+function g_exports.git_refs(dir)
     local r = git_exec({ 'for-each-ref', '--format=%(refname) %(objectname) %(objecttype)' },
                        { cwd = dir })
-    if not r.ok then return nil, str_trim(r.stderr or tostring(r.err)) end
+    if not r.ok then return nil, util_str_trim(r.stderr or tostring(r.err)) end
     local out = {}
     for line in tostring(r.stdout):gmatch('[^\r\n]+') do
         local name, oid, kind = line:match('^(%S+)%s+(%S+)%s+(%S+)$')

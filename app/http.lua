@@ -2,8 +2,8 @@
 --
 -- Exports: http_get, http_post, http_put, http_delete, http_route,
 --          http_fallback, http_listen, http_dispatch,
---          resp_text, resp_json, resp_error, resp_file, resp_redirect,
---          safe_error
+--          http_response_text, http_response_json, http_response_error, http_response_file, http_response_redirect,
+--          http_safe_error
 --
 -- Shape lifted from xpauth's main.lua: xnet.listen with raw framing, the codec
 -- parsing whole requests out of a per-connection buffer, and ONE COROUTINE PER
@@ -32,10 +32,10 @@ local is_https  = false
 -- Response helpers
 --
 -- A response is a plain table { status, body, headers, file }. `file` names a
--- path the C layer streams straight to the socket — see resp_file.
+-- path the C layer streams straight to the socket — see http_response_file.
 -- ---------------------------------------------------------------------------
 
-function resp_text(status, body, content_type)
+function g_exports.http_response_text(status, body, content_type)
     return {
         status = status or 200,
         body = tostring(body or ''),
@@ -43,15 +43,15 @@ function resp_text(status, body, content_type)
     }
 end
 
-function resp_json(status, value)
+function g_exports.http_response_json(status, value)
     local xutils = require('xutils')
     local json = xutils.json_pack(value)
-    if json then json = json_fix_arrays(json) end
+    if json then json = util_json_fix_arrays(json) end
     if not json then
         -- json_pack returns nil rather than raising when a string is not valid
         -- UTF-8. Letting that through would send an empty body with a 200.
-        log_error('json_pack failed for a %s response', tostring(status))
-        return resp_text(500, 'response serialisation failed')
+        cfg_log_error('json_pack failed for a %s response', tostring(status))
+        return http_response_text(500, 'response serialisation failed')
     end
     return {
         status = status or 200,
@@ -67,18 +67,18 @@ end
 -- argument" — which handed an ordinary authenticated caller the absolute
 -- install path, the operator's account name, and the on-disk layout. The full
 -- text still goes to the log, where it belongs.
-function safe_error(message)
+function g_exports.http_safe_error(message)
     local s = tostring(message or 'error')
     s = s:gsub('%a:[/\\][^%s\'"]*', '<path>')      -- C:\... or C:/...
     s = s:gsub('/[%w_.-]+/[^%s\'"]*', '<path>')    -- /home/alice/...
     return s
 end
 
-function resp_error(status, message)
-    return resp_json(status, { error = tostring(message or 'error'), status = status })
+function g_exports.http_response_error(status, message)
+    return http_response_json(status, { error = tostring(message or 'error'), status = status })
 end
 
-function resp_redirect(location, status)
+function g_exports.http_response_redirect(location, status)
     return { status = status or 302, body = '',
              headers = { ['Location'] = tostring(location) } }
 end
@@ -91,9 +91,9 @@ end
 -- what makes serving a multi-gigabyte packfile possible in a runtime with no
 -- response streaming.
 --
--- The caller keeps ownership of the file: hand it to tmp_release() after this,
+-- The caller keeps ownership of the file: hand it to proc_tmp_release() after this,
 -- never to os.remove — the C layer still has it open.
-function resp_file(path, content_type, headers)
+function g_exports.http_response_file(path, content_type, headers)
     return {
         status = 200,
         file = path,
@@ -137,7 +137,7 @@ local function compile(pattern)
     return segs, names
 end
 
-function http_route(method, pattern, handler)
+function g_exports.http_route(method, pattern, handler)
     method = method:upper()
     routes[method] = routes[method] or {}
     local segs, names = compile(pattern)
@@ -145,22 +145,22 @@ function http_route(method, pattern, handler)
                                    handler = handler, raw = pattern })
 end
 
-function http_get(p, h)    http_route('GET', p, h)    end
-function http_post(p, h)   http_route('POST', p, h)   end
-function http_put(p, h)    http_route('PUT', p, h)    end
-function http_delete(p, h) http_route('DELETE', p, h) end
+function g_exports.http_get(p, h)    http_route('GET', p, h)    end
+function g_exports.http_post(p, h)   http_route('POST', p, h)   end
+function g_exports.http_put(p, h)    http_route('PUT', p, h)    end
+function g_exports.http_delete(p, h) http_route('DELETE', p, h) end
 
 -- Register a whole-path matcher. It receives (req, ctx) and returns a response
 -- table to claim the request, or nil to decline and let the next one look.
 -- Checked in registration order, only after the route table misses.
-function http_fallback(fn)
+function g_exports.http_fallback(fn)
     fallbacks[#fallbacks + 1] = fn
 end
 
 local function match_route(method, path)
     local list = routes[method:upper()]
     if not list then return nil end
-    local parts = str_split(path, '/')
+    local parts = util_str_split(path, '/')
 
     for _, r in ipairs(list) do
         local n = #r.segs
@@ -194,7 +194,7 @@ end
 
 -- Resolve one request to a response table. Exported so a test can drive routing
 -- without opening a socket.
-function http_dispatch(req, ctx)
+function g_exports.http_dispatch(req, ctx)
     local handler, params = match_route(req.method, req.path)
     if handler then
         ctx.params = params
@@ -204,7 +204,7 @@ function http_dispatch(req, ctx)
         local resp = fn(req, ctx)
         if resp then return resp end
     end
-    return resp_error(404, 'not found')
+    return http_response_error(404, 'not found')
 end
 
 -- ---------------------------------------------------------------------------
@@ -319,8 +319,8 @@ local function serve_one(conn, st)
         local ctx = { ip = st.ip, conn = conn, https = st.https }
         local ok, resp = pcall(http_dispatch, req, ctx)
         if not ok then
-            log_error('handler error on %s %s: %s', req.method, req.path, tostring(resp))
-            resp = resp_error(500, 'internal error')
+            cfg_log_error('handler error on %s %s: %s', req.method, req.path, tostring(resp))
+            resp = http_response_error(500, 'internal error')
         end
         if not st.dead then
             if stream_is_committed(conn) then
@@ -330,16 +330,16 @@ local function serve_one(conn, st)
                 -- the wire, so the client reports a corrupt packfile and never
                 -- sees the error. Closing without the terminating chunk is the
                 -- only signal left; see stream_abort.
-                if not ok or not resp_is_streamed(resp) then
+                if not ok or not stream_response_is_streamed(resp) then
                     stream_abort(conn, 'handler did not finish a committed response')
                 end
-            elseif not resp_is_streamed(resp) then
+            elseif not stream_response_is_streamed(resp) then
                 codec.send_response(conn, req, resp, resp_opts)
             end
             -- Scratch files handed to send_file_response stay open in C until
             -- the response drains; releasing them here queues them for the
             -- sweeper rather than deleting them out from under the send.
-            if resp and resp.release_file then tmp_release(resp.release_file) end
+            if resp and resp.release_file then proc_tmp_release(resp.release_file) end
             if not req.keep_alive and not st.dead then
                 -- close_after_flush, NOT close: everything above only QUEUES
                 -- bytes — send_response hands a file to the C layer, and a
@@ -357,7 +357,7 @@ local function serve_one(conn, st)
 
     local resumed, e = coroutine.resume(co)
     if not resumed then
-        log_error('request coroutine crashed: %s', tostring(e))
+        cfg_log_error('request coroutine crashed: %s', tostring(e))
         st.busy = false
     end
     return true
@@ -392,7 +392,7 @@ function handler.on_connect(conn, ip, _port)
             st.hs = nil
             if st.dead then return end
             st.dead = true
-            log_warn('no request from %s within %dms (%d buffered byte(s)), closing',
+            cfg_log_warn('no request from %s within %dms (%d buffered byte(s)), closing',
                 st.ip, HANDSHAKE_MS, #st.buf)
             conn:close('handshake timeout')
         end, 1)
@@ -442,27 +442,27 @@ end
 -- one code path instead of two. The attach happens on THIS thread, because the
 -- request coroutines, the connection table and the scratch sweeper all live on
 -- this Lua state.
-function http_listen()
+function g_exports.http_listen()
     MAX_REQUEST  = cfg_int('MAX_REQUEST_SIZE_MB', 64) * 1024 * 1024
     HANDSHAKE_MS = cfg_int('HANDSHAKE_TIMEOUT_SEC', 30) * 1000
     resp_opts    = { server_name = 'gitloom' }
     -- decompress: git gzips request bodies above a few KiB, so without this a
     -- large fetch arrives as compressed bytes and upload-pack rejects it.
     -- No response compression is configured: git bodies are already deflated,
-    -- and compressing would defeat resp_file, which never builds a body string.
+    -- and compressing would defeat http_response_file, which never builds a body string.
     parse_opts   = { max_request_size = MAX_REQUEST, decompress = true }
 
-    local host  = cfg('LISTEN_HOST', '0.0.0.0')
+    local host  = cfg_get('LISTEN_HOST', '0.0.0.0')
     local port  = cfg_int('LISTEN_PORT', 8686)
     local https = cfg_bool('HTTPS', false)
 
     local tls = nil
     if https then
-        local cert, keyf = cfg('TLS_CERT_FILE', ''), cfg('TLS_KEY_FILE', '')
+        local cert, keyf = cfg_get('TLS_CERT_FILE', ''), cfg_get('TLS_KEY_FILE', '')
         if cert == '' or keyf == '' then
             return nil, 'HTTPS=1 needs TLS_CERT_FILE and TLS_KEY_FILE'
         end
-        local pw = cfg('TLS_KEY_PASSWORD', '')
+        local pw = cfg_get('TLS_KEY_PASSWORD', '')
         tls = { cert_file = cert, key_file = keyf,
                 password = pw ~= '' and pw or nil, max_packet = MAX_REQUEST }
     end
@@ -477,13 +477,13 @@ function http_listen()
             end
             if not conn then
                 -- One client's failed handshake is not the listener's problem.
-                log_warn('attach failed from %s: %s', tostring(ip), tostring(aerr))
+                cfg_log_warn('attach failed from %s: %s', tostring(ip), tostring(aerr))
                 return false
             end
             return true
         end,
         on_close = function(_, reason)
-            log_warn('listener closed: %s', tostring(reason))
+            cfg_log_warn('listener closed: %s', tostring(reason))
         end,
     })
     if not s then
@@ -492,16 +492,16 @@ function http_listen()
     server = s
     is_https = https
 
-    log_system('listening on %s://%s:%d (max request %d MiB)',
+    cfg_log_system('listening on %s://%s:%d (max request %d MiB)',
         https and 'https' or 'http', host, port, cfg_int('MAX_REQUEST_SIZE_MB', 64))
     if not https then
-        log_warn('HTTPS is off: git sends HTTP Basic credentials in clear text on ' ..
+        cfg_log_warn('HTTPS is off: git sends HTTP Basic credentials in clear text on ' ..
                  'every request, so set HTTPS=1 (or front this with TLS) before ' ..
                  'exposing it beyond localhost')
     end
     return true
 end
 
-function http_close()
+function g_exports.http_close()
     if server then server:close('shutdown'); server = nil end
 end
