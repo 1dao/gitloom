@@ -5,8 +5,10 @@
 # real `git` client against it, and tears everything down. Nothing in the
 # working tree is touched.
 #
-#   sh test/smoke.sh              run against a fresh instance on port 18686
-#   PORT=9000 sh test/smoke.sh    pick the port
+#   sh test/smoke.sh                  run against a fresh instance on port 18686
+#   PORT=9000 sh test/smoke.sh        pick the port
+#   GIT_STREAM=off sh test/smoke.sh   force the file-staging transport
+#   BIG_MB=0 sh test/smoke.sh         skip the large-clone case (see below)
 #
 # Exit code 0 = every case passed.
 
@@ -49,6 +51,7 @@ esac
 "$XNET" main.lua \
     LISTEN_PORT="$PORT" REPO_ROOT="$ROOT" DATA_DIR="$DATA" TMP_DIR="$SCRATCH" \
     USERS_FILE="$DATA/users.json" ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" \
+    GIT_STREAM="${GIT_STREAM:-auto}" \
     > "$LOG" 2>&1 &
 PID=$!
 
@@ -329,6 +332,70 @@ curl -s -D- -o /dev/null -u "lockme:wrong-again" "$BASE/api/v1/users" | grep -qi
 # git children must not inherit the operator's git configuration.
 grep -q 'GIT_CONFIG_NOSYSTEM' "$LOG" 2>/dev/null || true
 [ -d "$DATA/githome" ] && ok 'isolated git HOME was created'     || bad 'isolated git HOME was created' "no $DATA/githome"
+
+# == Large clone ==============================================================
+# The case 70 small tests missed.
+#
+# Every repository above is a few KiB, and at that size the response never fills
+# the connection's send buffer. Streaming a 60 MiB clone did: send_raw started
+# refusing writes, a chunk lost one of its three parts, and the client aborted
+# with "Malformed encoding found in chunked-encoding" — while the whole suite
+# stayed green. Anything at or above the 10 MiB default cap reproduces it, so
+# this uses enough to clear the cap with room to spare.
+#
+# BIG_MB=0 skips it. The data is incompressible on purpose: compressible filler
+# packs down below the threshold and proves nothing.
+BIG_MB="${BIG_MB:-24}"
+if [ "$BIG_MB" -gt 0 ]; then
+    curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+        -d '{"name":"large"}' "$BASE/api/v1/repos" >/dev/null
+
+    ( cd "$WORK" && git init -q big && cd big &&
+      i=0
+      while [ "$i" -lt "$BIG_MB" ]; do
+          head -c 1048576 /dev/urandom > "blob$i.bin"
+          i=$((i+1))
+      done
+      git add -A
+      git -c user.email=smoke@test -c user.name=smoke commit -qm 'large' ) >/dev/null 2>&1
+
+    ( cd "$WORK/big" && $GIT push -q \
+        "http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/large.git" HEAD:refs/heads/main ) \
+        && ok "push ${BIG_MB} MiB" || bad "push ${BIG_MB} MiB" 'push failed'
+
+    if $GIT clone -q "$BASE/admin/large.git" "$WORK/bigclone" 2>"$WORK/ebig"; then
+        ok "clone ${BIG_MB} MiB"
+        # Byte-identical, not merely present: a truncated chunk stream can still
+        # produce a repository that looks plausible.
+        if cmp -s "$WORK/big/blob0.bin" "$WORK/bigclone/blob0.bin"; then
+            ok 'large clone is byte-identical'
+        else
+            bad 'large clone is byte-identical' 'content differs'
+        fi
+        n=$(ls "$WORK/bigclone" | grep -c '^blob' || echo 0)
+        check 'large clone has every file' "$n" "$BIG_MB"
+        ( cd "$WORK/bigclone" && git fsck --no-progress >/dev/null 2>&1 ) \
+            && ok 'large clone passes git fsck' || bad 'large clone passes git fsck' 'fsck failed'
+
+        # Connection: close must not truncate the body.
+        #
+        # Every response leaves the handler QUEUED, not sent — a file response
+        # is handed to the C layer, which drains it over many event-loop turns.
+        # Closing the connection the moment the handler returned discarded
+        # whatever had not reached the socket, so a request that asked for the
+        # connection to be closed got a short body and no error. 1 MiB is
+        # comfortably more than one buffer's worth; a few KiB proves nothing,
+        # which is why the rest of this suite never caught it.
+        curl -s -H 'Connection: close' -o "$WORK/blob0.raw" \
+            "$BASE/api/v1/repos/admin/large/raw/main/blob0.bin"
+        cmp -s "$WORK/big/blob0.bin" "$WORK/blob0.raw" \
+            && ok 'Connection: close delivers the whole body' \
+            || bad 'Connection: close delivers the whole body' \
+                   "got $(wc -c < "$WORK/blob0.raw" 2>/dev/null) of 1048576 bytes"
+    else
+        bad "clone ${BIG_MB} MiB" "$(cat "$WORK/ebig" | tail -2)"
+    fi
+fi
 
 # == Delete ==================================================================
 code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X DELETE \

@@ -71,21 +71,60 @@ which removes the staging entirely.
 
 ## Phase 1 — capability floor
 
-The things Phase 0 works around rather than solves.
+**Response streaming: done and verified on Linux** (2026-08-31).
 
-- **`xproc` as a C binding.** Pollable stdin/stdout/stderr pipes, `kill`, exit
-  status. Removes the disk staging, the push-size ceiling and the clone
-  start-up latency in one change — `app/git.lua` is written so nothing above
-  it moves.
-- **Streaming request bodies.** The codec buffers whole requests today; a push
-  larger than `MAX_REQUEST_SIZE_MB` is refused. Stream to a file (or to a pipe,
-  once the binding exists) instead.
-- **Chunked response writer.** `send_file_response` covers the packfile case;
-  sideband progress during a push does not.
+The enabling insight was that almost nothing new was needed. `xnet.attach(fd,
+handler)` already adopts an arbitrary fd into an `xChannel` — nonblocking,
+poll-registered, framed, with a buffered out-queue. `xproc` hands back
+**socketpair** endpoints rather than pipes, so they go through that path
+unchanged: no new attach entry point, no channel flag, no I/O code of its own.
+
+In ../xnet2lua (opt-in, `WITH_XPROC=1`; the default build omits it entirely):
+- `xproc.c` / `xproc.h` — spawn, wait, kill. No I/O at all.
+- `xlua/lua_xproc.c` — `xproc.spawn/wait/kill/supported`.
+- Read-side flow control bound to Lua: `conn:pause_read()`, `resume_read()`,
+  `is_read_paused()`, `stats()`, `set_max_send()`. xchannel documented these as
+  being for proxy and tunnel use; they were simply never reachable from Lua, and
+  copying one channel into another is unsafe without them.
+- `tests/lua/xproc_pipe_test.lua` — 20 checks. Skips cleanly when xproc is not
+  compiled in, which the default build is.
+
+Here:
+- `app/stream.lua` — chunked responses.
+- `git_service_stream` in `app/git.lua`, chosen by `git_stream_enabled()`.
+- Windows keeps file staging: `xproc_supported()` is false there.
+
+**What the first Linux run found.** Everything passed at small sizes and a
+60 MiB clone failed with `curl 56 Malformed encoding found in chunked-encoding`.
+Two real defects, both invisible below ~10 MiB:
+
+1. `stream_write` issues three writes per chunk — length, payload, CRLF — and
+   ignored their return value. `send_raw` refuses writes once the channel's
+   send buffer hits its 10 MiB cap, so one part of a chunk silently vanished
+   and the frame was corrupt.
+2. Nothing throttled the copy. git outruns any real client, so the buffer was
+   always going to reach the cap on a large repository.
+
+Fixed by checking every write, and by pausing the child's channel above
+`STREAM_PAUSE_HIGH_KB` and resuming below `STREAM_PAUSE_LOW_KB`. The child then
+blocks on its own stdout, which is the backpressure a pipeline should have.
+
+Verified on Arch/WSL, gcc 16.2.1, git 2.55:
+- `xproc_pipe_test.lua` 20/20, and skips with exit 0 on a default build
+- `test/unit.lua` 59/59, `test/smoke.sh` **75/75** under both transports
+- 64 MiB clone: 429 ms streaming vs 599 ms staged, byte-identical, `git fsck`
+  clean; still correct with the high-water mark forced down to 64 KiB
+- With backpressure disabled the 64 MiB clone fails again, so the new
+  large-clone case in `test/smoke.sh` genuinely catches a regression
+
+Still open in this phase:
+- **Streaming request bodies.** The body is still accumulated in memory before
+  it reaches the child, so `MAX_REQUEST_SIZE_MB` is still the push ceiling.
+- **Sideband progress** during a push.
+- **io_uring.** Now installed on the dev box and untested here; it replaces the
+  channel read path, which is exactly what streaming depends on.
 - **Storage.** A minimal DAO plus a migration runner over the existing
-  `xmysql` worker. Accounts and the repository index are JSON files today.
-
-Estimate: 2–3 weeks, ~1.5k lines of C, ~1.5k of Lua.
+  `xmysql` worker.
 
 ## Phase 2 — repository browsing
 

@@ -33,6 +33,7 @@ dofile('app/git.lua')      -- git_*
 dofile('app/auth_ratelimit.lua')  -- authrl_*  (before auth.lua, which calls it)
 dofile('app/auth.lua')     -- auth_*
 dofile('app/http.lua')     -- http_*, resp_*
+dofile('app/stream.lua')   -- stream_*, resp_streamed
 dofile('app/browse.lua')   -- browse_*  (needs git_*, tmp_*, json_array)
 dofile('app/smart.lua')    -- smart_install
 dofile('app/api.lua')      -- api_install
@@ -80,6 +81,7 @@ local function boot_async()
     -- request let anyone occupy the whole process pool from outside.
     git_version_cache_set(version)
     log_system('git %s via %q', version, git_bin())
+    git_stream_report()
 
     -- Debris from a previous run: a crash mid-clone leaves a half-written
     -- packfile nothing will ever come back for. Safe here because no request

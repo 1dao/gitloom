@@ -122,7 +122,8 @@ end
 -- POST <repo>/git-upload-pack | <repo>/git-receive-pack
 -- ---------------------------------------------------------------------------
 
-local function service_rpc(req, prefix, service)
+-- ctx carries the connection, which the streaming path writes to directly.
+local function service_rpc(req, ctx, prefix, service)
     local spec = SERVICES[service]
 
     -- The body is a protocol message, not a form. Requiring the content type
@@ -136,8 +137,42 @@ local function service_rpc(req, prefix, service)
     local rec, dir_or_resp, user = authorise(req, prefix, spec.write)
     if not rec then return dir_or_resp end
 
-    local out_path, err = git_service(dir_or_resp, service, req.body or '',
-                                      git_env_for_request(req, user))
+    local env = git_env_for_request(req, user)
+    local result_type = 'application/x-git-' .. spec.verb .. '-result'
+
+    -- Two ways to run this, chosen by what the platform can do.
+    --
+    -- STREAMING (Linux): the child's stdout goes out as chunked HTTP as it is
+    -- produced, so the client sees bytes as soon as git emits them. Requires
+    -- pollable pipes, which means POSIX — see git_stream_enabled.
+    --
+    -- STAGED (Windows, or GIT_STREAM=off): the whole output lands in a file
+    -- first, because Content-Length cannot be known before git finishes. The
+    -- client waits for the entire operation before the first byte moves.
+    --
+    -- The streaming path is capped (GIT_STREAM_MAX): a `false` return means
+    -- every slot was busy and nothing was spawned, so this falls through to
+    -- staging, which queues on the process pool instead of adding another git.
+    -- Only `nil` is a failure.
+    if git_stream_enabled() then
+        local ok, serr = git_service_stream(dir_or_resp, service, req.body or '',
+                                            env, ctx.conn, no_cache({
+                                                ['Content-Type'] = result_type,
+                                            }))
+        if ok then
+            if spec.write then
+                local hok, herr = pcall(repo_sync_head, rec)
+                if not hok then log_warn('HEAD sync after push failed: %s', tostring(herr)) end
+            end
+            return resp_streamed()
+        end
+        if ok == nil then
+            log_error('%s stream failed for %s: %s', service, prefix, tostring(serr))
+            return resp_text(500, service .. ' failed\n')
+        end
+    end
+
+    local out_path, err = git_service(dir_or_resp, service, req.body or '', env)
     if not out_path then
         log_error('%s failed for %s: %s', service, prefix, tostring(err))
         return resp_text(500, service .. ' failed\n')
@@ -175,7 +210,7 @@ local SUFFIXES = {
 -- looking in the wrong place.
 local DUMB_HINTS = { '/HEAD', '/objects/info/packs', '/objects/info/alternates' }
 
-local function smart_dispatch(req, _ctx)
+local function smart_dispatch(req, ctx)
     local path = req.path or '/'
 
     for _, s in ipairs(SUFFIXES) do
@@ -185,7 +220,7 @@ local function smart_dispatch(req, _ctx)
             end
             local prefix = path:sub(1, #path - #s.suffix)
             if s.fn == 'info_refs' then return info_refs(req, prefix) end
-            return service_rpc(req, prefix, s.service)
+            return service_rpc(req, ctx, prefix, s.service)
         end
     end
 

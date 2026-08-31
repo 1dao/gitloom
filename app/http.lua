@@ -293,7 +293,9 @@ local function serve_one(conn, st)
         if err == 'incomplete' then return false end
         codec.send_error(conn, 400, err, resp_opts)
         st.dead = true
-        conn:close('bad request')
+        -- The error was queued, not sent; close() would throw it away and the
+        -- client would see a bare disconnect instead of the reason.
+        conn:close_after_flush('bad request')
         return false
     end
 
@@ -308,6 +310,11 @@ local function serve_one(conn, st)
     st.need = nil          -- the next request has to be measured on its own
     st.busy = true
 
+    -- This request has written nothing yet. Cleared here rather than when the
+    -- previous stream finished, so that a failure AFTER a stream's terminating
+    -- chunk is still treated as "already committed" and not answered twice.
+    stream_reset(conn)
+
     local co = coroutine.create(function()
         local ctx = { ip = st.ip, conn = conn, https = st.https }
         local ok, resp = pcall(http_dispatch, req, ctx)
@@ -316,14 +323,32 @@ local function serve_one(conn, st)
             resp = resp_error(500, 'internal error')
         end
         if not st.dead then
-            codec.send_response(conn, req, resp, resp_opts)
+            if stream_is_committed(conn) then
+                -- A streamed response has already written itself, headers and
+                -- all, straight to the connection. Sending anything now — the
+                -- 500 above included — appends it to a body that is already on
+                -- the wire, so the client reports a corrupt packfile and never
+                -- sees the error. Closing without the terminating chunk is the
+                -- only signal left; see stream_abort.
+                if not ok or not resp_is_streamed(resp) then
+                    stream_abort(conn, 'handler did not finish a committed response')
+                end
+            elseif not resp_is_streamed(resp) then
+                codec.send_response(conn, req, resp, resp_opts)
+            end
             -- Scratch files handed to send_file_response stay open in C until
             -- the response drains; releasing them here queues them for the
             -- sweeper rather than deleting them out from under the send.
             if resp and resp.release_file then tmp_release(resp.release_file) end
-            if not req.keep_alive then
+            if not req.keep_alive and not st.dead then
+                -- close_after_flush, NOT close: everything above only QUEUES
+                -- bytes — send_response hands a file to the C layer, and a
+                -- streamed body can still have megabytes buffered behind the
+                -- terminating chunk. close() drops whatever has not reached the
+                -- socket, which on a `Connection: close` fetch is the tail of
+                -- the packfile. This shuts down once the queue has drained.
                 st.dead = true
-                conn:close('done')
+                conn:close_after_flush('done')
             end
         end
         st.busy = false
@@ -377,6 +402,10 @@ end
 function handler.on_packet(conn, data)
     local st = conns[conn]
     if not st then return #data end
+    -- Finished with this connection: it is closing as soon as the error it was
+    -- already sent has drained. Buffering the rest of a rejected upload would be
+    -- exactly the allocation the rejection exists to avoid.
+    if st.dead then return #data end
 
     st.pending[#st.pending + 1] = data
     st.pending_n = st.pending_n + #data
@@ -387,7 +416,7 @@ function handler.on_packet(conn, data)
     if buffered(st) > MAX_REQUEST then
         codec.send_error(conn, 413, 'request body too large', resp_opts)
         st.dead = true
-        conn:close('request too large')
+        conn:close_after_flush('request too large')
         return #data
     end
 

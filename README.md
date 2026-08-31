@@ -50,6 +50,10 @@ touches nothing in the working tree:
 sh test/smoke.sh
 ```
 
+```bash
+bin/xnet.exe test/unit.lua
+```
+
 ## Layout
 
 ```
@@ -68,6 +72,7 @@ gitloom/
     auth.lua             accounts, HTTP Basic, access decisions
     auth_ratelimit.lua   credential-failure backoff
     http.lua             routing, the serve loop, responses
+    stream.lua           chunked responses, for bodies of unknown length
     browse.lua           reading repository contents (trees, blobs, log)
     smart.lua            the git smart-HTTP transport
     api.lua              the JSON management API
@@ -77,7 +82,8 @@ gitloom/
   repos/                 <owner>/<name>.git plus index.json
   data/                  users.json
   tmp/                   request/response staging
-  test/smoke.sh
+  test/smoke.sh          end-to-end, against a real git client
+  test/unit.lua          pure-Lua checks that need no server
 ```
 
 ## Module convention
@@ -128,18 +134,21 @@ The staging exists because this runtime has no bidirectional subprocess: Lua's
 available. What that costs and what would replace it is documented at the top of
 [app/git.lua](app/git.lua).
 
-Every `git` invocation blocks a worker thread for its duration, so `GIT_WORKERS`
-is the number of concurrent clones and pushes that can make progress at once.
-The main thread never blocks: a request coroutine yields on the RPC and the
-event loop keeps serving.
+Every staged `git` invocation blocks a worker thread for its duration, so
+`GIT_WORKERS` is the number of concurrent clones and pushes that can make
+progress at once. The streaming path does not use the pool — it spawns its child
+directly — so it carries its own cap, `GIT_STREAM_MAX`, and falls back to
+staging once that is reached. The main thread never blocks either way: a request
+coroutine yields on the RPC (or on the child's stdout) and the event loop keeps
+serving.
 
 ## Known limits (Phase 0)
 
 | Limit | Detail |
 |---|---|
 | Push size | The POST body is accumulated in memory and concatenated once before parsing. `MAX_REQUEST_SIZE_MB` (default 64) is a hard ceiling, enforced on the running total as bytes arrive; a larger push is rejected with 413 without ever allocating it. |
-| Clone start-up latency | No response streaming: `git` must finish before the first byte moves. A 20 MiB clone measured ~5.6 s on Windows; the bytes themselves are fast, the wait is the disk round trip. |
-| Concurrency | Bounded by `GIT_WORKERS`. A large clone occupies one worker for its whole duration, and a client that disconnects does not stop the `git` it started — `GIT_TIMEOUT_SEC` (default 600) is what bounds that. |
+| Clone start-up latency | Windows only. There the response waits for `git` to finish, because Content-Length is unknowable before then — a 20 MiB clone measured ~5.6 s. On Linux the streaming path sends each chunk as git produces it (`GIT_STREAM=auto`). |
+| Concurrency | Bounded, by two counters. A staged clone or push occupies one of `GIT_WORKERS` pool threads for its whole duration; a streamed one takes one of `GIT_STREAM_MAX` slots (default `GIT_WORKERS`) and falls back to staging when they are all busy — so an instance runs at most `GIT_STREAM_MAX + GIT_WORKERS` git processes. A client that disconnects does not stop the `git` it started; `GIT_TIMEOUT_SEC` (default 600) is what bounds that. |
 | HTTP only | No SSH transport. git speaks HTTP Basic and re-sends the credential on **every** request, so set `HTTPS=1` or front gitloom with TLS before exposing it. |
 | Dumb protocol | Not served. `/info/refs` without `?service=` answers 403 rather than 404, so the failure names itself. |
 | Storage | Accounts and the repository index are JSON files, not a database. Fine for one process; it is the thing to replace first when that stops being true. |
@@ -147,8 +156,11 @@ event loop keeps serving.
 
 ## Platforms
 
-Developed and tested on Windows. The Linux paths are written and reviewed but
-**not yet run on a Linux host** — treat the first deployment as the test.
+Linux is the deployment target and is where the streaming transport runs;
+Windows is supported for development and falls back to file staging.
+
+Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
+2.52). `test/smoke.sh` passes 75/75 on each.
 
 What was checked in the runtime underneath, and is fine:
 
@@ -160,16 +172,24 @@ What was checked in the runtime underneath, and is fine:
   `exec`; harmless here, because commands are run with file redirection and
   never in a pipeline.
 
-Before the first Linux run:
+On Linux:
 
 1. `chmod +x bin/xnet start.sh test/smoke.sh` — only needed if the exec bit did
    not survive the clone. `test/smoke.sh` chooses the binary by `uname`, not by
    which file is executable, so `bin/xnet.exe` sitting next to it is harmless.
-2. `sh test/smoke.sh`. All 27 cases are portable; the credential-helper
-   overrides in it are Windows-motivated but harmless elsewhere.
+2. The streaming transport needs a runtime built with `WITH_XPROC=1`. A stock
+   build has no `xproc` module, and gitloom then stages through files and says
+   so at boot rather than failing.
 3. `GIT_TIMEOUT_SEC` needs coreutils `timeout` on PATH (`gtimeout` on macOS).
    Without it the setting cannot be enforced and gitloom logs one warning
    rather than failing commands.
+
+Which transport is in use is logged once at startup:
+
+```
+smart-HTTP transport: streaming (pipes via xproc)
+smart-HTTP transport: file staging (this runtime has no xproc module)
+```
 
 ## Upstream
 
