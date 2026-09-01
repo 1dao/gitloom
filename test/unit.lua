@@ -401,6 +401,74 @@ do
         'unexpected parse')
 end
 
+-- ── client address behind a reverse proxy ──────────────────────────────────
+--
+-- The whole point of this function is deciding what to BELIEVE, so the cases
+-- that matter are the ones where a caller lies. X-Forwarded-For is
+-- client-supplied: getting this wrong lets anyone choose the address their
+-- failed logins are counted against and walk past the lockout entirely.
+do
+    local NONE  = {}
+    local PROXY = { ['10.0.0.1'] = true }
+    local CHAIN = { ['10.0.0.1'] = true, ['10.0.0.2'] = true }
+
+    local function xff(v) return { ['x-forwarded-for'] = v } end
+
+    -- With no proxy configured the header is not evidence of anything.
+    eq('no trusted proxies: header ignored',
+       http_client_ip('203.0.113.9', xff('1.2.3.4'), NONE), '203.0.113.9')
+
+    -- The peer is a stranger, so the header is a claim by that stranger.
+    eq('untrusted peer: header ignored',
+       http_client_ip('203.0.113.9', xff('1.2.3.4'), PROXY), '203.0.113.9')
+
+    -- The peer IS the proxy, so its appended entry is worth reading.
+    eq('trusted peer: header honoured',
+       http_client_ip('10.0.0.1', xff('1.2.3.4'), PROXY), '1.2.3.4')
+
+    -- The list grows left to right, so only the RIGHTMOST entry was written by
+    -- our proxy. Everything left of it came from whoever spoke to the outermost
+    -- hop and can be anything they liked.
+    eq('rightmost entry wins',
+       http_client_ip('10.0.0.1', xff('9.9.9.9, 1.2.3.4'), PROXY), '1.2.3.4')
+
+    -- This is the spoof: a client sends its own X-Forwarded-For, and the proxy
+    -- APPENDS the real address rather than replacing the header. Taking the
+    -- leftmost entry would hand the attacker whatever address they typed.
+    eq('a forged left-hand entry cannot win',
+       http_client_ip('10.0.0.1', xff('evil-spoofed-value, 203.0.113.7'), PROXY),
+       '203.0.113.7')
+
+    -- Multiple hops of our own: skip the ones we recognise, stop at the first
+    -- that is not ours.
+    eq('trusted hops are skipped right to left',
+       http_client_ip('10.0.0.1', xff('203.0.113.7, 10.0.0.2'), CHAIN), '203.0.113.7')
+
+    -- Every hop is ours, so the chain never names a client.
+    eq('an all-proxy chain falls back to the peer',
+       http_client_ip('10.0.0.1', xff('10.0.0.2, 10.0.0.1'), CHAIN), '10.0.0.1')
+
+    eq('an empty header falls back to the peer',
+       http_client_ip('10.0.0.1', xff(''), PROXY), '10.0.0.1')
+    eq('a missing header falls back to the peer',
+       http_client_ip('10.0.0.1', {}, PROXY), '10.0.0.1')
+
+    -- The result reaches log lines and rate-limit keys, so free text is not
+    -- passed along even when the proxy is trusted.
+    eq('a non-address entry is refused',
+       http_client_ip('10.0.0.1', xff('not an address'), PROXY), '10.0.0.1')
+    eq('an over-long entry is refused',
+       http_client_ip('10.0.0.1', xff(string.rep('1', 200)), PROXY), '10.0.0.1')
+
+    -- IPv6 has to survive: the charset check must not reject colons.
+    eq('IPv6 survives the address check',
+       http_client_ip('10.0.0.1', xff('2001:db8::1'), PROXY), '2001:db8::1')
+
+    -- Surrounding spaces are normal in a real header.
+    eq('spaces around an entry are trimmed',
+       http_client_ip('10.0.0.1', xff('  1.2.3.4  '), PROXY), '1.2.3.4')
+end
+
 out(string.format('\n[unit] %s (%d checks, %d failure(s))\n',
     fails == 0 and 'ALL PASS' or 'FAILED', total, fails))
 

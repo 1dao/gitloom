@@ -208,6 +208,97 @@ function g_exports.http_dispatch(req, ctx)
 end
 
 -- ---------------------------------------------------------------------------
+-- Client address behind a reverse proxy
+--
+-- gitloom is almost always fronted by something terminating TLS, and from
+-- behind one every request arrives from the proxy. Two things then break, both
+-- silently:
+--
+--   * every audit line records the proxy instead of the client
+--   * auth_ratelimit keys on the source address, so ONE person guessing
+--     passwords locks out everybody
+--
+-- X-Forwarded-For fixes that, but only when it can be trusted. The header is
+-- client-supplied: anyone may send one, so honouring it unconditionally lets a
+-- caller pick the address their failures are counted against and walk straight
+-- past the lockout. It is therefore read ONLY when the socket's peer is itself
+-- a configured proxy.
+--
+-- The list grows left to right as a request passes through proxies, so the
+-- RIGHTMOST entry is the one our nearest proxy appended and the only one it
+-- vouches for. Walking right to left and stopping at the first address that is
+-- not itself a trusted proxy yields the real client; everything further left
+-- was supplied by whoever spoke to the outermost hop and is not evidence.
+-- ---------------------------------------------------------------------------
+
+local trusted_proxies = nil     -- address -> true, built once
+
+local function proxies()
+    if trusted_proxies then return trusted_proxies end
+    trusted_proxies = {}
+    for addr in tostring(cfg_get('TRUSTED_PROXIES', '')):gmatch('[^,%s]+') do
+        trusted_proxies[addr] = true
+    end
+    return trusted_proxies
+end
+
+-- Does this look like an address rather than free text? The result reaches log
+-- lines and rate-limit keys, so a header carrying a novel is not something to
+-- pass along. Deliberately loose: it accepts IPv4, IPv6 and the bracketed
+-- host:port forms proxies emit, and rejects anything with whitespace, commas or
+-- control characters.
+local function address_like(s)
+    if type(s) ~= 'string' or s == '' or #s > 64 then return false end
+    return s:match('^[%x%.:%[%]]+$') ~= nil
+end
+
+-- The address to treat as the client's, given the socket peer and the request.
+--
+-- `trusted` overrides the configured set. Production never passes it; the tests
+-- do, because the configured set is read once and cached, and the interesting
+-- part of this function is precisely how it behaves across different sets.
+function g_exports.http_client_ip(peer, headers, trusted)
+    trusted = trusted or proxies()
+    if not peer or not trusted[peer] then return peer end
+
+    local fwd = headers and headers['x-forwarded-for']
+    if not fwd then return peer end
+
+    local hops = {}
+    for hop in tostring(fwd):gmatch('[^,]+') do
+        hops[#hops + 1] = (hop:gsub('^%s+', ''):gsub('%s+$', ''))
+    end
+
+    for i = #hops, 1, -1 do
+        local hop = hops[i]
+        if not trusted[hop] then
+            -- The first hop from the right that is not one of ours.
+            if address_like(hop) then return hop end
+            -- Malformed: stop rather than keep walking left. Anything further
+            -- along is even less trustworthy than the entry we just rejected.
+            return peer
+        end
+    end
+
+    -- Every hop was a proxy of ours, so the chain never names a client.
+    return peer
+end
+
+-- For the boot banner: say whether the header is honoured at all, and from whom.
+function g_exports.http_trusted_proxy_report()
+    local list = {}
+    for addr in pairs(proxies()) do list[#list + 1] = addr end
+    table.sort(list)
+    if #list == 0 then
+        cfg_log_system('trusted proxies: none — X-Forwarded-For is ignored and ' ..
+                       'the socket peer is the client address')
+    else
+        cfg_log_system('trusted proxies: %s (X-Forwarded-For honoured only from these)',
+            table.concat(list, ', '))
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- Serve loop
 -- ---------------------------------------------------------------------------
 
@@ -305,7 +396,12 @@ local function serve_one(conn, st)
     -- The codec only fills peer_ip when it is handed the connection state; the
     -- credential rate limiter keys on it, so set it unconditionally here rather
     -- than threading a ctx through every handler.
-    req.peer_ip = st.ip
+    --
+    -- Resolved once, from the socket peer and this request's headers: behind a
+    -- trusted proxy the peer is the proxy, and everything that keys on an
+    -- address — the audit log, the credential lockout — has to see the client.
+    local client_ip = http_client_ip(st.ip, req.headers)
+    req.peer_ip = client_ip
     st.buf = st.buf:sub(next_pos)
     st.need = nil          -- the next request has to be measured on its own
     st.busy = true
@@ -316,7 +412,8 @@ local function serve_one(conn, st)
     stream_reset(conn)
 
     local co = coroutine.create(function()
-        local ctx = { ip = st.ip, conn = conn, https = st.https }
+        local ctx = { ip = client_ip, peer_ip = st.ip, conn = conn,
+                      https = st.https }
         local ok, resp = pcall(http_dispatch, req, ctx)
         if not ok then
             cfg_log_error('handler error on %s %s: %s', req.method, req.path, tostring(resp))

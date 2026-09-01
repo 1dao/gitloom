@@ -149,12 +149,39 @@ end
 -- GIT_WORKERS of them in flight blocks every clone on the instance. The version
 -- of a binary does not change while the process runs, so there is nothing to
 -- re-read.
-local function h_version(_req, _ctx)
-    return http_response_json(200, {
-        name = 'gitloom',
-        version = VERSION,
-        git = git_version_cached() or 'unavailable',
-    })
+-- GET /api/v1/version
+--
+-- Version numbers are only served to an authenticated caller.
+--
+-- This is not paranoia about an unknown bug; it is the first step of an attack
+-- chain that actually ran against two of this operator's gitea instances (see
+-- the incident notes referenced in docs/ROADMAP.md). The sequence began
+-- `GET /api/v1/version` — fingerprint the build, look it up against a CVE list,
+-- then go straight for the matching exploit. A precise version handed to an
+-- anonymous scanner is the one piece of that chain we can simply decline to
+-- provide.
+--
+-- What stays anonymous is liveness: a health check, a reverse proxy or a person
+-- wondering whether the port answers gets a 200 and the service name. Hiding
+-- the NAME would be pointless anyway — anyone who can reach the git endpoints
+-- can tell what this is — but the name maps to no CVE list, and the version
+-- does.
+--
+-- API_VERSION_PUBLIC=1 restores the old behaviour for a closed network where
+-- fingerprinting is not a concern and a monitoring probe wants the build.
+local function h_version(req, _ctx)
+    -- Wrong credentials are still a 401 here, as everywhere else. Downgrading
+    -- them to the anonymous view would tell a monitoring probe with a stale
+    -- password that everything is fine.
+    local user, bad = identify_optional(req)
+    if bad then return bad end
+
+    local body = { name = 'gitloom', status = 'ok' }
+    if user or cfg_bool('API_VERSION_PUBLIC', false) then
+        body.version = VERSION
+        body.git = git_version_cached() or 'unavailable'
+    end
+    return http_response_json(200, body)
 end
 
 local function h_repo_list(req, ctx)

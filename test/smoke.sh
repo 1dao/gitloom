@@ -52,6 +52,7 @@ esac
     LISTEN_PORT="$PORT" REPO_ROOT="$ROOT" DATA_DIR="$DATA" TMP_DIR="$SCRATCH" \
     USERS_FILE="$DATA/users.json" ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" \
     GIT_STREAM="${GIT_STREAM:-auto}" \
+    TRUSTED_PROXIES=127.0.0.1 \
     > "$LOG" 2>&1 &
 PID=$!
 
@@ -396,6 +397,63 @@ if [ "$BIG_MB" -gt 0 ]; then
         bad "clone ${BIG_MB} MiB" "$(cat "$WORK/ebig" | tail -2)"
     fi
 fi
+
+# == Fingerprinting and proxy trust ==========================================
+
+# Version numbers are the first thing an automated scanner reads, so anonymous
+# callers get liveness without a build number.
+body=$(curl -s "$BASE/api/v1/version")
+echo "$body" | grep -q '"name":"gitloom"' \
+    && ok 'anonymous version says who it is' || bad 'anonymous version says who it is' "$body"
+echo "$body" | grep -q '"version"' \
+    && bad 'anonymous version hides the build' "$body" \
+    || ok 'anonymous version hides the build'
+echo "$body" | grep -q '"git"' \
+    && bad 'anonymous version hides the git build' "$body" \
+    || ok 'anonymous version hides the git build'
+
+body=$(curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/version")
+echo "$body" | grep -q '"version"' \
+    && ok 'authenticated version reports the build' \
+    || bad 'authenticated version reports the build' "$body"
+
+# Wrong credentials stay a 401 here too: silently downgrading them would tell a
+# monitoring probe with a stale password that all is well.
+#
+# Sent as its own forwarded address. The lockout case above already exhausted
+# 127.0.0.1's budget, and without a distinct address this would get the 429 that
+# earlier test earned rather than the 401 this one is about.
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 198.51.100.20'     -u admin:wrong-one "$BASE/api/v1/version")
+check 'version rejects bad credentials' "$code" '401'
+
+# X-Forwarded-For, honoured because TRUSTED_PROXIES names 127.0.0.1.
+#
+# The observable behaviour is the credential lockout, which counts per source
+# address. Failing repeatedly as ONE forwarded address must not lock out a
+# DIFFERENT one — if the header were ignored, both would share 127.0.0.1's
+# counter and the second address would be locked out too. Each attempt uses a
+# distinct username so the per-username counter cannot be what trips.
+i=0
+while [ $i -lt 14 ]; do
+    curl -s -o /dev/null -H 'X-Forwarded-For: 198.51.100.7' \
+        -u "prox$i:wrong-password" "$BASE/api/v1/users"
+    i=$((i+1))
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 198.51.100.7' \
+    -u "proxlast:wrong-password" "$BASE/api/v1/users")
+check 'a forwarded address gets locked out' "$code" '429'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 198.51.100.8' \
+    -u "otherprox:wrong-password" "$BASE/api/v1/users")
+check 'a different forwarded address is unaffected' "$code" '401'
+
+# The rightmost entry is the one the trusted proxy appended; anything to its
+# left was supplied by the caller. A client that forges a header must not be
+# able to pick which address its failures land on.
+code=$(curl -s -o /dev/null -w '%{http_code}' \
+    -H 'X-Forwarded-For: 198.51.100.9, 198.51.100.7' \
+    -u "spoofer:wrong-password" "$BASE/api/v1/users")
+check 'a forged left-hand entry does not escape the lockout' "$code" '429'
 
 # == Delete ==================================================================
 code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X DELETE \

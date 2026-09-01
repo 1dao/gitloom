@@ -98,11 +98,16 @@ local function boot_async()
         xthread.stop(1)
         return
     end
-    -- Cache it: /api/v1/version is unauthenticated, and re-running git per
-    -- request let anyone occupy the whole process pool from outside.
+    -- Cache it: /api/v1/version is reachable without credentials, and
+    -- re-running git per request let anyone occupy the whole process pool
+    -- from outside.
     git_version_cache_set(version)
     cfg_log_system('git %s via %q', version, git_bin())
     git_stream_report()
+    -- Says whether X-Forwarded-For is honoured, and from whom. Silent
+    -- misconfiguration here makes every audit line and every rate-limit
+    -- decision name the proxy instead of the client.
+    http_trusted_proxy_report()
 
     -- Debris from a previous run: a crash mid-clone leaves a half-written
     -- packfile nothing will ever come back for. Safe here because no request
