@@ -38,6 +38,12 @@ if inherited_global_mt and rawget(inherited_global_mt, '__gitloom_strict') then
     inherited_global_mt = rawget(inherited_global_mt, '__previous')
     setmetatable(_G, inherited_global_mt)
 end
+if inherited_global_mt and rawget(inherited_global_mt, '__gitloom_exports_index') then
+    -- The export lookup is also replaced on every reload. Unwrap the old layer
+    -- first so the host's original metatable remains the bottom of the chain.
+    inherited_global_mt = rawget(inherited_global_mt, '__previous')
+    setmetatable(_G, inherited_global_mt)
+end
 
 -- Keep the proxy identity stable across a runtime reload. Old callbacks may
 -- still hold it briefly; replacing its metatable makes them see the new API.
@@ -128,6 +134,43 @@ setmetatable(exports, {
         return next, export_values, nil
     end,
 })
+
+-- Resolve a missing root name through the public registry without copying any
+-- API field onto `_G`. Raw `_G` therefore stays small (g_exports, dofile, and
+-- the runtime's own names), while native scripts that deliberately run in the
+-- root environment can still call `repo_get(...)` directly.
+local function previous_global_read(t, name)
+    local h = inherited_global_mt and rawget(inherited_global_mt, '__index')
+    if type(h) == 'function' then return h(t, name) end
+    if h ~= nil then return h[name] end
+    return nil
+end
+
+local function previous_global_write(t, name, value)
+    local h = inherited_global_mt and rawget(inherited_global_mt, '__newindex')
+    if type(h) == 'function' then h(t, name, value); return true end
+    if h ~= nil then h[name] = value; return true end
+    return false
+end
+
+local global_exports_mt = {
+    __gitloom_exports_index = true,
+    __previous = inherited_global_mt,
+
+    __index = function(t, name)
+        local value = exports[name]
+        if value ~= nil then return value end
+        return previous_global_read(t, name)
+    end,
+
+    -- Preserve a host-provided __newindex. With no host handler this is the
+    -- same raw assignment Lua would have performed without our __index layer.
+    __newindex = function(t, name, value)
+        if previous_global_write(t, name, value) then return end
+        rawset(t, name, value)
+    end,
+}
+setmetatable(_G, global_exports_mt)
 
 local loaded = {}
 local unpack_values = table.unpack or unpack
@@ -359,21 +402,15 @@ end)
 
 local strict = false
 
--- Neither runtime backend puts a metatable on `_G` today, so these two only
--- matter if the host ever adds one: strict mode has to tighten what the host
--- does, not silently replace it.
+-- Strict mode tightens the host's original global metatable while retaining the
+-- export lookup above. It must not treat the forwarding layer's raw-assignment
+-- fallback as permission for arbitrary new globals.
 local function previous_read(t, name)
-    local h = inherited_global_mt and rawget(inherited_global_mt, '__index')
-    if type(h) == 'function' then return h(t, name) end
-    if h ~= nil then return h[name] end
-    return nil
+    return previous_global_read(t, name)
 end
 
 local function previous_write(t, name, value)
-    local h = inherited_global_mt and rawget(inherited_global_mt, '__newindex')
-    if type(h) == 'function' then h(t, name, value); return true end
-    if h ~= nil then h[name] = value; return true end
-    return false
+    return previous_global_write(t, name, value)
 end
 
 local function strict_enable()
@@ -383,6 +420,8 @@ local function strict_enable()
         __previous = inherited_global_mt,
 
         __index = function(t, name)
+            local exported = exports[name]
+            if exported ~= nil then return exported end
             local value = previous_read(t, name)
             if value ~= nil then return value end
             error(string.format("undefined global read: '%s'", tostring(name)), 2)
@@ -400,7 +439,7 @@ end
 
 local function strict_disable()
     if not strict then return end
-    setmetatable(_G, inherited_global_mt)
+    setmetatable(_G, global_exports_mt)
     strict = false
 end
 

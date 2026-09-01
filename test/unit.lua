@@ -55,6 +55,9 @@ check('g_exports is the only app registry in root _G',
 check('an exported function is not copied onto root _G',
     rawget(root_globals, 'repo_dir') == nil,
     'repo_dir leaked into _G')
+check('root _G resolves exports through __index',
+    root_globals.repo_dir == g_exports.repo_dir,
+    'root lookup did not reach g_exports')
 check('a bare module variable stays out of root _G',
     rawget(root_globals, 'private_value') == nil,
     'private_value leaked into _G')
@@ -66,11 +69,13 @@ eq('an export can be called directly and reach file-private state',
 
 do
     boot.strict_enable()
+    local export_ok = root_globals.repo_dir == g_exports.repo_dir
     local read_ok, read_err = pcall(function() return root_globals.__gitloom_missing_test end)
     local write_ok, write_err = pcall(function()
         root_globals.__gitloom_new_test = true
     end)
     boot.__strict_disable()
+    check('strict mode keeps root export lookup', export_ok, 'export lookup was blocked')
     check('strict mode rejects undefined global reads',
         not read_ok and tostring(read_err):find('undefined global read') ~= nil, read_err)
     check('strict mode rejects new global writes',
