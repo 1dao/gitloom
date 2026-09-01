@@ -22,6 +22,13 @@ local router = dofile('scripts/core/share/xrouter.lua')
 local xutils = require('xutils')
 router.set_log_prefix('GITLOOM-KDF')
 
+-- Bitwise XOR on both backends. `a ~ b` is Lua 5.3+ syntax that LuaJIT (5.1)
+-- cannot parse, so the probe compiles the operator instead of naming a library.
+-- Kept identical to the copy in app/auth.lua: this thread and that fallback have
+-- to derive the same digest from the same password, so they may not drift.
+local native_xor = load('return function(a, b) return a ~ b end')
+local bxor = native_xor and native_xor() or require('bit').bxor
+
 -- PBKDF2-HMAC-SHA256, RFC 8018. dkLen is fixed at one block (32 bytes), which
 -- is why there is no block loop: for SHA-256 the derived key we want is exactly
 -- the hash output size.
@@ -34,7 +41,7 @@ local function pbkdf2_sha256(password, salt, iterations)
         -- walks the 32 bytes; the HMAC either side of it is C and dominates.
         local acc = {}
         for i = 1, 32 do
-            acc[i] = string.char(out:byte(i) ~ u:byte(i))
+            acc[i] = string.char(bxor(out:byte(i), u:byte(i)))
         end
         out = table.concat(acc)
     end

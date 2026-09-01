@@ -1,6 +1,6 @@
 -- app/cfg.lua — configuration and logging.
 --
--- Exports: cfg_get, cfg_int, cfg_bool, cfg_list,
+-- Exports: cfg_get, cfg_int, cfg_bool,
 --          cfg_log_system, cfg_log_info, cfg_log_warn, cfg_log_error, cfg_log_debug
 --
 -- Config comes from xutils' key=value store, which is FIRST-WINS: command-line
@@ -29,15 +29,6 @@ end
 function g_exports.cfg_bool(key, default)
     local v = tostring(xutils.get_config(key, default and '1' or '0')):lower()
     return v == '1' or v == 'true' or v == 'yes' or v == 'on'
-end
-
--- Comma/whitespace separated list -> array. Empty string -> empty table.
-function g_exports.cfg_list(key, default)
-    local out = {}
-    for item in tostring(xutils.get_config(key, default or '')):gmatch('[^,%s]+') do
-        out[#out + 1] = item
-    end
-    return out
 end
 
 -- ---------------------------------------------------------------------------

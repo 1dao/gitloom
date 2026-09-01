@@ -1,7 +1,7 @@
 -- app/auth_ratelimit.lua — failure backoff for credential checks.
 --
--- Exports: auth_ratelimit_check, auth_ratelimit_record_failure, auth_ratelimit_record_success,
---          auth_ratelimit_gc, auth_ratelimit_stats
+-- Exports: auth_ratelimit_check, auth_ratelimit_record_failure,
+--          auth_ratelimit_record_success, auth_ratelimit_gc
 --
 -- Moving PBKDF2 onto its own thread (worker/kdf.lua) stops one bad login from
 -- stalling the event loop. It does not stop a thousand of them from saturating
@@ -105,13 +105,4 @@ function g_exports.auth_ratelimit_gc()
         end
     end
     return n
-end
-
--- For the admin endpoint and for tests.
-function g_exports.auth_ratelimit_stats()
-    local now = os.time()
-    local ips, users, locked = 0, 0, 0
-    for _, b in pairs(by_ip)   do ips   = ips   + 1; if b.until_ts > now then locked = locked + 1 end end
-    for _, b in pairs(by_user) do users = users + 1 end
-    return { addresses = ips, usernames = users, locked_out = locked }
 end

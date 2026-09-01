@@ -8,11 +8,21 @@
 -- either has no HTTP surface yet or is awkward to provoke through one — chunk
 -- framing being the case that prompted it, since the streaming transport it
 -- belongs to only runs on Linux and would otherwise ship unexercised.
+--
+-- Like main.lua, this file runs twice: the first pass loads the loader and hands
+-- the file back to it, the second arrives inside an app environment where the
+-- short names below resolve. See main.lua for why the detour is worth it.
+--
+-- The root `_G` comes back as a chunk argument because it cannot be recovered
+-- from inside an app environment, where `_G` is that environment — which is
+-- exactly the difference the isolation checks below have to observe.
 
-package.path = 'app/?.lua;' .. package.path
-
-local root_globals = _G
-local boot = dofile('app/boot.lua')
+local boot, root_globals = ...
+if type(boot) ~= 'table' then
+    package.path = 'app/?.lua;' .. package.path
+    boot = dofile('app/boot.lua')
+    return boot.run_script('test/unit.lua', boot, _G)
+end
 
 boot.load_script('app/cfg.lua')
 boot.load_script('app/util.lua')
@@ -20,16 +30,12 @@ boot.load_script('app/proc.lua')
 boot.load_script('app/pkt.lua')
 boot.load_script('app/repo.lua')
 boot.load_script('app/git.lua')
-boot.load_script('app/auth_ratelimit.lua')
+boot.load_script('app/auth_ratelimit.lua')   -- before auth.lua; see main.lua
 boot.load_script('app/auth.lua')
 boot.load_script('app/http.lua')
 boot.load_script('app/stream.lua')
 boot.load_script('app/browse.lua')
 boot.load_script('test/module_scope.lua')
-
-local unit_env = boot.new_environment('test/unit.lua')
-if _VERSION == 'Lua 5.1' then setfenv(1, unit_env) end
-local _ENV = unit_env
 
 local fails, total = 0, 0
 local function out(s) io.write(s); io.flush() end
@@ -64,7 +70,7 @@ do
     local write_ok, write_err = pcall(function()
         root_globals.__gitloom_new_test = true
     end)
-    boot.strict_disable()
+    boot.__strict_disable()
     check('strict mode rejects undefined global reads',
         not read_ok and tostring(read_err):find('undefined global read') ~= nil, read_err)
     check('strict mode rejects new global writes',
@@ -83,12 +89,123 @@ do
     local ok, err = pcall(boot.load_script, 'app/pkt.lua')
     check('duplicate module loads are rejected',
         not ok and tostring(err):find('already loaded') ~= nil, err)
+
+    -- The guard keys on the normalised path. Keyed on the raw string, a second
+    -- spelling of one file quietly becomes a second module, which re-runs its
+    -- top level and then fails on a duplicate export instead of here.
+    for _, respelt in ipairs({ './app/pkt.lua', 'app/./pkt.lua',
+                               'app//pkt.lua', 'app\\pkt.lua',
+                               'app/../app/pkt.lua' }) do
+        local rok, rerr = pcall(boot.load_script, respelt)
+        check(string.format('%q is the same module as app/pkt.lua', respelt),
+            not rok and tostring(rerr):find('already loaded') ~= nil, rerr)
+    end
 end
 
 do
     local ok, err = pcall(boot.load_script, 'test/module_bad_export.lua')
     check('exports must use the filename as their module prefix',
         not ok and tostring(err):find("invalid export 'wrong_prefix'") ~= nil, err)
+end
+
+do
+    -- STRICT_GLOBALS guards the root _G, which holds one name. This is the same
+    -- guarantee inside a module environment, where the code actually lives.
+    local ok, err = pcall(module_scope_late_global)
+    check('a sealed module rejects a name that first appears at runtime',
+        not ok and tostring(err):find('assigned after load') ~= nil, err)
+    eq('sealing leaves existing file state writable', module_scope_private_api(), 43)
+end
+
+do
+    local ok, err = pcall(boot.load_script, 'test/module_partial_export.lua')
+    check('a module that fails half-way reports its own error',
+        not ok and tostring(err):find('deliberate failure') ~= nil, err)
+    check('a failed load rolls back the exports it had registered',
+        g_exports.module_partial_export_first == nil, 'a partial export survived')
+end
+
+do
+    -- The longer module name owns the namespace: the live case is auth.lua,
+    -- whose auth_ prefix also matches every auth_ratelimit_* name.
+    --
+    -- KNOWN LIMIT, and the reason this loads module_ns_sub first: ownership is
+    -- decided against the modules already loaded, so the rule only holds when
+    -- the longer module got there first. Listed the other way round, module_ns
+    -- takes module_ns_sub_stolen and neither load fails. main.lua's ordering
+    -- comment is what keeps the live case on the right side of that.
+    boot.load_script('test/module_ns_sub.lua')
+    local ok, err = pcall(boot.load_script, 'test/module_ns.lua')
+    check('a shorter module cannot export into a longer one\'s namespace',
+        not ok and tostring(err):find("belongs to module 'module_ns_sub'") ~= nil, err)
+end
+
+do
+    -- Native dofile would run this in the root _G and leak its bare names. The
+    -- 'already loaded' refusal is what proves it went to load_script instead:
+    -- native dofile has no such notion and would happily run it a second time.
+    local ok, err = pcall(dofile, 'test/module_scope.lua')
+    check('dofile of an app module is redirected to load_script',
+        not ok and tostring(err):find('already loaded') ~= nil, err)
+    check('the redirected dofile left root _G clean',
+        rawget(root_globals, 'private_value') == nil, 'private_value leaked into _G')
+
+    -- scripts/core/ is the runtime's own subset and keeps the native dofile —
+    -- including the right to be loaded more than once.
+    local a = dofile('scripts/core/share/xfs.lua')
+    local b = dofile('scripts/core/share/xfs.lua')
+    check('scripts/core keeps the native dofile',
+        type(a) == 'table' and type(b) == 'table', 'a runtime helper failed to load twice')
+
+    local win = pcall(dofile, 'scripts\\core\\share\\xfs.lua')
+    check('the scripts/core test survives a backslash path', win, 'backslash path redirected')
+end
+
+do
+    -- The runtime-script test decides whether a path escapes the module loader,
+    -- so it is checked directly rather than only through its effects. It has to
+    -- fail CLOSED: every spelling it cannot reduce is "not runtime".
+    local case_folded = package.config:sub(1, 1) == '\\'
+    local cases = {
+        -- spellings of the same real file, all still the runtime's
+        { 'scripts/core/share/xfs.lua',            true  },
+        { './scripts/core/share/xfs.lua',          true  },
+        { 'scripts//core/share/xfs.lua',           true  },
+        { 'scripts/core/./share/xfs.lua',          true  },
+        { 'scripts/core/../core/share/xfs.lua',    true  },
+        { 'scripts\\core\\share\\xfs.lua',         true  },
+        { 'scripts/core\\share/xfs.lua',           true  },
+        -- traversal out of the runtime tree: this is the one that used to pass
+        { 'scripts/core/../../app/repo.lua',       false },
+        { 'scripts/core/../app/repo.lua',          false },
+        { '../gitloom/scripts/core/share/xfs.lua', false },
+        -- absolute in every spelling
+        { '/scripts/core/share/xfs.lua',           false },
+        { 'C:/gitloom/scripts/core/share/xfs.lua', false },
+        { 'C:scripts/core/share/xfs.lua',          false },
+        { '//host/share/scripts/core/xfs.lua',     false },
+        -- a prefix is not a directory
+        { 'scripts/coreX/share/xfs.lua',           false },
+        { 'xscripts/core/share/xfs.lua',           false },
+        { 'app/repo.lua',                          false },
+        { '',                                      false },
+        -- case follows the platform: Windows compares paths case-insensitively,
+        -- POSIX does not, and folding there would let a real 'Scripts/Core'
+        -- directory pass itself off as the runtime's
+        { 'SCRIPTS/Core/share/xfs.lua',            case_folded },
+    }
+    for _, c in ipairs(cases) do
+        local path, want = c[1], c[2]
+        check(string.format('runtime-script test: %q is %s',
+                path, want and 'runtime' or 'redirected'),
+            boot.__is_runtime_script(path) == want, 'wrong verdict')
+    end
+
+    -- And the traversal is closed in practice, not just in the predicate:
+    -- 'already loaded' can only come from load_script, so the redirect happened.
+    local ok, err = pcall(dofile, 'scripts/core/../../app/repo.lua')
+    check('a traversal out of scripts/core is actually redirected',
+        not ok and tostring(err):find('already loaded') ~= nil, err)
 end
 
 -- A stand-in for a connection: records every byte send_raw is given.

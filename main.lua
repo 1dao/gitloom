@@ -18,11 +18,29 @@
 -- run on a coroutine, and why nothing in this file may call git during load.
 --
 -- MODULE CONVENTION
--- app/*.lua run in separate environments. Bare top-level names stay private;
--- public functions are installed on the one gitloom global, g_exports. The
--- loader returned by app/boot.lua supports both Lua 5.1 (setfenv) and 5.2+.
+-- app/*.lua run in separate environments, and that isolation comes from the
+-- loader, not from `dofile`: bare top-level names stay private to their file
+-- only when it is loaded through boot.load_script. Public functions are
+-- installed on the one gitloom global, g_exports, and every module reaches an
+-- earlier module's API by its short name.
+--
+-- THIS FILE RUNS TWICE
+-- The runtime loads main.lua into the root `_G`, where the short names below —
+-- cfg_log_error, proc_selftest, repo_root — do not resolve. So the first pass
+-- does nothing except load the loader and hand main.lua straight back to it.
+-- The second pass arrives with `boot` as a chunk argument, already inside an
+-- app environment, and falls through the guard into the real work.
+--
+-- The point of the detour is that neither `setfenv` (5.1) nor a lexical `_ENV`
+-- (5.2+) appears here. app/boot.lua is the only file that knows the difference,
+-- which matters because a build can only ever execute one of the two branches:
+-- bin/xnet.exe is minilua (5.5), and LUA_BACKEND=luajit is 5.1.
 
-local boot = dofile('app/boot.lua')
+local boot = ...
+if type(boot) ~= 'table' then     -- pass 1: the runtime passes no arguments
+    boot = dofile('app/boot.lua')
+    return boot.run_script('main.lua', boot)
+end
 
 boot.load_script('app/cfg.lua')      -- cfg_*                       (no deps)
 boot.load_script('app/util.lua')     -- util_*
@@ -30,7 +48,10 @@ boot.load_script('app/proc.lua')     -- proc_*
 boot.load_script('app/pkt.lua')      -- pkt_*
 boot.load_script('app/repo.lua')     -- repo_*
 boot.load_script('app/git.lua')      -- git_*
-boot.load_script('app/auth_ratelimit.lua')  -- auth_ratelimit_*  (before auth.lua)
+-- Before auth.lua, and not only by convention: namespace ownership is decided
+-- against the modules already loaded, so auth.lua could otherwise claim
+-- auth_ratelimit_* and nothing would stop it.
+boot.load_script('app/auth_ratelimit.lua')  -- auth_ratelimit_*
 boot.load_script('app/auth.lua')     -- auth_*
 boot.load_script('app/http.lua')     -- http_*
 boot.load_script('app/stream.lua')   -- stream_*, stream_response
@@ -44,13 +65,6 @@ boot.load_script('app/api.lua')      -- api_install
 -- failure with no explanation.
 local router = dofile('scripts/core/share/xrouter.lua')
 router.set_log_prefix('GITLOOM')
-
--- Direct API calls below resolve through g_exports without copying each API
--- into `_G`. Lua 5.1 changes this chunk's function environment; Lua 5.2+ uses
--- the lexical _ENV introduced at this point.
-local main_env = boot.new_environment('main.lua')
-if _VERSION == 'Lua 5.1' then setfenv(1, main_env) end
-local _ENV = main_env
 
 local sweep_timer = nil
 

@@ -1,8 +1,6 @@
 -- app/auth.lua — accounts, HTTP Basic authentication, and access decisions.
 --
--- Exports: auth_load, auth_save, auth_user_get, auth_user_list,
---          auth_user_create, auth_user_set_password, auth_user_delete,
---          auth_token_create, auth_token_revoke,
+-- Exports: auth_load, auth_user_list, auth_user_create, auth_token_create,
 --          auth_identify, auth_can_read, auth_can_write, auth_challenge,
 --          auth_bootstrap, auth_kdf_setup, auth_too_many
 --
@@ -65,6 +63,25 @@ function g_exports.auth_kdf_setup()
     return true
 end
 
+-- Hoisted out of the module environment. A bare name inside an app module costs
+-- two metamethod hops (see app/boot.lua), and one for the stdlib is the slower
+-- of the two because both hops miss before the root `_G` answers. Measured at
+-- ~59 ns each, and the XOR below runs 32 times per round: at the default 10000
+-- rounds that was ~330k lookups, ~19 ms of pure name resolution stacked on top
+-- of the HMACs, every time this path hashes a password.
+local string_char, table_concat = string.char, table.concat
+
+-- Bitwise XOR on both backends. `a ~ b` is Lua 5.3+ syntax that LuaJIT (5.1)
+-- cannot even parse, so this asks the PARSER whether the operator exists rather
+-- than asking for a library name: a module environment raises on an undefined
+-- bare name, which makes the usual `if bit then` probe throw on 5.5 instead of
+-- evaluating to nil. `load` and `require` are present on both.
+--
+-- Measured at +2 ms per 10000-round hash against the operator written inline —
+-- not worth carrying two spellings of the loop to avoid.
+local native_xor = load('return function(a, b) return a ~ b end')
+local bxor = native_xor and native_xor() or require('bit').bxor
+
 -- Same computation as the worker's, for the boot path only.
 local function pbkdf2_inline(password, salt, iterations)
     local u = xutils.hmac_sha256(password, salt .. '\0\0\0\1')
@@ -72,8 +89,8 @@ local function pbkdf2_inline(password, salt, iterations)
     for _ = 2, iterations do
         u = xutils.hmac_sha256(password, u)
         local acc = {}
-        for i = 1, 32 do acc[i] = string.char(out:byte(i) ~ u:byte(i)) end
-        out = table.concat(acc)
+        for i = 1, 32 do acc[i] = string_char(bxor(out:byte(i), u:byte(i))) end
+        out = table_concat(acc)
     end
     return xutils.hex_encode(out)
 end
@@ -105,7 +122,11 @@ end
 local function digest_equal(a, b)
     if type(a) ~= 'string' or type(b) ~= 'string' or #a ~= #b then return false end
     local diff = 0
-    for i = 1, #a do diff = diff | (a:byte(i) ~ b:byte(i)) end
+    -- Accumulated with + rather than the bitwise |, which is 5.3+ syntax too.
+    -- The property this needs is unchanged: the total is zero only when every
+    -- byte matched, and neither operator introduces a data-dependent branch. It
+    -- also means the file needs one portability probe rather than two.
+    for i = 1, #a do diff = diff + bxor(a:byte(i), b:byte(i)) end
     return diff == 0
 end
 
@@ -138,7 +159,7 @@ function g_exports.auth_load()
     return users
 end
 
-function g_exports.auth_save()
+local function auth_save()
     local list = {}
     for _, u in pairs(users or {}) do list[#list + 1] = u end
     table.sort(list, function(a, b) return a.username < b.username end)
@@ -152,7 +173,7 @@ function g_exports.auth_save()
     return true
 end
 
-function g_exports.auth_user_get(username)
+local function auth_user_get(username)
     if not users then auth_load() end
     return users[tostring(username or '')]
 end
@@ -197,25 +218,6 @@ function g_exports.auth_user_create(username, password, opts)
     return users[username]
 end
 
-function g_exports.auth_user_set_password(username, password)
-    local u = auth_user_get(username)
-    if not u then return nil, 'no such user' end
-    if type(password) ~= 'string' or #password < cfg_int('AUTH_MIN_PASSWORD', 8) then
-        return nil, 'password too short'
-    end
-    u.pwhash = password_hash(password)
-    verify_cache = {}     -- an old password must stop working immediately
-    return auth_save()
-end
-
-function g_exports.auth_user_delete(username)
-    if not users then auth_load() end
-    if not users[username] then return nil, 'no such user' end
-    users[username] = nil
-    verify_cache = {}
-    return auth_save()
-end
-
 -- Issue an access token. Returns the CLEAR token exactly once — only its digest
 -- is stored, so a lost token is reissued rather than recovered.
 function g_exports.auth_token_create(username, label)
@@ -231,19 +233,6 @@ function g_exports.auth_token_create(username, label)
     local ok, err = auth_save()
     if not ok then return nil, err end
     return clear
-end
-
-function g_exports.auth_token_revoke(username, label)
-    local u = auth_user_get(username)
-    if not u then return nil, 'no such user' end
-    local kept, removed = {}, 0
-    for _, t in ipairs(u.tokens or {}) do
-        if t.label == label then removed = removed + 1 else kept[#kept + 1] = t end
-    end
-    if removed == 0 then return nil, 'no token with that label' end
-    u.tokens = kept
-    verify_cache = {}
-    return auth_save()
 end
 
 -- ---------------------------------------------------------------------------
