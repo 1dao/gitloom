@@ -118,8 +118,10 @@ Verified on Arch/WSL, gcc 16.2.1, git 2.55:
   large-clone case in `test/smoke.sh` genuinely catches a regression
 
 Still open in this phase:
-- **Streaming request bodies.** The body is still accumulated in memory before
-  it reaches the child, so `MAX_REQUEST_SIZE_MB` is still the push ceiling.
+- **Streaming request bodies.** Request-header framing is now exposed by the
+  copied `xhttp_codec` as `parse_request_head`, but the HTTP serve loop still
+  needs to connect body chunks directly to the child's stdin. Until that full
+  duplex path lands, `MAX_REQUEST_SIZE_MB` remains the push ceiling.
 - **Sideband progress** during a push.
 - **io_uring.** Now installed on the dev box and untested here; it replaces the
   channel read path, which is exactly what streaming depends on.
@@ -143,11 +145,16 @@ that cloned to an empty worktree and answered 404 on every browsing endpoint —
 and `diff-tree` gained `--root`, without which the initial commit of every
 repository reported that it changed nothing.
 
-**Still to do: the front end.** A single-page app over exactly these endpoints —
-file tree, blob view with highlighting, commit list, diff view. No server-side
-templates, which is what lets us skip gitea's 571 `.tmpl` files entirely.
-There is no diff-content endpoint yet either; `commits/:ref` returns the file
-list and status letters, not hunks.
+**Browser slice: done (2026-09-02).** `app/web.lua` serves a same-origin,
+dependency-free SPA from `web/`. It covers the repository list, branch
+selection, tree navigation, raw blob viewing, commit history and bounded diff
+viewing. Credentials stay in the current browser tab and are sent as HTTP
+Basic only when the user logs in. The diff content endpoint is
+`GET .../commits/:ref/diff?path=` and is capped by `MAX_DIFF_MB`.
+
+Still to do in the front end: syntax highlighting, richer commit metadata,
+pagination and an administrative repository-creation flow. These are polish
+items; the first browse loop is usable now.
 
 Estimate for the remainder: 3–5 weeks.
 

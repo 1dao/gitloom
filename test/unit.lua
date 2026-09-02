@@ -35,6 +35,7 @@ boot.load_script('app/auth.lua')
 boot.load_script('app/http.lua')
 boot.load_script('app/stream.lua')
 boot.load_script('app/browse.lua')
+boot.load_script('app/web.lua')
 boot.load_script('test/module_scope.lua')
 local codec = dofile('scripts/core/share/xhttp_codec.lua')
 

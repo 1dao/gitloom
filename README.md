@@ -15,9 +15,11 @@ around it: the smart-HTTP transport, the repository model, accounts and access
 control, and an API. Packfile negotiation, delta resolution and ref locking stay
 where they already work.
 
-**Status: Phase 0.** Clone, fetch and push over HTTP(S) work end to end, with
-accounts, access tokens, public/private repositories and a JSON management API.
-There is no web UI, no issues and no pull requests yet — see
+**Status: Phase 2 (browser slice).** Clone, fetch and push over HTTP(S) work end
+to end, with accounts, access tokens, public/private repositories, a JSON
+management API and a same-origin repository browser. The browser covers the
+repository list, branches, tree, raw files, commit history and bounded diffs.
+Issues and pull requests are not implemented yet — see
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
@@ -27,6 +29,10 @@ There is no web UI, no issues and no pull requests yet — see
 ```
 
 On Linux use `./start.sh` instead — same arguments.
+
+Open <http://127.0.0.1:8686/> for the repository browser. It uses the same
+HTTP Basic credentials as the API and keeps them only in the current browser
+tab.
 
 ```bash
 curl -u admin:pick-something-real -H 'Content-Type: application/json' \
@@ -76,6 +82,8 @@ gitloom/
     browse.lua           reading repository contents (trees, blobs, log)
     smart.lua            the git smart-HTTP transport
     api.lua              the JSON management API
+    web.lua              static files for the repository browser
+  web/                   same-origin browser (index.html, app.css, app.js)
   worker/                scripts that run on their own thread and Lua state
     kdf.lua              password hashing, kept off the event loop
   scripts/core/          modules copied from xnet2lua (share/ and server/)
@@ -241,6 +249,7 @@ Browsing a repository's contents:
 | `GET /api/v1/repos/:owner/:name/tags` | |
 | `GET .../commits` | `?ref=` `&limit=` `&skip=` `&path=` |
 | `GET .../commits/:ref` | one commit, with the files it touched |
+| `GET .../commits/:ref/diff` | `?path=`, bounded unified diff |
 | `GET .../tree/:ref` and `.../tree/:ref/<path>` | directory listing, directories first |
 | `GET .../raw/:ref/<path>` | file contents |
 

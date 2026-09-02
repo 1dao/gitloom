@@ -1,4 +1,4 @@
--- app/api.lua — the JSON management API and the plain-text landing page.
+-- app/api.lua — the JSON management API.
 --
 -- Exports: api_install
 --
@@ -131,17 +131,6 @@ end
 -- ---------------------------------------------------------------------------
 -- Handlers
 -- ---------------------------------------------------------------------------
-
-local function h_index(_req, _ctx)
-    return http_response_text(200, table.concat({
-        'gitloom ' .. VERSION,
-        '',
-        'Clone:   git clone http://<host>:' .. cfg_get('LISTEN_PORT', '8686') .. '/<owner>/<repo>.git',
-        'API:     GET /api/v1/version',
-        '         GET /api/v1/repos',
-        '',
-    }, '\n'))
-end
 
 -- git's version is read once at boot (main.lua) and served from there.
 --
@@ -477,7 +466,6 @@ end
 -- ---------------------------------------------------------------------------
 
 function g_exports.api_install()
-    http_get('/', h_index)
     http_get('/api/v1/version', h_version)
 
     http_get('/api/v1/repos', h_repo_list)

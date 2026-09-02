@@ -1,9 +1,9 @@
 -- main.lua — gitloom: a git hosting service on the xnet2lua runtime.
 --
--- Phase 0 scope: the git smart-HTTP transport (clone / fetch / push), a
--- repository model on disk, HTTP Basic accounts with access tokens, and a JSON
--- management API. No web UI, no issues, no pull requests — those come later and
--- ride on the same API.
+-- Current scope: the git smart-HTTP transport (clone / fetch / push), a
+-- repository model on disk, HTTP Basic accounts with access tokens, a JSON
+-- management API, and the first same-origin repository browser. Issues and pull
+-- requests come later and ride on the same API.
 --
 -- Run:  bin\xnet.exe main.lua [KEY=VAL ...]      (see gitloom.cfg for keys)
 --
@@ -58,6 +58,7 @@ boot.load_script('app/stream.lua')   -- stream_*, stream_response
 boot.load_script('app/browse.lua')   -- browse_*
 boot.load_script('app/smart.lua')    -- smart_install
 boot.load_script('app/api.lua')      -- api_install
+boot.load_script('app/web.lua')      -- web_install
 
 -- xrouter carries the xproc workers' RPC replies back to this thread. Exposing
 -- its handler as __thread_handle is the only wiring that needs; without it
@@ -146,6 +147,7 @@ local function __init()
     auth_bootstrap()
 
     smart_install()   -- git transport, as a path fallback
+    web_install()     -- same-origin repository browser, as routes
     api_install()     -- JSON API, as routes
     -- Order matters only in that both must be registered before the listener
     -- accepts anything; the route table is always consulted before fallbacks.

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Gitloom repository browser">
+  <title>Gitloom · 仓库浏览器</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Gitloom 首页">
+        <span class="brand-mark" aria-hidden="true">◆</span>
+        <span>
+          <strong>gitloom</strong>
+          <small>repository browser</small>
+        </span>
+      </a>
+      <div class="topbar-actions">
+        <span class="connection-dot" id="connection-dot" aria-hidden="true"></span>
+        <span class="connection-label" id="connection-label">正在连接</span>
+        <button class="button button-quiet" id="auth-toggle" type="button">登录</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="repo-rail" aria-label="仓库列表">
+        <div class="rail-head">
+          <div>
+            <p class="eyebrow">WORKSPACE</p>
+            <h1>仓库</h1>
+          </div>
+          <button class="icon-button" id="refresh-repos" type="button" title="刷新仓库" aria-label="刷新仓库">↻</button>
+        </div>
+        <label class="search-box">
+          <span aria-hidden="true">⌕</span>
+          <input id="repo-search" type="search" placeholder="搜索仓库" autocomplete="off">
+        </label>
+        <div id="repo-list" class="repo-list" role="list">
+          <div class="loading-row">正在读取仓库…</div>
+        </div>
+        <div class="rail-footer">
+          <span id="repo-count">0 个仓库</span>
+          <span class="muted">HTTP API</span>
+        </div>
+      </aside>
+
+      <section class="content" aria-live="polite">
+        <div id="empty-state" class="empty-state">
+          <div class="empty-orbit" aria-hidden="true"><span>◆</span></div>
+          <p class="eyebrow">GITLOOM</p>
+          <h2>选择一个仓库开始浏览</h2>
+          <p>查看代码、提交记录和每次变更的完整 diff。</p>
+        </div>
+
+        <div id="repo-view" hidden>
+          <section class="repo-heading">
+            <div class="repo-heading-copy">
+              <div class="crumbs" id="repo-crumbs"></div>
+              <h2 id="repo-title">—</h2>
+              <p id="repo-description" class="repo-description"></p>
+            </div>
+            <div class="repo-heading-meta">
+              <span class="visibility-pill" id="repo-visibility">公开</span>
+              <span id="repo-default-branch" class="branch-note"></span>
+            </div>
+          </section>
+
+          <nav class="view-tabs" aria-label="仓库视图">
+            <button class="view-tab active" type="button" data-view="code">代码</button>
+            <button class="view-tab" type="button" data-view="commits">提交</button>
+          </nav>
+
+          <div id="code-view" class="view-panel">
+            <div class="toolbar">
+              <label class="branch-select">
+                <span>分支</span>
+                <select id="branch-select" aria-label="选择分支"></select>
+              </label>
+              <button class="button button-quiet" id="up-directory" type="button" hidden>↑ 返回上级</button>
+              <div class="toolbar-spacer"></div>
+              <span id="current-path" class="path-label">/</span>
+            </div>
+            <div class="browser-card">
+              <div class="card-caption">
+                <span id="tree-caption">文件</span>
+                <span id="tree-count" class="muted"></span>
+              </div>
+              <div id="tree-list" class="tree-list"></div>
+            </div>
+            <div id="file-panel" class="file-panel" hidden>
+              <div class="file-head">
+                <div>
+                  <p class="eyebrow">FILE</p>
+                  <h3 id="file-title">—</h3>
+                </div>
+                <button class="button button-quiet" id="close-file" type="button">关闭</button>
+              </div>
+              <pre id="file-content" class="code-block"><code></code></pre>
+            </div>
+          </div>
+
+          <div id="commits-view" class="view-panel" hidden>
+            <div class="toolbar">
+              <span class="toolbar-title">提交记录</span>
+              <div class="toolbar-spacer"></div>
+              <span id="commit-count" class="muted"></span>
+            </div>
+            <div id="commit-list" class="commit-list"></div>
+            <div id="diff-panel" class="diff-panel" hidden>
+              <div class="file-head">
+                <div>
+                  <p class="eyebrow">COMMIT DIFF</p>
+                  <h3 id="diff-title">—</h3>
+                </div>
+                <button class="button button-quiet" id="close-diff" type="button">关闭</button>
+              </div>
+              <div id="diff-meta" class="diff-meta"></div>
+              <pre id="diff-content" class="diff-block"></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="auth-dialog" class="auth-dialog">
+    <form method="dialog" id="auth-form" class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">AUTHENTICATION</p>
+          <h2>登录 Gitloom</h2>
+        </div>
+        <button class="icon-button" value="cancel" type="submit" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-copy">登录后可以查看私有仓库。凭据只保存在当前浏览器标签页。</p>
+      <label>用户名<input id="auth-user" name="username" type="text" autocomplete="username" required></label>
+      <label>密码或访问令牌<input id="auth-password" name="password" type="password" autocomplete="current-password" required></label>
+      <p id="auth-message" class="form-message" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" value="cancel" type="submit">取消</button>
+        <button class="button button-primary" id="auth-submit" value="default" type="submit">登录</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

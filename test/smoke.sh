@@ -80,6 +80,15 @@ GIT="git -c credential.helper= -c credential.interactive=false -c protocol.versi
 curl -s "$BASE/api/v1/version" | grep -q '"name":"gitloom"' \
     && ok 'version endpoint' || bad 'version endpoint' "$(curl -s "$BASE/api/v1/version")"
 
+# The root is the browser entry point, not the old plain-text landing page.
+curl -s -D "$WORK/web.headers" "$BASE/" -o "$WORK/web.index"
+grep -q '<title>Gitloom · 仓库浏览器</title>' "$WORK/web.index" \
+    && ok 'browser entry point' || bad 'browser entry point' "$(head -c 160 "$WORK/web.index")"
+grep -qi '^content-security-policy:' "$WORK/web.headers" \
+    && ok 'browser sends a content security policy' || bad 'browser sends a content security policy' 'header missing'
+curl -s "$BASE/app.js" | grep -q 'loadRepos' \
+    && ok 'browser JavaScript is served' || bad 'browser JavaScript is served' 'asset missing'
+
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H 'Content-Type: application/json' -d '{"name":"nope"}' "$BASE/api/v1/repos")
 check 'create without credentials is 401' "$code" '401'
