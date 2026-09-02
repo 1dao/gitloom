@@ -507,6 +507,62 @@ do
        codec.parse_request_head('POST / HTTP/1.1\r\nHost: x\r\n')), 'incomplete')
 end
 
+-- ── the browser's static routes ─────────────────────────────────────
+--
+-- Driven through the test hook rather than web_install(), so the
+-- assets-are-missing branch can be reached without moving the real web/ aside.
+do
+    local index = __web_serve('web', '/')
+    eq('browser index is served', index.status, 200)
+    eq('browser index is html', index.headers['Content-Type'], 'text/html; charset=utf-8')
+    check('browser index carries a content security policy',
+        (index.headers['Content-Security-Policy'] or ''):find("default-src 'self'", 1, true) ~= nil,
+        index.headers['Content-Security-Policy'])
+    eq('browser index is never cached', index.headers['Cache-Control'], 'no-cache')
+    check('every asset placeholder is substituted',
+        not index.body:find('__ASSET_VERSION__', 1, true), 'placeholder left in the page')
+
+    -- The digest the page asks for is the one the asset route has to honour;
+    -- reading it back out of the HTML is what proves the two agree.
+    local version = index.body:match('/app%.js%?v=(%x+)')
+    check('the page stamps its script with a digest', version ~= nil, index.body:sub(1, 200))
+
+    local stamped = __web_serve('web', '/app.js', { v = version })
+    eq('a stamped asset is immutable', stamped.headers['Cache-Control'],
+       'public, max-age=31536000, immutable')
+    eq('a stamped asset streams from disk', stamped.file, 'web/app.js')
+    eq('a stamped asset keeps its type', stamped.content_type,
+       'application/javascript; charset=utf-8')
+
+    local bare = __web_serve('web', '/app.js')
+    eq('an unstamped asset is not cached', bare.headers['Cache-Control'], 'no-cache')
+
+    local stale = __web_serve('web', '/app.css', { v = 'not-the-digest' })
+    eq('a wrong digest is not cached either', stale.headers['Cache-Control'], 'no-cache')
+
+    eq('a missing web root answers 503 for the page',
+       __web_serve('web/nope', '/').status, 503)
+    eq('a missing web root answers 503 for an asset',
+       __web_serve('web/nope', '/app.css').status, 503)
+    check('the browser does not claim an unknown route',
+        __web_serve('web', '/nope') == nil, 'a route outside the browser was claimed')
+end
+
+-- ── HEAD falls back to the GET table ──────────────────────────────────
+--
+-- The codec already drops the body and keeps the Content-Length it would have
+-- had, so routing is the whole of what the server has to get right. Without it
+-- a monitor's HEAD / is a 404.
+do
+    http_get('/unit/head-probe', function() return http_response_text(200, 'probe') end)
+    eq('the probe route answers GET',
+       http_dispatch({ method = 'GET', path = '/unit/head-probe', headers = {} }, {}).status, 200)
+    eq('HEAD reaches the same handler',
+       http_dispatch({ method = 'HEAD', path = '/unit/head-probe', headers = {} }, {}).status, 200)
+    eq('a method with no route is still a 404',
+       http_dispatch({ method = 'PUT', path = '/unit/head-probe', headers = {} }, {}).status, 404)
+end
+
 out(string.format('\n[unit] %s (%d checks, %d failure(s))\n',
     fails == 0 and 'ALL PASS' or 'FAILED', total, fails))
 

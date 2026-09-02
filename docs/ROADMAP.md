@@ -148,9 +148,27 @@ repository reported that it changed nothing.
 **Browser slice: done (2026-09-02).** `app/web.lua` serves a same-origin,
 dependency-free SPA from `web/`. It covers the repository list, branch
 selection, tree navigation, raw blob viewing, commit history and bounded diff
-viewing. Credentials stay in the current browser tab and are sent as HTTP
-Basic only when the user logs in. The diff content endpoint is
-`GET .../commits/:ref/diff?path=` and is capped by `MAX_DIFF_MB`.
+viewing. The diff content endpoint is `GET .../commits/:ref/diff?path=` and is
+capped by `MAX_DIFF_MB`.
+
+Three things the browser forced, all of them fixed here rather than left as
+front-end workarounds:
+
+- **Tokens gained an expiry and a revoke.** A page cannot hold a password: any
+  script that runs on the origin can read what the page stored, and a password
+  is neither bounded nor revocable. So `auth_token_create` takes a TTL,
+  `auth_token_revoke` self-revokes the presented credential (and drops it from
+  the positive verification cache, which would otherwise keep answering for
+  AUTH_CACHE_SEC), and the browser exchanges the password for a twelve-hour
+  token at login and revokes it at logout. Omitting `ttl_seconds` still means a
+  token that never expires — the CI case, and every token already issued.
+- **HEAD is routed.** It fell through to a 404 because only GET was in the
+  table, which is what a reverse proxy and an uptime monitor send at `/` first.
+  The codec already drops the body and keeps the Content-Length, so routing was
+  the whole of it.
+- **Assets are addressed by a digest of their own bytes.** index.html is never
+  cached and names `/app.js?v=<digest>`, which is; otherwise the two are cached
+  independently and a client runs stale JavaScript against fresh HTML.
 
 Still to do in the front end: syntax highlighting, richer commit metadata,
 pagination and an administrative repository-creation flow. These are polish

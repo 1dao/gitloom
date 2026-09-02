@@ -112,6 +112,16 @@ h1, h2, h3, p { margin-top: 0; }
 .crumbs span { color: var(--dim); }
 .repo-heading h2 { font-size: clamp(25px, 3vw, 34px); letter-spacing: -.045em; margin: 0 0 8px; }
 .repo-description { color: var(--muted); font-size: 13px; margin: 0; max-width: 680px; }
+.clone-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; max-width: 520px; }
+.clone-label { color: var(--dim); font-size: 10px; letter-spacing: .16em; }
+.clone-row input {
+  flex: 1; min-width: 0;
+  background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 8px;
+  color: var(--muted); padding: 7px 10px;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 11px;
+}
+.clone-row input:focus { outline: none; border-color: var(--line); color: var(--text); }
+
 .repo-heading-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
 .visibility-pill { border: 1px solid rgba(88, 213, 201, .27); color: var(--accent); background: rgba(88, 213, 201, .08); border-radius: 999px; padding: 5px 10px; font-size: 10px; }
 .visibility-pill.private { border-color: rgba(244, 195, 106, .28); color: var(--warning); background: rgba(244, 195, 106, .08); }

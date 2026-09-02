@@ -1,6 +1,7 @@
 -- app/auth.lua — accounts, HTTP Basic authentication, and access decisions.
 --
--- Exports: auth_load, auth_user_list, auth_user_create, auth_token_create,
+-- Exports: auth_load, auth_user_list, auth_user_create,
+--          auth_token_create, auth_token_revoke,
 --          auth_identify, auth_can_read, auth_can_write, auth_challenge,
 --          auth_bootstrap, auth_kdf_setup, auth_too_many
 --
@@ -130,6 +131,57 @@ local function digest_equal(a, b)
     return diff == 0
 end
 
+-- A token with no expires_at never expires — the shape every token issued
+-- before this existed still has, and what automation asking for a CI credential
+-- still gets. The browser is the caller that wants the other kind.
+local function token_live(t)
+    return not t.expires_at or os.time() < t.expires_at
+end
+
+-- Drop expired entries. Only called where the list is being rewritten anyway,
+-- so an expired token costs nothing until somebody touches the account; it is
+-- already refused by auth_identify from the moment it lapses.
+local function prune_tokens(u)
+    local live = {}
+    for _, t in ipairs(u.tokens or {}) do
+        if token_live(t) then live[#live + 1] = t end
+    end
+    u.tokens = live
+end
+
+local function live_token_count(u)
+    local n = 0
+    for _, t in ipairs(u.tokens or {}) do
+        if token_live(t) then n = n + 1 end
+    end
+    return n
+end
+
+-- Decode an HTTP Basic header. Returns username, secret — or nil plus
+-- 'anonymous' (no header, a legitimate state) / 'bad credentials'. Kept in one
+-- place because two callers now read the presented credential: the one that
+-- verifies it and the one that revokes it.
+local function basic_credentials(req)
+    local hdr = req.headers and req.headers['authorization']
+    if not hdr or hdr == '' then return nil, 'anonymous' end
+
+    local b64 = hdr:match('^[Bb]asic%s+(%S+)$')
+    if not b64 then return nil, 'bad credentials' end
+    local decoded = xutils.base64_decode(b64)
+    if not decoded then return nil, 'bad credentials' end
+
+    -- Only the FIRST colon separates; a password may contain colons.
+    local username, secret = decoded:match('^([^:]*):(.*)$')
+    if not username or username == '' then return nil, 'bad credentials' end
+    return username, secret
+end
+
+local function cache_key(username, secret)
+    -- The secret is hashed into the key so the cache cannot be used to satisfy
+    -- a credential that has since changed, and so no plaintext lives in it.
+    return username .. ':' .. xutils.sha256_hex(secret)
+end
+
 local function password_verify(password, stored)
     local iter, salt, hex = tostring(stored or ''):match('^pbkdf2%$(%d+)%$(%x+)%$(%x+)$')
     if not iter then return false end
@@ -184,7 +236,7 @@ function g_exports.auth_user_list()
     for _, u in pairs(users) do
         out[#out + 1] = { username = u.username, admin = u.admin or false,
                           email = u.email, created_at = u.created_at,
-                          token_count = #(u.tokens or {}) }
+                          token_count = live_token_count(u) }
     end
     table.sort(out, function(a, b) return a.username < b.username end)
     return out
@@ -219,31 +271,67 @@ function g_exports.auth_user_create(username, password, opts)
 end
 
 -- Issue an access token. Returns the CLEAR token exactly once — only its digest
--- is stored, so a lost token is reissued rather than recovered.
-function g_exports.auth_token_create(username, label)
+-- is stored, so a lost token is reissued rather than recovered — plus the unix
+-- time it expires (nil when it never does). On failure: nil plus a message.
+--
+-- `ttl_sec` is what makes a browser session safe to store: the page exchanges a
+-- password for a short-lived token, so what sits in sessionStorage is bounded
+-- and revocable in a way the password behind it is not.
+function g_exports.auth_token_create(username, label, ttl_sec)
     local u = auth_user_get(username)
     if not u then return nil, 'no such user' end
+    ttl_sec = tonumber(ttl_sec)
+    if ttl_sec ~= nil and ttl_sec <= 0 then return nil, 'ttl_seconds must be positive' end
+
     local clear = util_rand_hex(32)
     u.tokens = u.tokens or {}
+    prune_tokens(u)
+    local expires_at = ttl_sec and (os.time() + math.floor(ttl_sec)) or nil
     u.tokens[#u.tokens + 1] = {
         label      = tostring(label or 'token'),
         hash       = xutils.sha256_hex(clear),
         created_at = os.time(),
+        expires_at = expires_at,
     }
     local ok, err = auth_save()
     if not ok then return nil, err end
-    return clear
+    return clear, expires_at
+end
+
+-- Revoke the token the caller is presenting — the browser's logout.
+--
+-- Self-revocation only: the credential comes out of the request rather than
+-- being named in it, so one session can never end another's and there is no
+-- endpoint that reaches somebody else's tokens. Returns true, or nil plus a
+-- message when the request is not authenticated with a token at all.
+function g_exports.auth_token_revoke(req)
+    local username, secret = basic_credentials(req)
+    if not username then return nil, secret end
+    local u = auth_user_get(username)
+    if not u then return nil, 'no such user' end
+
+    local digest = xutils.sha256_hex(secret)
+    local kept, found = {}, false
+    for _, t in ipairs(u.tokens or {}) do
+        if not found and digest_equal(digest, t.hash) then
+            found = true
+        elseif token_live(t) then
+            kept[#kept + 1] = t
+        end
+    end
+    if not found then return nil, 'this request is not authenticated with a token' end
+    u.tokens = kept
+
+    -- The positive verification cache would keep answering 'ok' for
+    -- AUTH_CACHE_SEC with a credential that no longer exists, which is exactly
+    -- the window a logout must not leave open.
+    verify_cache[cache_key(username, secret)] = nil
+    return auth_save()
 end
 
 -- ---------------------------------------------------------------------------
 -- Request authentication
 -- ---------------------------------------------------------------------------
-
-local function cache_key(username, secret)
-    -- The secret is hashed into the key so the cache cannot be used to satisfy
-    -- a credential that has since changed, and so no plaintext lives in it.
-    return username .. ':' .. xutils.sha256_hex(secret)
-end
 
 -- 'ok', 'bad', or nil when there is nothing usable cached.
 local function cache_lookup(k)
@@ -272,19 +360,10 @@ end
 -- must not collapse them: anonymous may proceed to the public view, the other
 -- two may not.
 function g_exports.auth_identify(req)
-    local hdr = req.headers and req.headers['authorization']
-    if not hdr or hdr == '' then return nil, 'anonymous' end
+    local username, secret = basic_credentials(req)
+    if not username then return nil, secret end
 
     local ip = req.peer_ip or '?'
-
-    local b64 = hdr:match('^[Bb]asic%s+(%S+)$')
-    if not b64 then return nil, 'bad credentials' end
-    local decoded = xutils.base64_decode(b64)
-    if not decoded then return nil, 'bad credentials' end
-
-    -- Only the FIRST colon separates; a password may contain colons.
-    local username, secret = decoded:match('^([^:]*):(.*)$')
-    if not username or username == '' then return nil, 'bad credentials' end
 
     -- A hit on the positive cache is checked BEFORE the rate limit, so a client
     -- in the middle of a legitimate clone is never locked out by someone else
@@ -313,9 +392,12 @@ function g_exports.auth_identify(req)
     end
 
     local ok = false
-    -- Tokens first: a plain SHA-256, and the common case for automation.
+    -- Tokens first: a plain SHA-256, and the common case for automation. An
+    -- expired one is not a credential any more, so it is skipped here rather
+    -- than waiting for something to rewrite the list and prune it.
+    local digest = xutils.sha256_hex(secret)
     for _, t in ipairs(u.tokens or {}) do
-        if digest_equal(xutils.sha256_hex(secret), t.hash) then ok = true; break end
+        if token_live(t) and digest_equal(digest, t.hash) then ok = true; break end
     end
     if not ok then ok = password_verify(secret, u.pwhash) end
 

@@ -196,6 +196,14 @@ end
 -- without opening a socket.
 function g_exports.http_dispatch(req, ctx)
     local handler, params = match_route(req.method, req.path)
+    -- HEAD is GET without a body, and the codec already drops the body while
+    -- keeping the Content-Length it would have had -- so routing is the only
+    -- part of it that needs saying. Without this every HEAD is a 404, which is
+    -- what a reverse proxy or an uptime monitor sends at the browser's entry
+    -- point before anything else.
+    if not handler and req.method:upper() == 'HEAD' then
+        handler, params = match_route('GET', req.path)
+    end
     if handler then
         ctx.params = params
         return handler(req, ctx)

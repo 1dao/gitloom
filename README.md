@@ -30,9 +30,10 @@ Issues and pull requests are not implemented yet — see
 
 On Linux use `./start.sh` instead — same arguments.
 
-Open <http://127.0.0.1:8686/> for the repository browser. It uses the same
-HTTP Basic credentials as the API and keeps them only in the current browser
-tab.
+Open <http://127.0.0.1:8686/> for the repository browser. Logging in exchanges
+the password for an access token that expires after twelve hours; only the
+token is kept, only in the current browser tab, and logging out revokes it. The
+password itself is never stored.
 
 ```bash
 curl -u admin:pick-something-real -H 'Content-Type: application/json' \
@@ -239,7 +240,8 @@ missing `/bin/sh`.
 | `DELETE /api/v1/repos/:owner/:name` | |
 | `GET /api/v1/users` | administrator only |
 | `POST /api/v1/users` | administrator only |
-| `POST /api/v1/user/tokens` | issue an access token; shown once |
+| `POST /api/v1/user/tokens` | `{label?, ttl_seconds?}`; the token is shown once |
+| `DELETE /api/v1/user/tokens` | revoke the token this request presents |
 
 Browsing a repository's contents:
 
@@ -254,7 +256,9 @@ Browsing a repository's contents:
 | `GET .../raw/:ref/<path>` | file contents |
 
 Authentication is HTTP Basic, with either a password or an access token as the
-password field. Browsing obeys the same visibility rule as the transport: a
+password field. A token without `ttl_seconds` never expires, which is what a CI
+job wants; the browser asks for one that does, so that the credential it has to
+keep in the page is bounded and revocable. Browsing obeys the same visibility rule as the transport: a
 private repository is 404 to anyone who may not read it.
 
 `:ref` is a branch, tag, or object id. A branch containing a slash has to be

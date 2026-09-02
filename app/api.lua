@@ -284,22 +284,47 @@ local function h_user_create(req, _ctx)
     return http_response_json(201, { username = u.username, admin = u.admin, email = u.email })
 end
 
+-- POST /api/v1/user/tokens  { label?, ttl_seconds? }
+--
+-- `ttl_seconds` is optional and absent means what it always meant: a token that
+-- never expires, which is what a CI job wants. The browser passes one, because
+-- a credential it has to keep in sessionStorage should stop working on its own.
 local function h_token_create(req, _ctx)
     local user, resp = require_user(req)
     if not user then return resp end
 
     local b = codec.json(req)
     local label = type(b) == 'table' and b.label or 'token'
+    local ttl = type(b) == 'table' and b.ttl_seconds or nil
+    if ttl ~= nil and not tonumber(ttl) then
+        return http_response_error(400, 'ttl_seconds must be a number of seconds')
+    end
 
-    local clear, err = auth_token_create(user.username, label)
-    if not clear then return http_response_error(400, err) end
+    local clear, expires_at = auth_token_create(user.username, label, ttl)
+    if not clear then return http_response_error(400, expires_at) end
     -- Shown once. Only the digest is stored, so there is no endpoint that can
     -- ever return this value again.
     return http_response_json(201, {
         label = label,
         token = clear,
+        expires_at = expires_at,
         note = 'store this now; it cannot be retrieved again',
     })
+end
+
+-- DELETE /api/v1/user/tokens
+--
+-- Revokes the token this request is authenticated with, and nothing else: the
+-- credential is read out of the Authorization header rather than named in the
+-- body, so there is no shape of this request that reaches another session's
+-- token. It is what the browser calls on logout.
+local function h_token_revoke(req, _ctx)
+    local user, resp = require_user(req)
+    if not user then return resp end
+
+    local ok, err = auth_token_revoke(req)
+    if not ok then return http_response_error(400, tostring(err)) end
+    return http_response_json(200, { revoked = true })
 end
 
 -- ---------------------------------------------------------------------------
@@ -476,6 +501,7 @@ function g_exports.api_install()
     http_get('/api/v1/users', h_user_list)
     http_post('/api/v1/users', h_user_create)
     http_post('/api/v1/user/tokens', h_token_create)
+    http_delete('/api/v1/user/tokens', h_token_revoke)
 
     -- Browsing. The tree and raw routes end in a wildcard because a file path
     -- inside a repository has no fixed segment count.

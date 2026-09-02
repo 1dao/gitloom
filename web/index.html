@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Gitloom repository browser">
   <title>Gitloom · 仓库浏览器</title>
-  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/app.css?v=__ASSET_VERSION__">
 </head>
 <body>
   <div class="shell">
@@ -60,6 +60,11 @@
               <div class="crumbs" id="repo-crumbs"></div>
               <h2 id="repo-title">—</h2>
               <p id="repo-description" class="repo-description"></p>
+              <div class="clone-row" id="clone-row" hidden>
+                <span class="clone-label">CLONE</span>
+                <input id="clone-url" type="text" readonly aria-label="克隆地址">
+                <button class="button button-quiet" id="copy-clone" type="button">复制</button>
+              </div>
             </div>
             <div class="repo-heading-meta">
               <span class="visibility-pill" id="repo-visibility">公开</span>
@@ -134,7 +139,7 @@
         </div>
         <button class="icon-button" value="cancel" type="submit" aria-label="关闭">×</button>
       </div>
-      <p class="dialog-copy">登录后可以查看私有仓库。凭据只保存在当前浏览器标签页。</p>
+      <p class="dialog-copy">登录后可以查看私有仓库。密码只用来换取一个 12 小时后自动失效的访问令牌，令牌只存在当前标签页，退出时会立即吊销——密码本身不会被保存。</p>
       <label>用户名<input id="auth-user" name="username" type="text" autocomplete="username" required></label>
       <label>密码或访问令牌<input id="auth-password" name="password" type="password" autocomplete="current-password" required></label>
       <p id="auth-message" class="form-message" role="alert"></p>
@@ -146,6 +151,6 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=__ASSET_VERSION__" defer></script>
 </body>
 </html>

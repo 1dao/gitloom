@@ -80,14 +80,42 @@ GIT="git -c credential.helper= -c credential.interactive=false -c protocol.versi
 curl -s "$BASE/api/v1/version" | grep -q '"name":"gitloom"' \
     && ok 'version endpoint' || bad 'version endpoint' "$(curl -s "$BASE/api/v1/version")"
 
+# ── The repository browser ──────────────────────────────────────────────────
 # The root is the browser entry point, not the old plain-text landing page.
-curl -s -D "$WORK/web.headers" "$BASE/" -o "$WORK/web.index"
-grep -q '<title>Gitloom · 仓库浏览器</title>' "$WORK/web.index" \
-    && ok 'browser entry point' || bad 'browser entry point' "$(head -c 160 "$WORK/web.index")"
+# Asserted on structure and headers rather than on any of the page's wording,
+# which is copy and will change without the server being wrong.
+code=$(curl -s -o "$WORK/web.index" -D "$WORK/web.headers" -w '%{http_code}' "$BASE/")
+check 'browser entry point is served' "$code" '200'
+grep -q 'id="repo-list"' "$WORK/web.index" \
+    && ok 'browser entry point is the page' || bad 'browser entry point is the page' "$(head -c 160 "$WORK/web.index")"
 grep -qi '^content-security-policy:' "$WORK/web.headers" \
     && ok 'browser sends a content security policy' || bad 'browser sends a content security policy' 'header missing'
 curl -s "$BASE/app.js" | grep -q 'loadRepos' \
     && ok 'browser JavaScript is served' || bad 'browser JavaScript is served' 'asset missing'
+
+# A monitor or a reverse proxy sends HEAD at the entry point before anything
+# else; it used to be a 404, because only GET was ever routed.
+code=$(curl -s -o /dev/null -w '%{http_code}' -I "$BASE/")
+check 'HEAD on the entry point' "$code" '200'
+
+# index.html carries the digest of the assets it expects, and only that stamped
+# URL is cacheable -- otherwise an upgrade leaves clients on stale JavaScript.
+grep -q '__ASSET_VERSION__' "$WORK/web.index" \
+    && bad 'asset digest is substituted' 'placeholder left in the page' \
+    || ok 'asset digest is substituted'
+ASSET_V=$(sed -n 's|.*/app\.js?v=\([0-9a-f][0-9a-f]*\).*|\1|p' "$WORK/web.index" | head -1)
+if [ -n "$ASSET_V" ]; then
+    curl -s -o /dev/null -D "$WORK/asset.headers" "$BASE/app.js?v=$ASSET_V"
+    grep -qi '^cache-control: public, max-age=31536000, immutable' "$WORK/asset.headers" \
+        && ok 'a stamped asset is cacheable' \
+        || bad 'a stamped asset is cacheable' "$(grep -i '^cache-control' "$WORK/asset.headers")"
+    curl -s -o /dev/null -D "$WORK/asset.bare" "$BASE/app.js"
+    grep -qi '^cache-control: no-cache' "$WORK/asset.bare" \
+        && ok 'an unstamped asset is not cacheable' \
+        || bad 'an unstamped asset is not cacheable' "$(grep -i '^cache-control' "$WORK/asset.bare")"
+else
+    bad 'asset digest is substituted' 'no digest in the page'
+fi
 
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H 'Content-Type: application/json' -d '{"name":"nope"}' "$BASE/api/v1/repos")
@@ -197,6 +225,47 @@ if [ -n "$TOKEN" ]; then
         || bad 'token authenticates a clone' "$(cat "$WORK/e6")"
 else
     bad 'token issued' 'no token in the response'
+fi
+
+# Omitting ttl_seconds still means a token that never expires -- what a CI job
+# wants, and what every token issued before expiry existed already is.
+curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+    -d '{"label":"smoke"}' "$BASE/api/v1/user/tokens" | grep -q '"expires_at"' \
+    && bad 'a token without a ttl never expires' 'expires_at was set anyway' \
+    || ok 'a token without a ttl never expires'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X POST \
+    -H 'Content-Type: application/json' -d '{"ttl_seconds":"soon"}' \
+    "$BASE/api/v1/user/tokens")
+check 'a non-numeric ttl is refused' "$code" '400'
+
+# The browser's credential: short-lived, and revoked the moment it logs out.
+SESSION=$(curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+    -d '{"label":"web browser","ttl_seconds":43200}' "$BASE/api/v1/user/tokens")
+echo "$SESSION" | grep -q '"expires_at":[0-9]' \
+    && ok 'a ttl token reports its expiry' || bad 'a ttl token reports its expiry' "$SESSION"
+SESSION_TOKEN=$(echo "$SESSION" | sed -n 's/.*"token":"\([0-9a-f]*\)".*/\1/p')
+if [ -n "$SESSION_TOKEN" ]; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$SESSION_TOKEN" \
+        "$BASE/api/v1/repos/admin/secret")
+    check 'a session token reads a private repository' "$code" '200'
+
+    code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$SESSION_TOKEN" \
+        -X DELETE "$BASE/api/v1/user/tokens")
+    check 'a session token revokes itself' "$code" '200'
+
+    # The positive verification cache must not keep answering for a credential
+    # that no longer exists -- that window is the whole point of revoking.
+    code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$SESSION_TOKEN" \
+        "$BASE/api/v1/repos/admin/secret")
+    check 'a revoked token stops working at once' "$code" '401'
+
+    # The password is not a token, so there is nothing for it to revoke.
+    code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" \
+        -X DELETE "$BASE/api/v1/user/tokens")
+    check 'a password cannot revoke a token' "$code" '400'
+else
+    bad 'a ttl token reports its expiry' 'no token in the response'
 fi
 
 # ── Protocol edge cases ─────────────────────────────────────────────────────

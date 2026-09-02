@@ -1,6 +1,11 @@
 (function () {
   'use strict';
 
+  // The password is exchanged for a token that expires on its own, and only the
+  // token is ever stored. What sessionStorage holds is then a bounded, revocable
+  // credential rather than the account password behind it.
+  var SESSION_HOURS = 12;
+
   var state = {
     repos: [],
     repo: null,
@@ -8,12 +13,48 @@
     path: '',
     commits: [],
     username: '',
-    password: '',
+    token: '',
     toastTimer: null,
   };
 
+  // Every navigation takes a ticket. A response whose ticket is no longer the
+  // current one belongs to a repository, branch or directory the user has
+  // already left, and rendering it would show them the wrong tree — which is
+  // not theoretical on a server where each listing forks a git process, so a
+  // slow response really does arrive after a fast one issued later.
+  var seq = { repos: 0, view: 0, file: 0, diff: 0 };
+
   var $ = function (id) { return document.getElementById(id); };
   var $$ = function (selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); };
+
+  function beginView() {
+    seq.view += 1;
+    seq.file += 1;   // a panel opened under the old view must not land either
+    seq.diff += 1;
+    return seq.view;
+  }
+
+  function viewIsCurrent(ticket) { return ticket === seq.view; }
+
+  // The API answers in English — its error text is also what git clients read —
+  // so the status is what gets translated here. The server's own wording is
+  // kept only as the fallback for a status we have nothing better for, rather
+  // than being pasted into the middle of a Chinese interface.
+  var STATUS_TEXT = {
+    400: '请求无效',
+    401: '需要登录',
+    403: '没有访问权限',
+    404: '没有找到内容',
+    413: '内容超出服务器允许的大小',
+    429: '尝试过于频繁，请稍后再试',
+    500: '服务器内部错误',
+    502: '服务器暂时无法响应',
+    503: '服务暂时不可用',
+  };
+
+  function statusMessage(status, fallback) {
+    return STATUS_TEXT[status] || fallback || ('请求失败（' + status + '）');
+  }
 
   function setConnection(kind, label) {
     var dot = $('connection-dot');
@@ -49,47 +90,62 @@
   function loadCredentials() {
     try {
       state.username = sessionStorage.getItem('gitloom.username') || '';
-      state.password = sessionStorage.getItem('gitloom.password') || '';
+      state.token = sessionStorage.getItem('gitloom.token') || '';
     } catch (_) {
       state.username = '';
-      state.password = '';
+      state.token = '';
     }
+    if (!state.token) state.username = '';
   }
 
-  function saveCredentials(username, password) {
+  function saveCredentials(username, token) {
     state.username = username;
-    state.password = password;
+    state.token = token;
     try {
       sessionStorage.setItem('gitloom.username', username);
-      sessionStorage.setItem('gitloom.password', password);
+      sessionStorage.setItem('gitloom.token', token);
     } catch (_) {}
   }
 
   function clearCredentials() {
     state.username = '';
-    state.password = '';
+    state.token = '';
     try {
       sessionStorage.removeItem('gitloom.username');
-      sessionStorage.removeItem('gitloom.password');
+      sessionStorage.removeItem('gitloom.token');
+      sessionStorage.removeItem('gitloom.password');   // written by older builds
     } catch (_) {}
+  }
+
+  function encodeBasic(username, secret) {
+    return window.btoa(unescape(encodeURIComponent(username + ':' + secret)));
   }
 
   function authHeaders() {
     var headers = { Accept: 'application/json' };
-    if (state.username) {
-      headers.Authorization = 'Basic ' + window.btoa(unescape(encodeURIComponent(state.username + ':' + state.password)));
+    if (state.username && state.token) {
+      headers.Authorization = 'Basic ' + encodeBasic(state.username, state.token);
     }
     return headers;
   }
 
-  function parseError(response) {
+  function serverText(response) {
     return response.text().then(function (raw) {
       try {
         var data = JSON.parse(raw);
-        return data.error || data.message || ('请求失败（' + response.status + '）');
+        return data.error || data.message || '';
       } catch (_) {
-        return raw || ('请求失败（' + response.status + '）');
+        return raw || '';
       }
+    }, function () { return ''; });
+  }
+
+  function failure(response) {
+    return serverText(response).then(function (detail) {
+      var error = new Error(statusMessage(response.status, detail));
+      error.status = response.status;
+      error.detail = detail;   // for the console; never rendered on its own
+      throw error;
     });
   }
 
@@ -98,20 +154,39 @@
     opts.headers = Object.assign({}, authHeaders(), opts.headers || {});
     return fetch(path, opts).then(function (response) {
       if (response.ok) return response;
-      if (response.status === 401 && state.username) {
+      if (response.status === 401 && state.token) {
+        // The token has expired or been revoked. Say so once, here, rather than
+        // letting every panel report "需要登录" on its own.
         clearCredentials();
         updateAuthButton();
+        showToast('登录已过期，请重新登录');
       }
-      return parseError(response).then(function (message) {
-        var error = new Error(message);
-        error.status = response.status;
-        throw error;
-      });
+      return failure(response);
     });
   }
 
   function json(path) {
     return api(path).then(function (response) { return response.json(); });
+  }
+
+  // Exchange the password for a short-lived token. The password never reaches
+  // storage: it is used for exactly this one request and then dropped.
+  function login(username, password) {
+    return fetch('/api/v1/user/tokens', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: 'Basic ' + encodeBasic(username, password),
+      },
+      body: JSON.stringify({ label: 'web browser', ttl_seconds: SESSION_HOURS * 3600 }),
+    }).then(function (response) {
+      if (!response.ok) return failure(response);
+      return response.json();
+    }).then(function (data) {
+      if (!data || !data.token) throw new Error('服务器没有返回访问令牌');
+      saveCredentials(username, data.token);
+    });
   }
 
   function encodeRef(ref) {
@@ -182,9 +257,11 @@
   }
 
   function loadRepos() {
+    var ticket = (seq.repos += 1);
     setConnection('', '正在读取');
     setLoading($('repo-list'), '正在读取仓库…');
     return json('/api/v1/repos').then(function (data) {
+      if (ticket !== seq.repos) return state.repos;
       state.repos = Array.isArray(data.repos) ? data.repos : [];
       setConnection('ok', state.username ? '已登录' : '在线');
       renderRepos();
@@ -194,6 +271,7 @@
       }
       return state.repos;
     }).catch(function (error) {
+      if (ticket !== seq.repos) throw error;
       if (error.status === 401) {
         setConnection('', '需要登录');
         setError($('repo-list'), '登录后查看仓库');
@@ -207,7 +285,51 @@
     });
   }
 
+  // `<span>workspace</span> / owner / name`, built rather than assembled as
+  // markup: repository and account names are constrained server-side, but this
+  // is the one place that would turn a slip in that constraint into script.
+  function renderCrumbs(repo) {
+    var crumbs = $('repo-crumbs');
+    crumbs.textContent = '';
+    var workspace = document.createElement('span');
+    workspace.textContent = 'workspace';
+    crumbs.appendChild(workspace);
+    crumbs.appendChild(document.createTextNode(' / ' + repo.owner + ' / ' + repo.name));
+  }
+
+  function renderCloneUrl(repo) {
+    var row = $('clone-row');
+    var input = $('clone-url');
+    input.value = repo.clone_url || '';
+    row.hidden = !input.value;
+  }
+
+  function copyCloneUrl() {
+    var input = $('clone-url');
+    if (!input.value) return;
+    input.focus();
+    input.setSelectionRange(0, input.value.length);
+
+    function fallback() {
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+      showToast(ok ? '已复制克隆地址' : '复制失败，请手动选择');
+    }
+
+    // navigator.clipboard exists only in a secure context, and this server is
+    // routinely reached over plain HTTP on a LAN address — so the selection
+    // fallback is the common path, not the exotic one.
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(input.value).then(function () {
+        showToast('已复制克隆地址');
+      }, fallback);
+    } else {
+      fallback();
+    }
+  }
+
   function selectRepo(repo) {
+    var view = beginView();
     state.repo = repo;
     state.branch = repo.default_branch || 'main';
     state.path = '';
@@ -215,22 +337,32 @@
     $('repo-view').hidden = false;
     $('repo-title').textContent = repo.full_name;
     $('repo-description').textContent = repo.description || '暂无描述';
-    $('repo-crumbs').innerHTML = '<span>workspace</span> / ' + repo.owner + ' / ' + repo.name;
+    renderCrumbs(repo);
+    renderCloneUrl(repo);
     var visibility = $('repo-visibility');
     visibility.textContent = repo.private ? '私有' : '公开';
     visibility.className = 'visibility-pill' + (repo.private ? ' private' : '');
     $('repo-default-branch').textContent = '默认分支 · ' + (repo.default_branch || 'main');
+    hideFile();
+    $('diff-panel').hidden = true;
     renderRepos();
-    loadBranches().then(function () { return loadTree(); });
-    loadCommits();
     showView('code');
+
+    // Branches first: loadBranches can correct state.branch when the recorded
+    // default is not in the list, and a commit list fetched before that lands
+    // is a commit list for a branch the select is no longer showing.
+    return loadBranches(view).then(function () {
+      if (!viewIsCurrent(view)) return null;
+      return Promise.all([loadTree(view), loadCommits(view)]);
+    });
   }
 
-  function loadBranches() {
+  function loadBranches(view) {
     var select = $('branch-select');
     select.textContent = '';
     select.disabled = true;
     return json(repoPath('/branches')).then(function (data) {
+      if (!viewIsCurrent(view)) return [];
       var branches = Array.isArray(data.branches) ? data.branches : [];
       if (!branches.length) {
         var empty = document.createElement('option');
@@ -251,6 +383,7 @@
       select.disabled = branches.length < 2;
       return branches;
     }).catch(function () {
+      if (!viewIsCurrent(view)) return [];
       var option = document.createElement('option');
       option.value = state.branch;
       option.textContent = state.branch || 'main';
@@ -259,7 +392,7 @@
     });
   }
 
-  function loadTree() {
+  function loadTree(view) {
     var list = $('tree-list');
     var path = encodePath(state.path);
     var suffix = '/tree/' + encodeRef(state.branch) + (path ? '/' + path : '');
@@ -267,6 +400,7 @@
     $('current-path').textContent = '/' + (state.path || '');
     $('up-directory').hidden = !state.path;
     return json(repoPath(suffix)).then(function (data) {
+      if (!viewIsCurrent(view)) return [];
       var entries = Array.isArray(data.entries) ? data.entries : [];
       $('tree-caption').textContent = state.path ? state.path : '文件';
       $('tree-count').textContent = entries.length + ' 项';
@@ -275,9 +409,10 @@
         setError(list, '这个目录是空的');
         return entries;
       }
-      entries.forEach(renderTreeEntry);
+      entries.forEach(function (entry) { renderTreeEntry(entry, list); });
       return entries;
     }).catch(function (error) {
+      if (!viewIsCurrent(view)) return [];
       $('tree-count').textContent = '';
       setError(list, error.status === 404 ? '这个分支还没有可浏览的文件' : error.message);
       return [];
@@ -293,7 +428,7 @@
     return (n / 1024 / 1024 / 1024).toFixed(1) + ' GB';
   }
 
-  function renderTreeEntry(entry) {
+  function renderTreeEntry(entry, list) {
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'tree-row ' + (entry.type === 'tree' ? 'directory' : 'file');
@@ -317,36 +452,44 @@
     row.appendChild(chevron);
     row.addEventListener('click', function () {
       if (entry.type === 'tree') {
+        var view = beginView();
         state.path = entry.path;
         hideFile();
-        loadTree();
+        loadTree(view);
       } else {
         loadFile(entry.path);
       }
     });
-    $('tree-list').appendChild(row);
+    list.appendChild(row);
   }
 
   function loadFile(path) {
+    var ticket = (seq.file += 1);
     var panel = $('file-panel');
     panel.hidden = false;
     $('file-title').textContent = path;
     $('file-content').textContent = '正在读取…';
     var suffix = '/raw/' + encodeRef(state.branch) + '/' + encodePath(path);
     api(repoPath(suffix)).then(function (response) { return response.text(); }).then(function (body) {
+      if (ticket !== seq.file) return;
       $('file-content').textContent = body;
       panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }).catch(function (error) {
+      if (ticket !== seq.file) return;
       $('file-content').textContent = error.message;
     });
   }
 
-  function hideFile() { $('file-panel').hidden = true; }
+  function hideFile() {
+    seq.file += 1;   // whatever is in flight no longer has a panel to land in
+    $('file-panel').hidden = true;
+  }
 
-  function loadCommits() {
+  function loadCommits(view) {
     var list = $('commit-list');
     setLoading(list, '正在读取提交记录…');
     return json(repoPath('/commits?ref=' + encodeURIComponent(state.branch) + '&limit=50')).then(function (data) {
+      if (!viewIsCurrent(view)) return [];
       state.commits = Array.isArray(data.commits) ? data.commits : [];
       $('commit-count').textContent = state.commits.length + ' 条';
       list.textContent = '';
@@ -354,16 +497,17 @@
         setError(list, '这个分支还没有提交');
         return [];
       }
-      state.commits.forEach(renderCommit);
+      state.commits.forEach(function (commit) { renderCommit(commit, list); });
       return state.commits;
     }).catch(function (error) {
+      if (!viewIsCurrent(view)) return [];
       $('commit-count').textContent = '';
       setError(list, error.message);
       return [];
     });
   }
 
-  function renderCommit(commit) {
+  function renderCommit(commit, list) {
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'commit-row';
@@ -388,7 +532,7 @@
     date.textContent = formatDate(commit.author && commit.author.date);
     row.appendChild(date);
     row.addEventListener('click', function () { loadDiff(commit); });
-    $('commit-list').appendChild(row);
+    list.appendChild(row);
   }
 
   function formatDate(value) {
@@ -398,6 +542,7 @@
   }
 
   function loadDiff(commit) {
+    var ticket = (seq.diff += 1);
     var panel = $('diff-panel');
     panel.hidden = false;
     $('diff-title').textContent = commit.subject || commit.short || commit.oid;
@@ -406,9 +551,11 @@
     $('diff-content').textContent = '正在生成 diff…';
     var suffix = '/commits/' + encodeURIComponent(commit.oid) + '/diff';
     json(repoPath(suffix)).then(function (data) {
+      if (ticket !== seq.diff) return;
       renderDiff(String(data.diff || ''));
       panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }).catch(function (error) {
+      if (ticket !== seq.diff) return;
       $('diff-content').textContent = error.message;
     });
   }
@@ -450,7 +597,15 @@
   }
 
   function logout() {
+    // Best effort, and deliberately before the credential is dropped: the token
+    // is gone from this tab either way, but leaving it valid on the server is
+    // exactly what issuing a revocable token was for.
+    if (state.token) {
+      fetch('/api/v1/user/tokens', { method: 'DELETE', headers: authHeaders() })
+        .catch(function () {});
+    }
     clearCredentials();
+    beginView();
     state.repo = null;
     $('repo-view').hidden = true;
     $('empty-state').hidden = false;
@@ -461,6 +616,7 @@
 
   $('repo-search').addEventListener('input', renderRepos);
   $('refresh-repos').addEventListener('click', function () { loadRepos().catch(function () {}); });
+  $('copy-clone').addEventListener('click', copyCloneUrl);
   $('auth-toggle').addEventListener('click', function () {
     if (state.username) logout(); else openAuth();
   });
@@ -473,32 +629,40 @@
       return;
     }
     $('auth-submit').disabled = true;
-    saveCredentials(username, password);
-    loadRepos().then(function () {
+    login(username, password).then(function () {
+      $('auth-password').value = '';
       $('auth-dialog').close();
       updateAuthButton();
       showToast('登录成功');
+      return loadRepos().catch(function () {});
     }).catch(function (error) {
       clearCredentials();
-      $('auth-message').textContent = error.message || '登录失败';
+      updateAuthButton();
+      $('auth-message').textContent = error.status === 401
+        ? '用户名或密码不正确' : (error.message || '登录失败');
     }).finally(function () { $('auth-submit').disabled = false; });
   });
   $('branch-select').addEventListener('change', function (event) {
+    var view = beginView();
     state.branch = event.target.value;
     state.path = '';
     hideFile();
-    loadTree();
-    loadCommits();
+    loadTree(view);
+    loadCommits(view);
   });
   $('up-directory').addEventListener('click', function () {
+    var view = beginView();
     var parts = state.path.split('/');
     parts.pop();
     state.path = parts.join('/');
     hideFile();
-    loadTree();
+    loadTree(view);
   });
   $('close-file').addEventListener('click', hideFile);
-  $('close-diff').addEventListener('click', function () { $('diff-panel').hidden = true; });
+  $('close-diff').addEventListener('click', function () {
+    seq.diff += 1;
+    $('diff-panel').hidden = true;
+  });
   $$('.view-tab').forEach(function (tab) { tab.addEventListener('click', function () { showView(tab.dataset.view); }); });
 
   loadCredentials();
