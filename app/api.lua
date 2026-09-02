@@ -22,6 +22,7 @@
 --   GET    /api/v1/repos/:owner/:name/tags
 --   GET    /api/v1/repos/:owner/:name/commits           ?ref= &limit= &skip= &path=
 --   GET    /api/v1/repos/:owner/:name/commits/:oid
+--   GET    /api/v1/repos/:owner/:name/commits/:oid/diff  ?path=
 --   GET    /api/v1/repos/:owner/:name/tree/:ref/*path   directory listing
 --   GET    /api/v1/repos/:owner/:name/raw/:ref/*path    file contents
 
@@ -365,6 +366,32 @@ local function h_commit(req, ctx)
     return http_response_json(200, commit)
 end
 
+local function h_commit_diff(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+
+    -- Resolve the commit exactly as h_commit does; the resulting object id is
+    -- the only revision text browse_diff is allowed to pass to git.
+    local oid, refused = resolve_ref(dir, rec, ctx.params.oid)
+    if not oid then return refused end
+
+    local path, perr = browse_decode_path((req.query or {}).path)
+    if path == nil then return http_response_error(400, perr) end
+
+    local patch, err = browse_diff(dir, oid, path)
+    if not patch then
+        local message = http_safe_error(err)
+        if tostring(err):find('exceeds MAX_DIFF_MB', 1, true) then
+            return http_response_error(413, message)
+        end
+        return http_response_error(500, message)
+    end
+    return http_response_json(200, {
+        ref = refused, oid = oid, path = path,
+        diff = patch,
+    })
+end
+
 local function h_tree(req, ctx)
     local rec, dir = readable_repo(req, ctx)
     if not rec then return dir end
@@ -468,6 +495,7 @@ function g_exports.api_install()
     http_get('/api/v1/repos/:owner/:name/tags', h_tags)
     http_get('/api/v1/repos/:owner/:name/commits', h_commits)
     http_get('/api/v1/repos/:owner/:name/commits/:oid', h_commit)
+    http_get('/api/v1/repos/:owner/:name/commits/:oid/diff', h_commit_diff)
     http_get('/api/v1/repos/:owner/:name/tree/:ref', h_tree)
     http_get('/api/v1/repos/:owner/:name/tree/:ref/*path', h_tree)
     http_get('/api/v1/repos/:owner/:name/raw/:ref/*path', h_raw)

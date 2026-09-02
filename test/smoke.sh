@@ -248,6 +248,19 @@ root=$(curl -s "$DEMO/commits?ref=main&limit=50" | grep -o '"oid":"[0-9a-f]*"' |
 curl -s "$DEMO/commits/$root" | grep -q '"files":\[{' \
     && ok 'root commit lists its files' || bad 'root commit lists its files' "$(curl -s "$DEMO/commits/$root" | grep -o '"files":[^]]*.')"
 
+# The diff endpoint returns patch content for the same resolved commit. The
+# initial commit is important here: it exercises the --root path rather than a
+# normal parent-to-child diff.
+curl -s "$DEMO/commits/$root/diff" | grep -q '"diff":".*hello gitloom' \
+    && ok 'commit diff returns patch content' || bad 'commit diff returns patch content' "$(curl -s "$DEMO/commits/$root/diff" | head -c 240)"
+
+# A path filter is decoded before it reaches git, and a traversal attempt is
+# rejected just like the tree/raw browsing endpoints.
+curl -s "$DEMO/commits/$root/diff?path=README.md" | grep -q '"path":"README.md"' \
+    && ok 'commit diff honours a path filter' || bad 'commit diff honours a path filter' "$(curl -s "$DEMO/commits/$root/diff?path=README.md")"
+code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/commits/$root/diff?path=%2e%2e%2fgitloom.cfg")
+check 'commit diff rejects a traversal path' "$code" '400'
+
 # An empty list stays an array, like refs.
 curl -s "$DEMO/tags" | grep -q '"tags":\[\]' \
     && ok 'empty tag list is []' || bad 'empty tag list is []' "$(curl -s "$DEMO/tags")"

@@ -36,6 +36,7 @@ boot.load_script('app/http.lua')
 boot.load_script('app/stream.lua')
 boot.load_script('app/browse.lua')
 boot.load_script('test/module_scope.lua')
+local codec = dofile('scripts/core/share/xhttp_codec.lua')
 
 local fails, total = 0, 0
 local function out(s) io.write(s); io.flush() end
@@ -467,6 +468,42 @@ do
     -- Surrounding spaces are normal in a real header.
     eq('spaces around an entry are trimmed',
        http_client_ip('10.0.0.1', xff('  1.2.3.4  '), PROXY), '1.2.3.4')
+end
+
+-- ── incremental HTTP request headers ───────────────────────────────────────
+--
+-- Smart-HTTP needs to route and authorise a request before its potentially
+-- huge git body has arrived. The header parser must therefore expose framing
+-- without materialising the body, while the legacy parser keeps its existing
+-- body-size and decompression behaviour.
+do
+    local raw = table.concat({
+        'POST /admin/demo.git/git-receive-pack HTTP/1.1\r\n',
+        'Host: localhost\r\n',
+        'Content-Type: application/x-git-receive-pack-request\r\n',
+        'Content-Length: 104857600\r\n',
+        'Connection: close\r\n',
+        '\r\n',
+        'body-prefix',
+    })
+    local head, body_start, err = codec.parse_request_head(raw)
+    check('request head parses before the body is complete', head ~= nil, err)
+    eq('request head body start', body_start,
+       raw:find('\r\n\r\n', 1, true) + 4)
+    eq('request head keeps content length', head and head.content_length, 104857600)
+    eq('request head keeps body out of the table', head and head.body, nil)
+    eq('request head parses target path', head and head.path,
+       '/admin/demo.git/git-receive-pack')
+
+    local chunked = 'POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n'
+    local chead = codec.parse_request_head(chunked)
+    check('request head recognises chunked framing', chead and chead.chunked == true,
+          chead and tostring(chead.chunked))
+    eq('chunked head has no content length', chead and chead.content_length, nil)
+
+    local incomplete = codec.parse_request_head('POST / HTTP/1.1\r\nHost: x\r\n')
+    eq('incomplete request head is reported', select(3,
+       codec.parse_request_head('POST / HTTP/1.1\r\nHost: x\r\n')), 'incomplete')
 end
 
 out(string.format('\n[unit] %s (%d checks, %d failure(s))\n',

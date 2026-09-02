@@ -2,7 +2,7 @@
 --
 -- Exports: browse_path_ok, browse_decode_path, browse_resolve,
 --          browse_tree, browse_blob_info, browse_blob_file,
---          browse_log, browse_commit, browse_refs
+--          browse_log, browse_commit, browse_diff, browse_refs
 --
 -- Everything here answers "what is IN this repository", as opposed to repo.lua,
 -- which answers "which repositories are there". All of it shells out; all of it
@@ -322,6 +322,38 @@ function g_exports.browse_commit(dir, oid)
     end
     commit.files = util_json_array(files)
     return commit
+end
+
+-- Unified patch for one commit. The commit id must already have come from
+-- browse_resolve, so caller-controlled ref text never reaches this command.
+-- A path filter is optional and MUST have been checked by browse_decode_path
+-- before it arrives here.
+--
+-- Keep the cap on the captured output rather than letting a large generated
+-- patch become an unbounded Lua string. Reading one byte past the configured
+-- limit lets us distinguish an exact-size patch from a truncated capture.
+function g_exports.browse_diff(dir, oid, path)
+    local max = cfg_int('MAX_DIFF_MB', 8) * 1024 * 1024
+    if max <= 0 then return nil, 'diff output disabled' end
+
+    local args = {
+        'show', '--format=', '--patch', '--binary', '--full-index',
+        '--no-color', '--no-ext-diff', '--root', '--end-of-options', oid,
+    }
+    if path and path ~= '' then
+        args[#args + 1] = '--'
+        args[#args + 1] = path
+    end
+
+    local r = git_exec(args, { cwd = dir, max_capture = max + 1 })
+    if not r.ok then return nil, 'could not read the diff' end
+
+    local patch = tostring(r.stdout or '')
+    if #patch > max then
+        return nil, string.format('diff exceeds MAX_DIFF_MB (%d MiB)',
+                                  math.floor(max / (1024 * 1024)))
+    end
+    return patch
 end
 
 -- Branches and tags, from one call each.
