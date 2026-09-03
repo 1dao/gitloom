@@ -31,8 +31,13 @@ check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "got=$2 want=$3"; fi; }
 
 cleanup() {
     [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null
+    [ -n "${PID2:-}" ] && kill "$PID2" 2>/dev/null
     # A failed run is worth reading; a clean one is not.
-    if [ "$fail" -ne 0 ]; then printf '\n--- server log (%s) ---\n' "$LOG"; tail -40 "$LOG"; fi
+    if [ "$fail" -ne 0 ]; then
+        printf '\n--- server log (%s) ---\n' "$LOG"; tail -40 "$LOG"
+        [ -f "${LOG2:-}" ] && { printf '\n--- second instance (%s) ---\n' "$LOG2"; tail -20 "$LOG2"; }
+        [ -f "${LOG3:-}" ] && { printf '\n--- capped instance (%s) ---\n' "$LOG3"; tail -20 "$LOG3"; }
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -408,18 +413,28 @@ body=$(curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' 
 echo "$body" | grep -qiE '[a-z]:[/\]|/home/|/root/|/users/'     && bad 'errors do not disclose server paths' "$body"     || ok 'errors do not disclose server paths'
 
 # Repeated bad credentials must be locked out rather than costing a KDF run each.
+#
+# Driven through a forwarded address, and not because the header is what is
+# being tested here — the limiter cannot tell the two apart, it keys on whatever
+# http_client_ip resolved. It is so that this test does not lock out 127.0.0.1,
+# which every case below it also authenticates from. It used to: the ones that
+# followed only passed while the positive credential cache was still warm, so
+# adding cases anywhere above them broke cases nowhere near them.
+LOCKIP='198.51.100.5'
 locked=no
 i=0
 while [ $i -lt 25 ]; do
-    c=$(curl -s -o /dev/null -w '%{http_code}' -u "lockme:wrong-$i" "$BASE/api/v1/users")
+    c=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: $LOCKIP" \
+        -u "lockme:wrong-$i" "$BASE/api/v1/users")
     [ "$c" = "429" ] && { locked=yes; break; }
     i=$((i+1))
 done
 check 'repeated credential failures are locked out' "$locked" 'yes'
-# The lockout is per-account and per-address, and must not take the admin's
-# own working credential down with it on a different account... the address is
-# shared here, so simply assert the lockout response carries Retry-After.
-curl -s -D- -o /dev/null -u "lockme:wrong-again" "$BASE/api/v1/users" | grep -qi '^retry-after:'     && ok 'lockout sends Retry-After' || bad 'lockout sends Retry-After' 'header missing'
+# Both counters are now tripped for this attempt — the address and the username
+# — so all this asserts is that the refusal says when to come back.
+curl -s -D- -o /dev/null -H "X-Forwarded-For: $LOCKIP" \
+    -u "lockme:wrong-again" "$BASE/api/v1/users" | grep -qi '^retry-after:' \
+    && ok 'lockout sends Retry-After' || bad 'lockout sends Retry-After' 'header missing'
 
 # git children must not inherit the operator's git configuration.
 grep -q 'GIT_CONFIG_NOSYSTEM' "$LOG" 2>/dev/null || true
@@ -487,6 +502,217 @@ if [ "$BIG_MB" -gt 0 ]; then
     else
         bad "clone ${BIG_MB} MiB" "$(cat "$WORK/ebig" | tail -2)"
     fi
+fi
+
+# == The push ceiling ========================================================
+# MAX_REQUEST_SIZE_MB used to BE the largest repository this server could
+# accept: the whole POST body was buffered before receive-pack saw any of it.
+# A smart-HTTP body is now streamed to git as it arrives, so the limit governs
+# buffered requests only.
+#
+# Told apart on a SECOND instance with the ceiling at 4 MiB, which is the only
+# way to distinguish the two without pushing something enormous: a buffered
+# 24 MiB body is a 413, a streamed one is a push.
+#
+# 4 and not 1, because the ceiling also has to hold whatever the client sends
+# while a handler is still working. git sends a small probe POST before a large
+# push and starts streaming the real body as soon as it is answered — before
+# HEAD has finished syncing — so a 1 MiB ceiling refuses those read-ahead bytes
+# and the push dies for a reason unrelated to its size. gitloom.cfg says so too.
+#
+# Skipped where the transport is file staging: a streamed body needs the read
+# flow control that only the streaming transport has, so GIT_STREAM=off and
+# Windows both keep the buffered path, where this limit IS the push ceiling.
+if [ "$BIG_MB" -gt 0 ] && grep -q 'transport: streaming' "$LOG" 2>/dev/null; then
+    PORT2=$((PORT+1))
+    BASE2="http://127.0.0.1:$PORT2"
+    LOG2="$WORK/gitloom2.log"
+    mkdir -p "$WORK/repos2" "$WORK/data2" "$WORK/tmp2"
+
+    "$XNET" main.lua \
+        LISTEN_PORT="$PORT2" REPO_ROOT="$WORK/repos2" DATA_DIR="$WORK/data2" \
+        TMP_DIR="$WORK/tmp2" USERS_FILE="$WORK/data2/users.json" \
+        ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" \
+        GIT_STREAM="${GIT_STREAM:-auto}" MAX_REQUEST_SIZE_MB=4 \
+        BODY_QUEUE_HIGH_KB=16 STREAM_STDIN_HIGH_KB=64 STREAM_STDIN_LOW_KB=16 \
+        > "$LOG2" 2>&1 &
+    PID2=$!
+
+    i=0
+    while [ $i -lt 100 ]; do
+        curl -sf "$BASE2/api/v1/version" >/dev/null 2>&1 && break
+        kill -0 "$PID2" 2>/dev/null || break
+        i=$((i+1)); sleep 0.2
+    done
+
+    # Both water marks are forced down to a fraction of their defaults, so the
+    # push below actually crosses them many times over: the connection is paused
+    # and resumed whenever the queue fills, and the coroutine parks on the ticker
+    # whenever git's stdin backs up. At the defaults a 24 MiB push on a fast
+    # loopback can cross neither, which is how the first version of this looked
+    # correct while the wait path segfaulted the moment it was reached.
+    if curl -sf "$BASE2/api/v1/version" >/dev/null 2>&1; then
+        curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+            -d '{"name":"over"}' "$BASE2/api/v1/repos" >/dev/null
+
+        ( cd "$WORK/big" && $GIT push -q \
+            "http://admin:$ADMIN_PW@127.0.0.1:$PORT2/admin/over.git" \
+            HEAD:refs/heads/main ) 2>"$WORK/eover" \
+            && ok "push ${BIG_MB} MiB past a 4 MiB buffered ceiling" \
+            || bad "push ${BIG_MB} MiB past a 4 MiB buffered ceiling" \
+                   "$(tail -2 "$WORK/eover")"
+
+        # It is a real push, not a 200 over a truncated packfile.
+        $GIT clone -q "$BASE2/admin/over.git" "$WORK/overclone" 2>/dev/null &&
+          cmp -s "$WORK/big/blob0.bin" "$WORK/overclone/blob0.bin" \
+            && ok 'the streamed push is byte-identical' \
+            || bad 'the streamed push is byte-identical' 'clone differs or failed'
+
+        # The ceiling still means something for everything that IS buffered,
+        # and still says so with a status rather than a dropped connection.
+        # Fed on stdin rather than as --data-binary @"$WORK/…": on Windows the
+        # shell is MSYS and curl is not, and a path behind an @ is one of the
+        # arguments MSYS does not rewrite — curl then cannot open it and the
+        # case reports a connection failure that has nothing to do with the
+        # server.
+        head -c 8388608 /dev/urandom > "$WORK/oversize.bin"
+        code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" \
+            -X POST -H 'Content-Type: application/json' \
+            --data-binary @- < "$WORK/oversize.bin" "$BASE2/api/v1/repos")
+        check 'a buffered body over the ceiling is still 413' "$code" '413'
+
+        # A client that vanishes mid-upload leaves a handler parked on a body
+        # that will never arrive. Nothing but the socket's own close can end
+        # that wait, and until it did the streaming slot and the git child were
+        # held for GIT_TIMEOUT_SEC — ten minutes per abandoned push.
+        if command -v timeout >/dev/null 2>&1; then
+            ( cd "$WORK/big" && timeout -s KILL 1 $GIT push -q \
+                "http://admin:$ADMIN_PW@127.0.0.1:$PORT2/admin/over.git" \
+                +HEAD:refs/heads/abandoned ) >/dev/null 2>&1
+            sleep 1
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE2/api/v1/version")
+            check 'an abandoned push does not take the server with it' "$code" '200'
+            ( cd "$WORK/big" && $GIT push -q \
+                "http://admin:$ADMIN_PW@127.0.0.1:$PORT2/admin/over.git" \
+                +HEAD:refs/heads/after ) >/dev/null 2>&1 \
+                && ok 'a push after an abandoned one still works' \
+                || bad 'a push after an abandoned one still works' 'push failed'
+        fi
+    else
+        bad 'the second instance boots' "$(tail -5 "$LOG2")"
+    fi
+
+    kill "$PID2" 2>/dev/null
+    PID2=
+
+    # == The streamed-body ceiling ==========================================
+    # MAX_PUSH_SIZE_MB is the one bound left on a push, and it is enforced as
+    # the bytes arrive: a chunked body never says how big it is, so the push is
+    # cut off partway rather than refused up front.
+    #
+    # What has to be true afterwards is that the connection ENDS. The body stops
+    # being decoded at the ceiling and everything after it lands in the buffer
+    # for the next request — so a connection kept alive here reads the rest of a
+    # packfile as pipelined HTTP, which is neither a refusal nor a diagnosis.
+    PORT3=$((PORT+2))
+    BASE3="http://127.0.0.1:$PORT3"
+    LOG3="$WORK/gitloom3.log"
+    mkdir -p "$WORK/repos3" "$WORK/data3" "$WORK/tmp3"
+
+    "$XNET" main.lua \
+        LISTEN_PORT="$PORT3" REPO_ROOT="$WORK/repos3" DATA_DIR="$WORK/data3" \
+        TMP_DIR="$WORK/tmp3" USERS_FILE="$WORK/data3/users.json" \
+        ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" \
+        GIT_STREAM="${GIT_STREAM:-auto}" MAX_PUSH_SIZE_MB=1 BODY_TIMEOUT_SEC=5 \
+        > "$LOG3" 2>&1 &
+    PID2=$!
+
+    i=0
+    while [ $i -lt 100 ]; do
+        curl -sf "$BASE3/api/v1/version" >/dev/null 2>&1 && break
+        kill -0 "$PID2" 2>/dev/null || break
+        i=$((i+1)); sleep 0.2
+    done
+
+    if curl -sf "$BASE3/api/v1/version" >/dev/null 2>&1; then
+        curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+            -d '{"name":"capped"}' "$BASE3/api/v1/repos" >/dev/null
+
+        ( cd "$WORK/big" && $GIT push -q \
+            "http://admin:$ADMIN_PW@127.0.0.1:$PORT3/admin/capped.git" \
+            HEAD:refs/heads/main ) >/dev/null 2>&1 \
+            && bad 'a push over MAX_PUSH_SIZE_MB is refused' 'push succeeded' \
+            || ok 'a push over MAX_PUSH_SIZE_MB is refused'
+
+        # Refused, not half-applied.
+        curl -s "$BASE3/api/v1/repos/admin/capped" | grep -q '"empty":true' \
+            && ok 'a refused push leaves the repository empty' \
+            || bad 'a refused push leaves the repository empty' \
+                   "$(curl -s "$BASE3/api/v1/repos/admin/capped")"
+
+        # And the instance is still an HTTP server afterwards — the packfile
+        # tail was dropped with the connection rather than parsed as requests.
+        code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE3/api/v1/version")
+        check 'the instance survives a refused push' "$code" '200'
+
+        # The invariant underneath both of those: a streamed body that did not
+        # end cleanly ends the connection with it. Asserted here on the reachable
+        # half — a body the handler answered without draining — because the
+        # decoder-error and ceiling halves leave through the same line, and no
+        # HTTP client will keep uploading past the response that proves it.
+        #
+        # Driven with curl rather than git: git-receive-pack rejects random bytes
+        # as soon as it sees them, which is a body the handler stops reading.
+        curl -s -o /dev/null -D "$WORK/undrained.headers" -u "admin:$ADMIN_PW" \
+            -X POST -H 'Content-Type: application/x-git-receive-pack-request' \
+            -H 'Transfer-Encoding: chunked' --data-binary @- \
+            < "$WORK/oversize.bin" \
+            "$BASE3/admin/capped.git/git-receive-pack"
+        grep -qi '^connection: *close' "$WORK/undrained.headers" \
+            && ok 'an unfinished streamed body ends the connection' \
+            || bad 'an unfinished streamed body ends the connection' \
+                   "$(grep -i '^connection' "$WORK/undrained.headers")"
+
+        # A client that sends its headers and then goes quiet has to be let go
+        # of. HANDSHAKE_TIMEOUT_SEC stops covering a connection the moment its
+        # request parses, and GIT_TIMEOUT_SEC bounds the git child rather than
+        # the upload — so until BODY_TIMEOUT_SEC nothing did, and that request's
+        # coroutine and connection were held for the life of the process.
+        #
+        # The pkt-line below promises 50 bytes and delivers 14, so receive-pack
+        # waits for the rest instead of rejecting the input and ending the wait
+        # for us. The fifo is what makes curl stop after sending it.
+        # Asserted from the server's log rather than from how long curl took:
+        # what curl does with a stdin that stops depends on curl, and the claim
+        # here is about the server letting go, which is the line it writes when
+        # it does.
+        if command -v mkfifo >/dev/null 2>&1; then
+            rm -f "$WORK/stall.fifo"; mkfifo "$WORK/stall.fifo"
+            ( printf '0032xxxxxxxxxx'; sleep 8 ) > "$WORK/stall.fifo" &
+            STALLER=$!
+            # -T -, not --data-binary @-: the latter reads stdin to the end
+            # before it sends anything, so the body arrives complete and there
+            # is no stall to observe. -T streams as it reads, which is the
+            # whole point of the case.
+            curl -s -o /dev/null --max-time 20 -u "admin:$ADMIN_PW" \
+                -X POST -T - \
+                -H 'Content-Type: application/x-git-receive-pack-request' \
+                < "$WORK/stall.fifo" \
+                "$BASE3/admin/capped.git/git-receive-pack"
+            kill "$STALLER" 2>/dev/null
+            grep -q 'streamed body did not finish' "$LOG3" \
+                && ok 'a stalled body is abandoned rather than waited on' \
+                || bad 'a stalled body is abandoned rather than waited on' \
+                       'no timeout in the log'
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE3/api/v1/version")
+            check 'the instance survives an abandoned body' "$code" '200'
+        fi
+    else
+        bad 'the capped instance boots' "$(tail -5 "$LOG3")"
+    fi
+
+    kill "$PID2" 2>/dev/null
+    PID2=
 fi
 
 # == Fingerprinting and proxy trust ==========================================

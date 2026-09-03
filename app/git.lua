@@ -226,11 +226,33 @@ end
 -- Smart HTTP: POST /<repo>/git-upload-pack | git-receive-pack
 -- ---------------------------------------------------------------------------
 
+-- Write a streamed request body to its staging file as it arrives.
+--
+-- io.open rather than util_file_write: the point of a streamed body is that it
+-- never exists as one string, so there is nothing to hand a one-shot write. The
+-- file is closed before git is spawned, so the child sees a complete input.
+--
+-- Coroutine-only — body.read yields until the next piece is off the socket.
+local function drain_body_to_file(path, body)
+    local f, oerr = io.open(path, 'wb')
+    if not f then return nil, tostring(oerr) end
+    while true do
+        local chunk, rerr = body.read()
+        if rerr then f:close(); return nil, tostring(rerr) end
+        if not chunk then break end
+        local ok, werr = f:write(chunk)
+        if not ok then f:close(); return nil, tostring(werr) end
+    end
+    f:close()
+    return true
+end
+
 -- Run the stateless-RPC half of the protocol.
 --
 --   dir       the bare repository
 --   service   'git-upload-pack' | 'git-receive-pack'
---   body      the raw request body (already un-gzipped by the codec)
+--   body      the raw request body (already un-gzipped by the codec), or a
+--             streamed one — see http.lua — as { read = fn, abort = fn }
 --   env       from git_env_for_request
 --
 -- On success returns (out_path, nil): the caller sends that file and then
@@ -241,7 +263,12 @@ function g_exports.git_service(dir, service, body, env)
     local in_path  = proc_tmp_path('in')
     local out_path = proc_tmp_path('out')
 
-    local wok, werr = util_file_write(in_path, body)
+    local wok, werr
+    if type(body) == 'table' and body.read then
+        wok, werr = drain_body_to_file(in_path, body)
+    else
+        wok, werr = util_file_write(in_path, body)
+    end
     if not wok then
         proc_tmp_release(in_path)
         return nil, 'staging the request body failed: ' .. tostring(werr)
@@ -374,16 +401,38 @@ local function stream_rpc(dir, service, body, env, conn, headers)
     local drain_timer = nil
     local send_failed = nil
     local errparts = {}
-    local kill_timer = nil
+    local cancel_kill = nil
+
+    -- A streamed request body, if the serve loop gave us one. See http.lua.
+    local stream_body = (type(body) == 'table' and body.read) and body or nil
+
+    -- This coroutine parks in three different places before it is done, and is
+    -- woken from callbacks that cannot see which. Only ONE of them is resumed
+    -- from here: the final wait for the child to exit. The other two belong to
+    -- whoever owns them — the serve loop's body reader, and the ticker — and
+    -- resuming a coroutine those are still holding is a second resume into
+    -- somewhere else entirely.
+    local parked_on_exit = false
 
     local function wake()
         if finished then return end
         finished = true
-        if kill_timer then kill_timer:del(); kill_timer = nil end
+        if cancel_kill then cancel_kill(); cancel_kill = nil end
         if drain_timer then drain_timer:del(); drain_timer = nil end
-        local ok, e = coroutine.resume(co)
-        if not ok then
-            cfg_log_error('%s stream coroutine crashed: %s', verb, tostring(e))
+        if parked_on_exit then
+            parked_on_exit = false
+            local ok, e = coroutine.resume(co)
+            if not ok then
+                cfg_log_error('%s stream coroutine crashed: %s', verb, tostring(e))
+            end
+        elseif stream_body then
+            -- Still reading the request body when the child closed its output.
+            -- That park lives in the serve loop's reader, so this is the only
+            -- thing that ends it; otherwise the handler waits for an upload
+            -- nothing is going to consume. A coroutine parked on the TICKER
+            -- instead is left alone on purpose — its condition names `finished`,
+            -- so the next tick releases it.
+            stream_body.abort('the child closed its output')
         end
     end
 
@@ -468,7 +517,72 @@ local function stream_rpc(dir, service, body, env, conn, headers)
         xproc_mod.kill(h.pid, true)
         return nil, 'attach stdin failed: ' .. tostring(werr)
     end
-    if body and #body > 0 then wconn:send_raw(body) end
+    -- A client that disconnects does not stop the child; nothing else would
+    -- either, once we are parked in yield.
+    --
+    -- BEFORE the body is pumped, not after: a streamed body is read off the
+    -- socket for as long as the client takes, and a client that stalls halfway
+    -- through a push would otherwise hold a git process and a streaming slot
+    -- with nothing at all bounding it.
+    --
+    -- http_after, not xtimer.add: this is armed from inside a request coroutine,
+    -- and an xtimer armed there runs its callback ON that suspended coroutine.
+    local limit = cfg_int('GIT_TIMEOUT_SEC', 600)
+    if limit > 0 then
+        cancel_kill = http_after(limit * 1000, function()
+            cancel_kill = nil
+            cfg_log_warn('%s exceeded %ds, killing pid %d', verb, limit, h.pid)
+            xproc_mod.kill(h.pid, true)
+        end)
+    end
+
+    -- Flow control on the way IN, for the same reason as on the way out.
+    --
+    -- send_raw refuses writes once the channel's send buffer reaches its cap,
+    -- and a request body with a hole in it is a corrupt packfile that git will
+    -- reject after the client has finished uploading it. So bytes are only
+    -- pulled off the socket while the child's stdin has room; above the high
+    -- mark the serve loop stops reading the connection, and the client blocks.
+    local IN_HIGH = cfg_int('STREAM_STDIN_HIGH_KB', 1024) * 1024
+    local IN_LOW  = cfg_int('STREAM_STDIN_LOW_KB', 256) * 1024
+
+    -- There is no drain callback in the channel layer, so room is polled — on
+    -- the serve loop's ticker, which runs on the main state. A timer armed from
+    -- here would run its callback on this very coroutine while it is suspended,
+    -- and resuming from there segfaults; http.lua carries the full account.
+    --
+    -- The condition names `finished` and a closed channel as well as room, so
+    -- there is no wait this cannot come out of: if the child dies mid-upload,
+    -- or GIT_TIMEOUT_SEC kills it, the next tick releases this.
+    local function wait_for_stdin_room()
+        http_wait_until(function()
+            return finished or wconn:is_closed() or wconn:stats() <= IN_LOW
+        end)
+        return not finished and not wconn:is_closed()
+    end
+
+    local body_err = nil
+    if stream_body then
+        while not finished do
+            if wconn:stats() > IN_HIGH and not wait_for_stdin_room() then break end
+            local chunk, rerr = stream_body.read()
+            if rerr then body_err = rerr; break end
+            if not chunk then break end          -- the body ended
+            local sok, serr2 = wconn:send_raw(chunk)
+            if not sok then
+                body_err = 'stdin write failed: ' .. tostring(serr2)
+                break
+            end
+        end
+        if body_err then
+            -- Not fatal here: the child is about to see EOF on a truncated
+            -- request, fail, and be reported through the normal path below.
+            cfg_log_warn('%s: request body ended early: %s', verb, tostring(body_err))
+        end
+    elseif body and #body > 0 then
+        wconn:send_raw(body)
+    end
+
     -- close_after_flush, NOT close: the body above is QUEUED, and close()
     -- tears the channel down immediately and discards whatever has not drained
     -- yet -- git would see a truncated request. This drains first, then shuts
@@ -476,19 +590,14 @@ local function stream_rpc(dir, service, body, env, conn, headers)
     -- an EOF at all, both sides wait for each other until the timeout.
     wconn:close_after_flush('eof')
 
-    -- A client that disconnects does not stop the child; nothing else would
-    -- either, once we are parked in yield. Armed from here rather than from a
-    -- callback because xtimer binds a timer to the lua_State that created it.
-    local limit = cfg_int('GIT_TIMEOUT_SEC', 600)
-    if limit > 0 then
-        kill_timer = xtimer.add(limit * 1000, function()
-            kill_timer = nil
-            cfg_log_warn('%s exceeded %ds, killing pid %d', verb, limit, h.pid)
-            xproc_mod.kill(h.pid, true)
-        end, 1)
+    -- Park until the child's stdout reaches EOF. Guarded, because with a
+    -- streamed body the child can already have exited while the body was still
+    -- being read -- and wake() only fires once, so yielding after it would be a
+    -- park nothing ever comes back from.
+    if not finished then
+        parked_on_exit = true
+        coroutine.yield()
     end
-
-    coroutine.yield()
 
     -- wait returns (exited, code) on success and (nil, message) on failure, so
     -- `code` is not always a number -- and the failure branches below format it

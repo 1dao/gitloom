@@ -140,6 +140,10 @@ local function service_rpc(req, ctx, prefix, service)
     local env = git_env_for_request(req, user)
     local result_type = 'application/x-git-' .. spec.verb .. '-result'
 
+    -- Either a string the codec buffered, or a reader the serve loop is filling
+    -- as the bytes arrive. Both transports below take either.
+    local body = req.body_stream or req.body or ''
+
     -- Two ways to run this, chosen by what the platform can do.
     --
     -- STREAMING (Linux): the child's stdout goes out as chunked HTTP as it is
@@ -155,7 +159,7 @@ local function service_rpc(req, ctx, prefix, service)
     -- staging, which queues on the process pool instead of adding another git.
     -- Only `nil` is a failure.
     if git_stream_enabled() then
-        local ok, serr = git_service_stream(dir_or_resp, service, req.body or '',
+        local ok, serr = git_service_stream(dir_or_resp, service, body,
                                             env, ctx.conn, no_cache({
                                                 ['Content-Type'] = result_type,
                                             }))
@@ -172,7 +176,7 @@ local function service_rpc(req, ctx, prefix, service)
         end
     end
 
-    local out_path, err = git_service(dir_or_resp, service, req.body or '', env)
+    local out_path, err = git_service(dir_or_resp, service, body, env)
     if not out_path then
         cfg_log_error('%s failed for %s: %s', service, prefix, tostring(err))
         return http_response_text(500, service .. ' failed\n')
@@ -233,7 +237,51 @@ local function smart_dispatch(req, ctx)
     return nil    -- not ours; let the next fallback look
 end
 
+-- ---------------------------------------------------------------------------
+-- Which requests get their body streamed rather than buffered
+--
+-- Only the two smart-HTTP POSTs. Everything else on this server has a body
+-- measured in kilobytes, and `req.body` is what its handler wants.
+--
+-- NOT A CONTENT-ENCODED ONE. git gzips a request body only when it has already
+-- buffered the whole thing itself (http.postBuffer, 1 MiB by default), and the
+-- runtime's inflate is one-shot — there is no incremental decompressor to feed.
+-- Those two facts fit together exactly: a compressed body is small by
+-- construction, so the bodies that need streaming are never the compressed ones.
+--
+-- NOR A SMALL ONE. Under BODY_STREAM_MIN_KB a body costs nothing to hold, and
+-- buffering keeps the connection reusable when a handler answers 401 or 415
+-- without reading it (see the serve loop: an undrained stream ends the
+-- connection). git crosses this line exactly where it gives up on buffering and
+-- switches to chunked, which is the case that needs streaming in the first
+-- place.
+-- ---------------------------------------------------------------------------
+local function body_stream_wanted(head)
+    if head.method ~= 'POST' then return false end
+
+    -- Only where the streaming transport runs. Both halves need the same thing
+    -- of the platform — pollable pipes to a child on the way out, working read
+    -- flow control on the way in — and on Windows neither is there: pausing an
+    -- accepted connection to hold back a body the handler has not drained
+    -- leaves the client reset. GIT_STREAM=off therefore turns off both
+    -- directions, which is the one switch an operator has to understand.
+    if not git_stream_enabled() then return false end
+
+    local path = head.path or ''
+    if not (util_str_ends(path, '/git-upload-pack') or
+            util_str_ends(path, '/git-receive-pack')) then
+        return false
+    end
+
+    local enc = tostring(head.headers['content-encoding'] or ''):lower()
+    if enc ~= '' and enc ~= 'identity' then return false end
+
+    if head.chunked then return true end
+    return (head.content_length or 0) >= cfg_int('BODY_STREAM_MIN_KB', 64) * 1024
+end
+
 function g_exports.smart_install()
     http_fallback(smart_dispatch)
+    http_body_stream(body_stream_wanted)
     cfg_log_info('git smart-HTTP transport installed')
 end

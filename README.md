@@ -144,15 +144,28 @@ git client ──HTTP──▶ main thread ──RPC──▶ worker thread ─�
 1. `GET /<owner>/<repo>.git/info/refs?service=git-upload-pack` →
    `git upload-pack --stateless-rpc --advertise-refs .`, prefixed with the
    `# service=…` pkt-line the HTTP transport requires.
-2. `POST /<owner>/<repo>.git/git-upload-pack` → the request body is staged to a
-   file, `git upload-pack --stateless-rpc .` runs with stdin and stdout
-   redirected, and the output file is streamed back with `send_file_response`,
-   which never materialises the packfile in a Lua string.
+2. `POST /<owner>/<repo>.git/git-upload-pack` → `git upload-pack
+   --stateless-rpc .`, run one of two ways.
 
-The staging exists because this runtime has no bidirectional subprocess: Lua's
+**Streaming** (Linux, `GIT_STREAM=auto`, a runtime with `xproc`). The child is
+spawned on socketpairs the event loop adopts as ordinary channels. The request
+is dispatched as soon as its headers are in and its body goes to the child's
+stdin as it arrives; the child's stdout goes back out as chunked HTTP as it is
+produced. Nothing touches the disk and nothing is held whole in memory, in
+either direction — so neither the push nor the clone has a size ceiling, and the
+client sees bytes as soon as git emits them.
+
+**File staging** (Windows, `GIT_STREAM=off`, or every streaming slot busy). The
+body is written to a scratch file, git runs with stdin and stdout redirected,
+and the output file is streamed back with `send_file_response`, which never
+materialises the packfile in a Lua string. Content-Length cannot be known before
+git finishes, so the client waits for the whole operation before the first byte
+moves, and a buffered body is bounded by `MAX_REQUEST_SIZE_MB`.
+
+The staging path exists because plain Lua has no bidirectional subprocess:
 `io.popen` is one-shot and unidirectional, so a pipe in both directions is not
-available. What that costs and what would replace it is documented at the top of
-[app/git.lua](app/git.lua).
+available without the C binding that the streaming path uses. What that costs is
+documented at the top of [app/git.lua](app/git.lua).
 
 Every staged `git` invocation blocks a worker thread for its duration, so
 `GIT_WORKERS` is the number of concurrent clones and pushes that can make
@@ -166,7 +179,7 @@ serving.
 
 | Limit | Detail |
 |---|---|
-| Push size | The POST body is accumulated in memory and concatenated once before parsing. `MAX_REQUEST_SIZE_MB` (default 64) is a hard ceiling, enforced on the running total as bytes arrive; a larger push is rejected with 413 without ever allocating it. |
+| Push size | Unbounded on Linux. A smart-HTTP POST is dispatched as soon as its headers arrive and its body goes to `git` in pieces, so `MAX_REQUEST_SIZE_MB` does not apply to it; `MAX_PUSH_SIZE_MB` (default 0, no limit) is there if disk is what needs bounding. Everything else is still buffered whole and refused with 413 above `MAX_REQUEST_SIZE_MB` (default 64), enforced on the running total so an over-size body is never allocated — leave it a few MiB of headroom for read-ahead, as `gitloom.cfg` explains. Streaming a body means pausing the connection when the handler falls behind, which the runtime only does correctly on POSIX, so Windows buffers pushes too and there the ceiling still is the push limit. |
 | Clone start-up latency | Windows only. There the response waits for `git` to finish, because Content-Length is unknowable before then — a 20 MiB clone measured ~5.6 s. On Linux the streaming path sends each chunk as git produces it (`GIT_STREAM=auto`). |
 | Concurrency | Bounded, by two counters. A staged clone or push occupies one of `GIT_WORKERS` pool threads for its whole duration; a streamed one takes one of `GIT_STREAM_MAX` slots (default `GIT_WORKERS`) and falls back to staging when they are all busy — so an instance runs at most `GIT_STREAM_MAX + GIT_WORKERS` git processes. A client that disconnects does not stop the `git` it started; `GIT_TIMEOUT_SEC` (default 600) is what bounds that. |
 | HTTP only | No SSH transport. git speaks HTTP Basic and re-sends the credential on **every** request, so set `HTTPS=1` or front gitloom with TLS before exposing it. |
@@ -180,7 +193,10 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 75/75 on each.
+2.52). `test/smoke.sh` passes 113/113 on Linux, and 102/102 on Windows and under
+`GIT_STREAM=off` — the eleven it does not run there are the streamed-body cases,
+which need the transport that platform does not have. `test/unit.lua` is 168 on
+Windows, 167 on Linux (one case is about Windows path spelling).
 
 What was checked in the runtime underneath, and is fine:
 

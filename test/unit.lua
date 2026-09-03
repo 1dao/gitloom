@@ -164,8 +164,15 @@ do
     check('scripts/core keeps the native dofile',
         type(a) == 'table' and type(b) == 'table', 'a runtime helper failed to load twice')
 
-    local win = pcall(dofile, 'scripts\\core\\share\\xfs.lua')
-    check('the scripts/core test survives a backslash path', win, 'backslash path redirected')
+    -- The same path spelled the Windows way still reaches scripts/core rather
+    -- than being redirected into load_script. Windows only: on POSIX a
+    -- backslash is an ordinary character in a filename, so this names a file
+    -- that does not exist and dofile is right to fail on it.
+    if util_is_windows then
+        local win = pcall(dofile, 'scripts\\core\\share\\xfs.lua')
+        check('the scripts/core test survives a backslash path', win,
+              'backslash path redirected')
+    end
 end
 
 do
@@ -505,6 +512,84 @@ do
     local incomplete = codec.parse_request_head('POST / HTTP/1.1\r\nHost: x\r\n')
     eq('incomplete request head is reported', select(3,
        codec.parse_request_head('POST / HTTP/1.1\r\nHost: x\r\n')), 'incomplete')
+end
+
+-- ── incremental chunked decoding ────────────────────────────────────
+--
+-- A streamed push decodes its body as it arrives, so it cannot use
+-- codec.parse_chunked, which wants the whole thing at once. Framing is far
+-- easier to get wrong than to provoke through a real client — git only sends
+-- chunked above http.postBuffer — and the failure mode is a packfile with a
+-- hole in it, so the decoder is driven directly here.
+do
+    -- Returns (decoded, err, done, tail). `tail` is whatever the decoder handed
+    -- back after the terminating chunk, which on a real connection is the start
+    -- of the next request.
+    local function decode(pieces)
+        local out = {}
+        local d = __http_chunked_decoder(function(p) out[#out + 1] = p end)
+        local tail = ''
+        for _, piece in ipairs(pieces) do
+            local pos, err = d.feed(piece, 1)
+            if not pos then return nil, err end
+            if pos <= #piece then tail = tail .. piece:sub(pos) end
+        end
+        return table.concat(out), nil, d.done, tail
+    end
+
+    local body = '4\r\nWiki\r\n5\r\npedia\r\ne\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n'
+    local want = 'Wikipedia in\r\n\r\nchunks.'
+
+    local got, err, done = decode({ body })
+    eq('a chunked body decodes in one feed', got, want)
+    check('one feed reaches the terminating chunk', done == true, tostring(err))
+
+    -- One byte at a time, so every state boundary lands mid-piece at least
+    -- once. A 64 KiB socket read splits a chunk header exactly this way.
+    local pieces = {}
+    for i = 1, #body do pieces[i] = body:sub(i, i) end
+    local slow, serr, sdone = decode(pieces)
+    eq('the same body decodes one byte at a time', slow, want)
+    check('a byte-at-a-time feed still terminates', sdone == true, tostring(serr))
+
+    local _, _, pdone, tail = decode({ body .. 'GET /next HTTP/1.1\r\n' })
+    check('the terminating chunk ends the body', pdone == true, 'not done')
+    eq('bytes after the body are handed back', tail, 'GET /next HTTP/1.1\r\n')
+
+    local emptied, _, edone = decode({ '0\r\n\r\n' })
+    eq('an empty chunked body decodes to nothing', emptied, '')
+    check('an empty chunked body still terminates', edone == true, 'not done')
+
+    eq('a chunk extension is ignored',
+       (decode({ '4;name=value\r\nWiki\r\n0\r\n\r\n' })), 'Wiki')
+
+    local trailed, _, tdone = decode({ '4\r\nWiki\r\n0\r\nX-Checksum: abc\r\n\r\n' })
+    eq('a trailer does not become body', trailed, 'Wiki')
+    check('a trailer ends the body', tdone == true, 'not done')
+
+    -- Each of these would otherwise be silent corruption: bytes that are not
+    -- body arriving in the packfile, or a body that never ends.
+    eq('a bad chunk terminator is refused',
+       select(2, decode({ '4\r\nWikiXX0\r\n\r\n' })), 'bad chunk terminator')
+    eq('a non-hex chunk size is refused',
+       select(2, decode({ 'zz\r\n' })), 'bad chunk size')
+
+    -- Framing has to be read the same way here as by anything in front of this
+    -- server, or the two disagree about where one request ends and the next
+    -- begins — which is request smuggling. So: CRLF and nothing else, and a
+    -- size line that is a size and nothing else. git sends neither of these.
+    eq('a bare LF chunk size is refused',
+       select(2, decode({ '4\nWiki\r\n0\r\n\r\n' })), 'bad chunk size')
+    eq('rubbish after the chunk size is refused',
+       select(2, decode({ '4garbage\r\nWiki\r\n0\r\n\r\n' })), 'bad chunk size')
+    eq('a leading space before the chunk size is refused',
+       select(2, decode({ ' 4\r\nWiki\r\n0\r\n\r\n' })), 'bad chunk size')
+    eq('a bare LF ending the trailers is refused',
+       select(2, decode({ '4\r\nWiki\r\n0\r\n\n' })), 'bad chunk trailer')
+    eq('an endless chunk size line is refused',
+       select(2, decode({ string.rep('0', 2048) })), 'chunk size line too long')
+    eq('an endless trailer is refused',
+       select(2, decode({ '0\r\n' .. string.rep('x', 9000) })), 'chunk trailer too long')
 end
 
 -- ── the browser's static routes ─────────────────────────────────────

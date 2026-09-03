@@ -117,11 +117,113 @@ Verified on Arch/WSL, gcc 16.2.1, git 2.55:
 - With backpressure disabled the 64 MiB clone fails again, so the new
   large-clone case in `test/smoke.sh` genuinely catches a regression
 
+**Request streaming: done and verified on Linux** (2026-09-02).
+
+A smart-HTTP POST is now dispatched as soon as its HEADERS are complete, with
+`req.body_stream` in place of `req.body`; its handler pulls pieces off the socket
+and writes them to `git`'s stdin as they arrive. `MAX_REQUEST_SIZE_MB` is no
+longer the push ceiling. The only bound left is `MAX_PUSH_SIZE_MB`, which
+defaults to none.
+
+- `app/http.lua` — an incremental chunked decoder, a per-connection body queue
+  with pause/resume flow control, and the parked-coroutine reader.
+  `parse_request_head`, synced from xnet2lua earlier and unused since, is what
+  makes routing before the body possible.
+- `app/git.lua` — `stream_rpc` pumps that reader into the child's stdin behind
+  its own water marks; `git_service` gained an incremental drain to the staging
+  file, which is the path a streamed body takes when every streaming slot is
+  busy.
+- `app/smart.lua` — decides which requests get it: the two smart-HTTP POSTs,
+  not content-encoded, and only where the streaming transport runs.
+
+git makes this tractable by never doing the awkward combination. It gzips a
+request body only when it has already buffered the whole thing itself
+(`http.postBuffer`, 1 MiB by default) and switches to chunked transfer encoding
+exactly when it has not — so the bodies that need streaming are never the
+compressed ones, and the runtime's one-shot inflate is never in the way.
+
+**What the first Linux run found.** Three defects, none of them visible on
+Windows and two not visible at small sizes either:
+
+1. **A timer armed inside a request coroutine segfaults the process** as soon as
+   its callback resumes that coroutine. `xtimer` records the `lua_State` that
+   armed it, so the callback runs as a `lua_pcall` on a coroutine suspended
+   mid-yield, and `lua_resume` on it from there is undefined. main.lua had
+   written this down for the scratch sweeper; the streaming transport had got
+   away with it only because none of its timers resumed anything. Replaced by
+   one ticker armed from the main state — `http_wait_until` and `http_after`,
+   which is also where the child-kill deadline now lives.
+2. **`max_packet` was wired to `MAX_REQUEST_SIZE_MB`.** It bounds the channel's
+   inbound buffer, not the request: the loop consumes every byte it is handed,
+   so a larger request still arrives, in pieces. What it actually did was close
+   the connection with `packet_too_large` — no status, no log line — so lowering
+   `MAX_REQUEST_SIZE_MB` broke pushes instead of answering 413.
+3. **Read-ahead counts against the ceiling.** git sends a small probe POST
+   before a large push and starts streaming the real body the moment it is
+   answered, while the handler is still syncing HEAD. Those bytes buffer behind
+   the busy handler and earned a 413 about a size nobody had. Pausing the
+   connection for the duration fixes it on Linux and breaks every request on
+   Windows (below), so it is documented instead: the ceiling has to leave a few
+   MiB of headroom.
+
+**A runtime defect, worked around rather than fixed.** On Windows,
+`conn:pause_read()` on an accepted connection does not survive the resume — the
+client is reset, and every request whose handler yields dies. Holding a body
+back is precisely what a streamed one must do, so streaming a body is tied to
+`GIT_STREAM`, which is off on Windows anyway: one switch, both directions. Worth
+fixing upstream; the poll backend destroys the fd's entry when its last event is
+removed, which epoll survives and WSAPoll does not.
+
+Verified on Arch/WSL (git 2.55) and on Windows:
+- `test/unit.lua` 167 on Linux and 168 on Windows, `test/smoke.sh` **113/113**
+  on Linux streaming and 102/102 on Windows and under `GIT_STREAM=off`
+- a 24 MiB push through a 4 MiB `MAX_REQUEST_SIZE_MB`, byte-identical on clone
+  and `git fsck` clean, with both water marks forced to a sixteenth of their
+  defaults so the pause and the ticker wait are crossed many times over
+- `MAX_PUSH_SIZE_MB=1` refuses that push and leaves the instance serving
+- a client killed mid-upload releases its slot and its child; the next push works
+- two concurrent pushes against `GIT_STREAM_MAX=1` — one streamed, one staged
+  through the incremental drain — both byte-identical
+
+Two test-suite faults surfaced on the way and are fixed: the credential-lockout
+case locked out 127.0.0.1, so every case after it passed only while the positive
+auth cache stayed warm and adding cases anywhere above them broke cases nowhere
+near them; and `test/unit.lua`'s backslash-path case asserted Windows semantics
+on every platform, so Linux had been one red case for some time.
+
+**Post-review fixes** (2026-09-03). Four findings, all reproduced:
+
+- **A streamed body that FAILED did not end the connection.** The cleanup forced
+  `Connection: close` for a body the handler had left undrained, but not for one
+  that errored — over `MAX_PUSH_SIZE_MB`, or misframed. `body_feed` stops
+  decoding at that point and puts everything after it into the buffer for the
+  next request, so a kept-alive connection reads the rest of a packfile as
+  pipelined HTTP. A ceiling meant to refuse a push instead produced a stream of
+  400s on a connection that was still being written to. Now anything but a clean
+  end closes.
+- **The chunked decoder accepted framing nothing else would.** It looked for a
+  bare LF and took the first hex run in the line, so `4\n` and `4garbage\r\n`
+  both parsed. Anything in front of this server that reads the size line
+  strictly then disagrees about where the request ends, which is the whole of
+  request smuggling. Now CRLF only, and a size line that is 1\*HEXDIG plus an
+  optional `;ext`.
+- **Nothing bounded a streamed body.** `HANDSHAKE_TIMEOUT_SEC` stops covering a
+  connection the moment its request parses, and `GIT_TIMEOUT_SEC` lives inside
+  `stream_rpc` — so the file-staging fallback taken when every streaming slot is
+  busy would wait on a silent client for the life of the process. New:
+  `BODY_TIMEOUT_SEC`, on the same ticker.
+- **The docs described a transport that had moved.** README's request walkthrough
+  and gitloom.cfg's scratch-file section both still said every fetch and push
+  stages through files. Both now say which path does what.
+
+`test/smoke.sh` grew to 113 with `MAX_PUSH_SIZE_MB` (refused, nothing written,
+instance survives), the `Connection: close` on an unfinished streamed body, and
+a stalled upload driven through a fifo — the last verified to fail with the
+deadline removed. The ceiling and decoder-error branches leave through the same
+line as the undrained one and are not asserted separately: no HTTP client will
+keep uploading past the response that would prove it.
+
 Still open in this phase:
-- **Streaming request bodies.** Request-header framing is now exposed by the
-  copied `xhttp_codec` as `parse_request_head`, but the HTTP serve loop still
-  needs to connect body chunks directly to the child's stdin. Until that full
-  duplex path lands, `MAX_REQUEST_SIZE_MB` remains the push ceiling.
 - **Sideband progress** during a push.
 - **io_uring.** Now installed on the dev box and untested here; it replaces the
   channel read path, which is exactly what streaming depends on.
