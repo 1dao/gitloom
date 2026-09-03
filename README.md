@@ -18,8 +18,10 @@ where they already work.
 **Status: Phase 2 (browser slice).** Clone, fetch and push over HTTP(S) work end
 to end, with accounts, access tokens, public/private repositories, a JSON
 management API and a same-origin repository browser. The browser covers the
-repository list, branches, tree, raw files, commit history and bounded diffs.
-Issues and pull requests are not implemented yet — see
+repository list, branches, tree, raw files, commit history and bounded diffs,
+and can create and delete a repository — so the whole solo loop (create, push,
+browse) never leaves it. Issues and pull requests are not implemented yet, and
+commit history still stops at 50 without paging — see
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
@@ -198,7 +200,7 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 117/117 on Linux, and 106/106 on Windows and under
+2.52). `test/smoke.sh` passes 123/123 on Linux, and 112/112 on Windows and under
 `GIT_STREAM=off` — the eleven it does not run there are the streamed-body cases,
 which need the transport that platform does not have. `test/unit.lua` is 199 on
 Windows, 198 on Linux (one case is about Windows path spelling). Adding

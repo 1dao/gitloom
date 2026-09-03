@@ -31,7 +31,10 @@
             <p class="eyebrow">WORKSPACE</p>
             <h1>仓库</h1>
           </div>
-          <button class="icon-button" id="refresh-repos" type="button" title="刷新仓库" aria-label="刷新仓库">↻</button>
+          <div class="rail-actions">
+            <button class="icon-button" id="new-repo" type="button" title="新建仓库" aria-label="新建仓库" hidden>+</button>
+            <button class="icon-button" id="refresh-repos" type="button" title="刷新仓库" aria-label="刷新仓库">↻</button>
+          </div>
         </div>
         <label class="search-box">
           <span aria-hidden="true">⌕</span>
@@ -69,6 +72,7 @@
             <div class="repo-heading-meta">
               <span class="visibility-pill" id="repo-visibility">公开</span>
               <span id="repo-default-branch" class="branch-note"></span>
+              <button class="button button-danger" id="delete-repo" type="button" hidden>删除仓库</button>
             </div>
           </section>
 
@@ -137,15 +141,55 @@
           <p class="eyebrow">AUTHENTICATION</p>
           <h2>登录 Gitloom</h2>
         </div>
-        <button class="icon-button" value="cancel" type="submit" aria-label="关闭">×</button>
+        <button class="icon-button" id="auth-close" data-dialog-close="auth-dialog" type="button" aria-label="关闭">×</button>
       </div>
       <p class="dialog-copy">登录后可以查看私有仓库。密码只用来换取一个 12 小时后自动失效的访问令牌，令牌只存在当前标签页，退出时会立即吊销——密码本身不会被保存。</p>
       <label>用户名<input id="auth-user" name="username" type="text" autocomplete="username" required></label>
       <label>密码或访问令牌<input id="auth-password" name="password" type="password" autocomplete="current-password" required></label>
       <p id="auth-message" class="form-message" role="alert"></p>
       <div class="dialog-actions">
-        <button class="button button-quiet" value="cancel" type="submit">取消</button>
+        <button class="button button-quiet" data-dialog-close="auth-dialog" type="button">取消</button>
         <button class="button button-primary" id="auth-submit" value="default" type="submit">登录</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="create-dialog" class="auth-dialog">
+    <form method="dialog" id="create-form" class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">NEW REPOSITORY</p>
+          <h2>新建仓库</h2>
+        </div>
+        <button class="icon-button" id="create-close" data-dialog-close="create-dialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-copy">仓库建在你自己的账号下，创建后用上面的克隆地址推送即可。默认分支由服务器配置决定，不必在这里选：第一次推送之后 HEAD 会自动指向你实际推上来的那个分支。</p>
+      <label>仓库名<input id="create-name" type="text" autocomplete="off" required placeholder="my-project"></label>
+      <label>描述（可选）<input id="create-description" type="text" autocomplete="off"></label>
+      <label class="checkbox-label"><input id="create-private" type="checkbox"> 私有仓库（只有自己和管理员能看到）</label>
+      <p id="create-message" class="form-message" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" data-dialog-close="create-dialog" type="button">取消</button>
+        <button class="button button-primary" id="create-submit" value="default" type="submit">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="delete-dialog" class="auth-dialog">
+    <form method="dialog" id="delete-form" class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">DELETE REPOSITORY</p>
+          <h2>删除仓库</h2>
+        </div>
+        <button class="icon-button" id="delete-close" data-dialog-close="delete-dialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-copy">仓库连同全部提交历史会直接从磁盘删除。没有回收站，也没有撤销。确认请输入仓库名 <strong id="delete-expect"></strong>。</p>
+      <label>仓库名<input id="delete-confirm" type="text" autocomplete="off" required></label>
+      <p id="delete-message" class="form-message" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" data-dialog-close="delete-dialog" type="button">取消</button>
+        <button class="button button-danger" id="delete-submit" value="default" type="submit">永久删除</button>
       </div>
     </form>
   </dialog>

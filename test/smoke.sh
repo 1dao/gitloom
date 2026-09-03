@@ -122,6 +122,28 @@ grep -qi '^content-security-policy:' "$WORK/web.headers" \
 curl -s "$BASE/app.js" | grep -q 'loadRepos' \
     && ok 'browser JavaScript is served' || bad 'browser JavaScript is served' 'asset missing'
 
+# The write controls are markup in one file and behaviour in another, and the
+# page is only correct when both shipped. Asserted on the ids rather than on
+# any wording, which is copy and will change without the page being wrong.
+grep -q 'id="create-dialog"' "$WORK/web.index" \
+    && ok 'browser offers repository creation' || bad 'browser offers repository creation' 'dialog missing'
+grep -q 'id="delete-dialog"' "$WORK/web.index" \
+    && ok 'browser offers repository deletion' || bad 'browser offers repository deletion' 'dialog missing'
+curl -s "$BASE/app.js" | grep -q 'createRepo' \
+    && ok 'browser JavaScript can create' || bad 'browser JavaScript can create' 'handler missing'
+curl -s "$BASE/app.js" | grep -q 'state.repo.owner === state.username' \
+    && ok 'browser only offers owner deletion' || bad 'browser only offers owner deletion' 'owner guard missing'
+curl -s "$BASE/app.js" | grep -q 'requestToken && state.token === requestToken' \
+    && ok 'browser guards stale authentication responses' || bad 'browser guards stale authentication responses' 'request credential guard missing'
+if grep -q 'id="auth-close"[^>]*type="button"' "$WORK/web.index" &&
+   grep -q 'id="create-close"[^>]*type="button"' "$WORK/web.index" &&
+   grep -q 'id="delete-close"[^>]*type="button"' "$WORK/web.index" &&
+   ! grep -q 'value="cancel" type="submit"' "$WORK/web.index"; then
+    ok 'browser keeps dialog cancel controls out of implicit submit'
+else
+    bad 'browser keeps dialog cancel controls out of implicit submit' 'cancel control is still a submit button'
+fi
+
 # A monitor or a reverse proxy sends HEAD at the entry point before anything
 # else; it used to be a 404, because only GET was ever routed.
 code=$(curl -s -o /dev/null -w '%{http_code}' -I "$BASE/")

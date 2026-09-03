@@ -266,8 +266,8 @@ Verified against a real MySQL 8.4.9, on both platforms and both stores:
 | | JSON | MySQL |
 |---|---|---|
 | `test/unit.lua` (Windows / Linux) | 199 / 198 | — |
-| `test/smoke.sh` Windows | 106/106 | 106/106 |
-| `test/smoke.sh` Linux | 117/117 | 117/117 |
+| `test/smoke.sh` Windows | 112/112 | 112/112 |
+| `test/smoke.sh` Linux | 123/123 | 123/123 |
 
 `test/dbreset.lua` empties the database first, because the counts the suite
 asserts only mean something from empty. gitloom itself never creates a database:
@@ -362,9 +362,53 @@ front-end workarounds:
   cached and names `/app.js?v=<digest>`, which is; otherwise the two are cached
   independently and a client runs stale JavaScript against fresh HTML.
 
-Still to do in the front end: syntax highlighting, richer commit metadata,
-pagination and an administrative repository-creation flow. These are polish
-items; the first browse loop is usable now.
+**Creating and deleting a repository from the browser: done** (2026-09-03).
+
+Reframed by a decision to make single-user use work first, which knocks out
+collaborators, orgs, issues and PRs — none of which a solo user has anybody to
+use with. What is left is that the browser read well and could not write at all:
+in 24k of JavaScript its only two write requests were login and logout, so every
+new repository still began with a `curl -u … -d '{"name":…}'` in a terminal. The
+most repeated action was the one action the page could not do.
+
+`POST` and `DELETE /api/v1/repos` already existed, so this is `web/` only: a `+`
+beside the refresh button, two dialogs on the pattern the login dialog already
+set, and the new repository selected as soon as it is made.
+
+Three things it turned up, all fixed here:
+
+- **The cancel button submitted the form.** A `<form method="dialog">` fires its
+  submit event for EVERY submit button in it, and the login handler
+  preventDefaults unconditionally — so filling in a password and then clicking
+  取消 logged you in instead of backing out. The `required` attributes were all
+  that usually hid it. There is one `isCancel` guard now and both dialogs use it.
+- **A form cannot render a status.** `failure` deliberately shows the status
+  rather than the server's English, which is right for a panel and useless for a
+  form: "name taken", "name not allowed" and "description too long" are all 400,
+  and 请求无效 tells the user nothing about which. The handful a create or delete
+  can produce are translated; everything else still falls back to the status.
+- **A new repository has no branch**, so `tree/main` and `commits?ref=main` both
+  404. The tree panel already said "这个分支还没有可浏览的文件"; the commit panel
+  said 没有找到内容 — about a repository the user is looking straight at, and the
+  first thing they now see after creating one.
+
+Deletion asks for the repository name to be typed. `repo_delete` is a recursive
+delete of the git objects with nothing behind it, so a misplaced click has to
+cost more than a click.
+
+Verified by driving a real browser: create → the repository appears, is selected,
+shows its clone URL and private pill → push to it from git → browse the tree it
+grew → delete it, confirmed gone from both the index and the disk. Plus six
+smoke cases asserting the controls and their handler ship together, since the
+markup and the behaviour live in different files and the page is only correct
+when both did.
+
+Still to do in the front end: commit pagination (the API already takes
+`limit`/`skip`; the browser asks for 50 and never pages, so history is silently
+truncated), a first-push panel on an empty repository, editing a description or
+visibility — which needs an update endpoint, since there is none — and syntax
+highlighting, which is the only one that is real work: the CSP is
+`default-src 'self'`, so a highlighter has to be vendored into `web/`.
 
 Estimate for the remainder: 3–5 weeks.
 

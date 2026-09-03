@@ -56,6 +56,33 @@
     return STATUS_TEXT[status] || fallback || ('请求失败（' + status + '）');
   }
 
+  // The rule above — render the status, not the server's English — is right for
+  // a panel, where the status IS the news. It is wrong for a form, where the
+  // difference between "that name is taken" and "that name is not allowed" is
+  // the entire message and both are a 400. So the handful of answers a create
+  // or a delete can produce are translated, and everything else still falls
+  // back to the status.
+  var DETAIL_TEXT = [
+    ['repository already exists', '同名仓库已存在'],
+    ['bad repository name', '仓库名不合法：首字符只能是字母、数字或下划线，其后可用字母、数字、点、下划线、连字符'],
+    ['bad owner name', '账号名不合法'],
+    ['bad default branch name', '默认分支名不合法'],
+    ['only the owner or an administrator may delete', '只有仓库所有者或管理员可以删除'],
+    ['the repository index is unavailable', '仓库索引暂时读不到，请稍后再试'],
+    ['no such repository', '仓库不存在，可能已经被删除'],
+    ['cannot create a repository under another account', '不能在别人的账号下建仓库'],
+  ];
+
+  function detailMessage(error) {
+    var detail = (error && error.detail) || '';
+    var descriptionLimit = detail.match(/description must be at most (\d+) bytes/);
+    if (descriptionLimit) return '描述太长了（最多 ' + descriptionLimit[1] + ' 字节）';
+    for (var i = 0; i < DETAIL_TEXT.length; i += 1) {
+      if (detail.indexOf(DETAIL_TEXT[i][0]) !== -1) return DETAIL_TEXT[i][1];
+    }
+    return (error && error.message) || '操作失败';
+  }
+
   function setConnection(kind, label) {
     var dot = $('connection-dot');
     var text = $('connection-label');
@@ -151,13 +178,17 @@
 
   function api(path, options) {
     var opts = options || {};
+    // Keep the credential that signed this request. A slow response from an
+    // older account must not invalidate a newer login in the same tab.
+    var requestToken = state.token;
     opts.headers = Object.assign({}, authHeaders(), opts.headers || {});
     return fetch(path, opts).then(function (response) {
       if (response.ok) return response;
-      if (response.status === 401 && state.token) {
+      if (response.status === 401 && requestToken && state.token === requestToken) {
         // The token has expired or been revoked. Say so once, here, rather than
         // letting every panel report "需要登录" on its own.
         clearCredentials();
+        closeRepoView();
         updateAuthButton();
         showToast('登录已过期，请重新登录');
       }
@@ -206,6 +237,17 @@
   function updateAuthButton() {
     var button = $('auth-toggle');
     button.textContent = state.username ? state.username + ' · 退出' : '登录';
+    syncWriteActions();
+  }
+
+  // The browser currently knows the signed-in username, but not an administrator
+  // capability. Show the destructive action only for the owner; administrators
+  // can still use the API until a capability field is exposed to the browser.
+  function syncWriteActions() {
+    var signedIn = !!state.username;
+    $('new-repo').hidden = !signedIn;
+    var canDelete = signedIn && state.repo && state.repo.owner === state.username;
+    $('delete-repo').hidden = !canDelete;
   }
 
   function renderRepos() {
@@ -264,11 +306,18 @@
       if (ticket !== seq.repos) return state.repos;
       state.repos = Array.isArray(data.repos) ? data.repos : [];
       setConnection('ok', state.username ? '已登录' : '在线');
-      renderRepos();
       if (state.repo) {
         var current = state.repos.find(function (repo) { return repo.full_name === state.repo.full_name; });
-        if (current) state.repo = current;
+        if (current) {
+          state.repo = current;
+        } else {
+          // The selected repository may have been deleted or become invisible
+          // after a credential/account change. Do not leave its old contents on
+          // screen when the fresh listing no longer contains it.
+          closeRepoView();
+        }
       }
+      renderRepos();
       return state.repos;
     }).catch(function (error) {
       if (ticket !== seq.repos) throw error;
@@ -283,6 +332,48 @@
       $('repo-count').textContent = '0 个仓库';
       throw error;
     });
+  }
+
+  function openCreate() {
+    $('create-message').textContent = '';
+    $('create-name').value = '';
+    $('create-description').value = '';
+    $('create-private').checked = false;
+    $('create-dialog').showModal();
+    $('create-name').focus();
+  }
+
+  function openDelete() {
+    if (!state.repo) return;
+    $('delete-message').textContent = '';
+    $('delete-confirm').value = '';
+    $('delete-expect').textContent = state.repo.name;
+    $('delete-dialog').showModal();
+    $('delete-confirm').focus();
+  }
+
+  // `owner` is left to the server, which defaults it to whoever is signed in.
+  // Sending it would only introduce a way for the page to be wrong about who
+  // that is.
+  function createRepo(name, description, isPrivate) {
+    return api('/api/v1/repos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, description: description, private: isPrivate }),
+    }).then(function (response) { return response.json(); });
+  }
+
+  function deleteRepo(repo) {
+    return api('/api/v1/repos/' + encodeURIComponent(repo.owner) + '/' +
+      encodeURIComponent(repo.name), { method: 'DELETE' });
+  }
+
+  function closeRepoView() {
+    beginView();
+    state.repo = null;
+    $('repo-view').hidden = true;
+    $('empty-state').hidden = false;
+    syncWriteActions();
   }
 
   // `<span>workspace</span> / owner / name`, built rather than assembled as
@@ -343,6 +434,7 @@
     visibility.textContent = repo.private ? '私有' : '公开';
     visibility.className = 'visibility-pill' + (repo.private ? ' private' : '');
     $('repo-default-branch').textContent = '默认分支 · ' + (repo.default_branch || 'main');
+    syncWriteActions();
     hideFile();
     $('diff-panel').hidden = true;
     renderRepos();
@@ -502,7 +594,12 @@
     }).catch(function (error) {
       if (!viewIsCurrent(view)) return [];
       $('commit-count').textContent = '';
-      setError(list, error.message);
+      // A repository with no commits has no `main` to resolve either, so the
+      // server answers 404 — which as a bare status reads "没有找到内容", about
+      // a repository the user is looking straight at. It is the first thing
+      // they see after creating one, so say what is actually true. The tree
+      // panel above says the same for the same reason.
+      setError(list, error.status === 404 ? '这个分支还没有提交' : error.message);
       return [];
     });
   }
@@ -605,10 +702,7 @@
         .catch(function () {});
     }
     clearCredentials();
-    beginView();
-    state.repo = null;
-    $('repo-view').hidden = true;
-    $('empty-state').hidden = false;
+    closeRepoView();
     updateAuthButton();
     loadRepos().catch(function () {});
     showToast('已退出登录');
@@ -616,6 +710,59 @@
 
   $('repo-search').addEventListener('input', renderRepos);
   $('refresh-repos').addEventListener('click', function () { loadRepos().catch(function () {}); });
+  $$('[data-dialog-close]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var dialog = $(button.dataset.dialogClose);
+      if (dialog) dialog.close();
+    });
+  });
+  $('new-repo').addEventListener('click', openCreate);
+  $('delete-repo').addEventListener('click', openDelete);
+  $('create-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var name = $('create-name').value.trim();
+    if (!name) {
+      $('create-message').textContent = '请输入仓库名';
+      return;
+    }
+    $('create-submit').disabled = true;
+    createRepo(name, $('create-description').value.trim(), $('create-private').checked)
+      .then(function (repo) {
+        $('create-dialog').close();
+        showToast('已创建 ' + repo.full_name);
+        return loadRepos().then(function () {
+          // Select the record the LISTING returned rather than the one the
+          // create answered with, so what is on screen is what the server will
+          // keep answering with.
+          var made = state.repos.find(function (r) { return r.full_name === repo.full_name; });
+          if (made) selectRepo(made);
+        });
+      })
+      .catch(function (error) { $('create-message').textContent = detailMessage(error); })
+      .finally(function () { $('create-submit').disabled = false; });
+  });
+  $('delete-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var repo = state.repo;
+    if (!repo) { $('delete-dialog').close(); return; }
+    // Typing the name is the whole safety here. repo_delete is a recursive
+    // delete of the git objects with nothing behind it, so a misplaced click
+    // has to cost more than a click.
+    if ($('delete-confirm').value.trim() !== repo.name) {
+      $('delete-message').textContent = '输入的仓库名和这个仓库对不上';
+      return;
+    }
+    $('delete-submit').disabled = true;
+    deleteRepo(repo)
+      .then(function () {
+        $('delete-dialog').close();
+        closeRepoView();
+        showToast('已删除 ' + repo.full_name);
+        return loadRepos().catch(function () {});
+      })
+      .catch(function (error) { $('delete-message').textContent = detailMessage(error); })
+      .finally(function () { $('delete-submit').disabled = false; });
+  });
   $('copy-clone').addEventListener('click', copyCloneUrl);
   $('auth-toggle').addEventListener('click', function () {
     if (state.username) logout(); else openAuth();
