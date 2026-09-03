@@ -223,12 +223,102 @@ deadline removed. The ceiling and decoder-error branches leave through the same
 line as the undrained one and are not asserted separately: no HTTP client will
 keep uploading past the response that would prove it.
 
+**Storage: done and verified against MySQL 8.4** (2026-09-03).
+
+`DB_DRIVER` chooses where accounts and the repository listing live. The default
+is unchanged — JSON files, one process, nothing to install. `mysql` puts the
+same data in two tables through the `xmysql` worker that was already there.
+
+- `app/db.lua` — the connection, and the only place a SQL literal is built.
+  xmysql takes finished SQL and nothing underneath it escapes anything, so
+  `db_quote` does not escape either: it ENCODES, as `_utf8mb4 X'...'`. A hex
+  literal has no quote to close early and no backslash whose meaning depends on
+  the server's `sql_mode`, so `x' OR '1'='1` comes back out as fourteen
+  characters. The introducer is what keeps it a utf8mb4 comparison rather than a
+  binary one — EXPLAIN reports `type=const` on the primary key with it, so the
+  encoding costs no index.
+- `app/migrate.lua` — the schema as numbered migrations, applied once and
+  recorded in `gl_schema_migrations`. Two rules for a new one, both consequences
+  of how it runs: statements must be idempotent, and a first boot of two
+  processes against one empty database is not coordinated. `GET_LOCK` is the
+  obvious answer and does not work here — the pool hands each query to whichever
+  connection is free, so the release would arrive on a different one.
+- `app/store.lua` — the DAO. Its contract is what keeps repo.lua and auth.lua
+  free of any of this: `store_*_load()` returns THE map the caller then owns and
+  mutates, and `store_*_put(rec)` persists one record already in it. That split
+  lets the file backend keep doing the only thing a file can do — rewrite the lot
+  — while the SQL backend writes the single row that changed.
+
+Both identities survive the move intact. Accounts stay case-SENSITIVE and
+repositories case-INSENSITIVE, which is not a detail: the tables are
+`utf8mb4_bin` so a comparison means what Lua's `==` means, and `gl_repos` carries
+`owner_key`/`name_key` alongside `owner`/`name` so the folded key that made
+`Demo` and `demo` one directory is the primary key rather than a convention.
+
+Boot changed shape. Every store call is a query and therefore yields, so the
+loads moved out of `__init` and into `boot_async` — and the listener moved
+behind them, onto a main-state timer that fires once boot has finished. Nothing
+is accepted now until git has been checked and the stores have answered, which
+also closes a window that was there under JSON.
+
+Verified against a real MySQL 8.4.9, on both platforms and both stores:
+
+| | JSON | MySQL |
+|---|---|---|
+| `test/unit.lua` (Windows / Linux) | 199 / 198 | — |
+| `test/smoke.sh` Windows | 106/106 | 106/106 |
+| `test/smoke.sh` Linux | 117/117 | 117/117 |
+
+`test/dbreset.lua` empties the database first, because the counts the suite
+asserts only mean something from empty. gitloom itself never creates a database:
+xmysql names one in its handshake, and a pooled `USE` would only move whichever
+connection ran it — so that is a deployment step, and the config says so.
+
+**A review of it found four things, all fixed.** Three were mine and one was
+older. The mysql pool is a THREAD, and xthread hands the caller a ThreadData
+userdata owned by the calling lua_State whose `__gc` nulls that struct — started
+inside the boot coroutine, as it first was, the worker would be reclaimed out
+from under itself the moment that coroutine was collected. It is created from
+`__init` now, like every other thread here, for the same reason timers are. A
+raise in `boot_async` after its first yield reached nobody, which used to be
+survivable and no longer is now that the listener is what boot switches on. The
+file backend rewrote the account file from a map that could be nil, which would
+have deleted every account rather than refusing.
+
+The older one is the interesting one: **nothing bounded the free text**. A
+description, an email and a token label were unbounded while the store was a
+file that simply grew, and the token list had no cap at all — so an account
+could accumulate credentials until its own row was too large to write, taking
+REVOKING them down with it. Columns are finite, so what was quiet growth became
+a 500 out of the database, and the two backends disagreed about what was legal.
+All four are refused at the boundary now, with a 400 that says which, and
+`AUTH_MAX_TOKENS` is the cap.
+
+**What this does NOT do is make two processes correct.** Each instance still
+reads the whole index and account list into memory at boot and serves from that
+copy, so a second one would not see the first one's writes. MySQL removes the
+reason that was unavoidable; the cache invalidation it now needs is a separate
+piece of work, and open decision 3 is still open.
+
+**Sideband progress during a push: nothing to relay** (measured 2026-09-03).
+
+The premise was wrong. The advertisement carries `side-band-64k` and matches
+what git itself advertises byte for byte; the client negotiates it and, with
+`--progress`, does not send `quiet`; the response is sideband-framed and band
+1 carries the report-status. There is simply no band 2, because
+`git receive-pack --stateless-rpc` does not produce one — run standalone on a
+captured request body, outside gitloom entirely, it emits band 1 and nothing
+on stderr, for a 13-object 12 MiB push (unpack-objects) and for a 300-object
+push (index-pack) alike. Progress in git is gated on the child's stderr being
+a terminal, and under stateless RPC it is a pipe into the sideband muxer.
+What remains is a different feature: band-2 messages GITLOOM writes itself,
+which is how gitea says "this branch is protected" or offers a link to open a
+pull request. That belongs with the checks that would produce such a message,
+so it is listed in Phase 3 rather than here.
+
 Still open in this phase:
-- **Sideband progress** during a push.
 - **io_uring.** Now installed on the dev box and untested here; it replaces the
   channel read path, which is exactly what streaming depends on.
-- **Storage.** A minimal DAO plus a migration runner over the existing
-  `xmysql` worker.
 
 ## Phase 2 — repository browsing
 
@@ -281,8 +371,13 @@ Estimate for the remainder: 3–5 weeks.
 ## Phase 3 — collaboration
 
 Organisations and teams, then issues (comments, labels, milestones), then pull
-requests. PRs are the heavy part: merge-base computation, conflict detection,
-three merge strategies, and a review state machine.
+requests. Server-authored sideband messages land here too — the band-2
+`remote:` lines that tell a pusher why a branch was refused, or where to open a
+pull request. The transport for them already works; what is missing is anything
+worth saying, which arrives with protected branches and review.
+
+PRs are the heavy part: merge-base computation, conflict detection, three merge
+strategies, and a review state machine.
 
 Estimate: 6–10 weeks.
 
@@ -302,9 +397,11 @@ individually, never as a batch.
 
 ## Open decisions
 
-1. **Storage.** Stay on JSON files for longer, or move to MySQL at Phase 1? The
-   answer is MySQL as soon as more than one process needs to serve the same
-   repositories.
+1. ~~**Storage.** Stay on JSON files for longer, or move to MySQL at Phase 1?~~
+   Settled 2026-09-03: both, chosen by `DB_DRIVER`, with files as the default.
+   A single instance has no reason to want a database and every reason not to
+   install one; the moment a second one exists it cannot share a JSON file. The
+   backend is now a deployment choice rather than a rewrite.
 2. **Front end.** Single-page app against the JSON API (assumed above), or
    server-rendered? The SPA assumption is what keeps Phase 2 at 4–6 weeks.
 3. **Multi-process.** One process with `GIT_WORKERS` threads, or several

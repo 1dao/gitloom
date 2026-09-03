@@ -72,6 +72,9 @@ gitloom/
     boot.lua             isolated module loader + g_exports registry
     cfg.lua              cfg_*
     util.lua             util_*
+    db.lua               the MySQL connection, and every SQL literal
+    migrate.lua          the schema, and the runner that applies it
+    store.lua            accounts and repositories: JSON files or MySQL
     proc.lua             the process pool and the scratch directory
     pkt.lua              git's pkt-line framing
     repo.lua             repository naming, on-disk layout, the index
@@ -88,11 +91,12 @@ gitloom/
   worker/                scripts that run on their own thread and Lua state
     kdf.lua              password hashing, kept off the event loop
   scripts/core/          modules copied from xnet2lua (share/ and server/)
-  repos/                 <owner>/<name>.git plus index.json
-  data/                  users.json
+  repos/                 <owner>/<name>.git plus index.json (DB_DRIVER=none)
+  data/                  users.json (DB_DRIVER=none)
   tmp/                   request/response staging
   test/smoke.sh          end-to-end, against a real git client
   test/unit.lua          pure-Lua checks that need no server
+  test/dbreset.lua       empties the test database, for the MySQL run
 ```
 
 ## Module convention
@@ -184,7 +188,8 @@ serving.
 | Concurrency | Bounded, by two counters. A staged clone or push occupies one of `GIT_WORKERS` pool threads for its whole duration; a streamed one takes one of `GIT_STREAM_MAX` slots (default `GIT_WORKERS`) and falls back to staging when they are all busy — so an instance runs at most `GIT_STREAM_MAX + GIT_WORKERS` git processes. A client that disconnects does not stop the `git` it started; `GIT_TIMEOUT_SEC` (default 600) is what bounds that. |
 | HTTP only | No SSH transport. git speaks HTTP Basic and re-sends the credential on **every** request, so set `HTTPS=1` or front gitloom with TLS before exposing it. |
 | Dumb protocol | Not served. `/info/refs` without `?service=` answers 403 rather than 404, so the failure names itself. |
-| Storage | Accounts and the repository index are JSON files, not a database. Fine for one process; it is the thing to replace first when that stops being true. |
+| Storage | `DB_DRIVER=none` (the default) keeps accounts and the repository index in JSON files; `DB_DRIVER=mysql` keeps the same data in two tables. The repositories themselves are always on disk — MySQL replaces the index, not the git objects. |
+| One process | Still one process, whichever store. Each instance reads the whole index and account list into memory at boot and serves from that copy, so a second instance would not see the first one's writes. MySQL removes the reason that was unavoidable; it does not by itself make two instances correct. |
 | Names | Owner and repository names are `[A-Za-z0-9_][A-Za-z0-9._-]*`. That is a security boundary, not a style rule — see the comment in [app/repo.lua](app/repo.lua). |
 
 ## Platforms
@@ -193,10 +198,11 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 113/113 on Linux, and 102/102 on Windows and under
+2.52). `test/smoke.sh` passes 117/117 on Linux, and 106/106 on Windows and under
 `GIT_STREAM=off` — the eleven it does not run there are the streamed-body cases,
-which need the transport that platform does not have. `test/unit.lua` is 168 on
-Windows, 167 on Linux (one case is about Windows path spelling).
+which need the transport that platform does not have. `test/unit.lua` is 199 on
+Windows, 198 on Linux (one case is about Windows path spelling). Adding
+`DB_DRIVER=mysql` runs the same suite against MySQL instead of JSON files.
 
 What was checked in the runtime underneath, and is fine:
 

@@ -2,11 +2,15 @@
 --
 -- Exports: repo_root, repo_name_ok, repo_parse_url, repo_dir, repo_dir_of,
 --          repo_exists, repo_exists_of, repo_get, repo_list, repo_create,
---          repo_delete, repo_sync_head, repo_index_load, repo_index_save
+--          repo_delete, repo_sync_head, repo_index_load, repo_key
 --
 -- ON-DISK LAYOUT
 --   <REPO_ROOT>/<owner>/<name>.git     one bare repository per directory
---   <REPO_ROOT>/index.json             the repository index (see below)
+--
+-- WHERE THE INDEX LIVES is app/store.lua's business, not this file's: a JSON
+-- file next to the repositories, or a table in MySQL. What is here is the
+-- in-memory map and what it means; `index` below IS the map store.lua handed
+-- over, so a record changed in place needs only a store_repo_put to persist.
 --
 -- WHY AN INDEX FILE
 -- Listing repositories by walking REPO_ROOT is not viable: xutils.scan_dir
@@ -19,7 +23,6 @@
 -- repository still checks the directory, so an index that has drifted out of
 -- sync produces a 404 rather than a corrupt operation.
 
-local xutils = require('xutils')
 
 -- Segment charset. Deliberately narrow, and it is a security boundary rather
 -- than a style choice — three separate ones:
@@ -32,11 +35,14 @@ local xutils = require('xutils')
 local NAME_PATTERN = '^[A-Za-z0-9_][A-Za-z0-9._-]*$'
 local MAX_NAME     = 100
 
-local index = nil     -- { ["owner/name"] = { owner, name, description, ... } }
+-- A description is free text, and until the store had columns nothing bounded
+-- it: the JSON index simply grew, and every boot read the lot back. It is a
+-- TEXT column now, so an unbounded one is the difference between a 400 that
+-- says what is wrong and a 500 out of the database. 1 KiB is far more than a
+-- one-line summary needs and far less than either store minds.
+local MAX_DESCRIPTION = 1024
 
-local function index_path()
-    return util_path_join(repo_root(), 'index.json')
-end
+local index = nil     -- { ["owner/name"] = { owner, name, description, ... } }
 
 -- ---------------------------------------------------------------------------
 -- Naming
@@ -169,60 +175,44 @@ end
 -- The consequence for lookups: a record found by a case-folded key may have
 -- different casing from the URL that found it, so the directory must be derived
 -- from the RECORD (repo_dir_of) and never from the request path.
-local function key(owner, name)
+function g_exports.repo_key(owner, name)
     return owner:lower() .. '/' .. name:lower()
 end
 
+-- Read the whole index into memory. COROUTINE-ONLY under MySQL, where it is a
+-- query; harmless from anywhere under the file backend. main.lua loads it from
+-- boot_async for exactly that reason.
+--
+-- Returns the map, or nil plus a message. On failure `index` is deliberately
+-- left nil rather than set to {}: an empty index does not mean "no
+-- repositories", it means the store did not answer, and caching that would make
+-- every repository vanish and let repo_create overwrite one that exists.
 function g_exports.repo_index_load()
-    index = {}
-    local raw = util_file_read(index_path())
-    if not raw or raw == '' then return index end
-    local parsed = xutils.json_unpack(raw)
-    if type(parsed) ~= 'table' or type(parsed.repos) ~= 'table' then
-        cfg_log_warn('repository index at %s is unreadable; starting empty', index_path())
-        return index
+    local map, err = store_repos_load()
+    if not map then
+        cfg_log_error('repository index unavailable: %s', tostring(err))
+        return nil, err
     end
-    for _, r in ipairs(parsed.repos) do
-        if type(r) == 'table' and repo_name_ok(r.owner) and repo_name_ok(r.name) then
-            index[key(r.owner, r.name)] = r
-        end
-    end
+    index = map
     return index
 end
 
--- Rewrite the index through util_file_write_atomic, so a crash can never leave the
--- listing without an index — see the note there on why the obvious
--- delete-then-rename is worse than no atomicity at all.
-function g_exports.repo_index_save()
-    local list = {}
-    for _, r in pairs(index or {}) do list[#list + 1] = r end
-    table.sort(list, function(a, b)
-        if a.owner ~= b.owner then return a.owner < b.owner end
-        return a.name < b.name
-    end)
-
-    local json = xutils.json_pack({ version = 1, repos = list })
-    if not json then
-        -- json_pack returns nil (not an error) on invalid UTF-8 — a description
-        -- pasted from a mis-decoded source can do it. Refusing here beats
-        -- truncating the index to nothing.
-        return nil, 'index serialisation failed (invalid UTF-8 in a field?)'
-    end
-
-    local ok, err = util_file_write_atomic(index_path(), json)
-    if not ok then return nil, 'index save failed: ' .. tostring(err) end
-    return true
+-- The index has to be there before a lookup can mean anything. Returns true, or
+-- false once the failure has been logged by repo_index_load.
+local function have_index()
+    if index then return true end
+    return repo_index_load() ~= nil
 end
 
 function g_exports.repo_get(owner, name)
-    if not index then repo_index_load() end
-    return index[key(owner, name)]
+    if not have_index() then return nil end
+    return index[repo_key(owner, name)]
 end
 
 -- Every repository, optionally filtered by owner. Sorted, so the listing is
 -- stable between calls.
 function g_exports.repo_list(owner)
-    if not index then repo_index_load() end
+    if not have_index() then return {} end
     local out = {}
     for _, r in pairs(index) do
         if not owner or r.owner == owner then out[#out + 1] = r end
@@ -245,8 +235,8 @@ function g_exports.repo_create(owner, name, opts)
     opts = opts or {}
     if not repo_name_ok(owner) then return nil, 'bad owner name' end
     if not repo_name_ok(name)  then return nil, 'bad repository name' end
-    if not index then repo_index_load() end
-    if index[key(owner, name)] or repo_exists(owner, name) then
+    if not have_index() then return nil, 'the repository index is unavailable' end
+    if index[repo_key(owner, name)] or repo_exists(owner, name) then
         return nil, 'repository already exists'
     end
 
@@ -255,6 +245,12 @@ function g_exports.repo_create(owner, name, opts)
 
     local branch = opts.default_branch or cfg_get('DEFAULT_BRANCH', 'main')
     if not repo_name_ok(branch) then return nil, 'bad default branch name' end
+
+    local description = tostring(opts.description or '')
+    if #description > MAX_DESCRIPTION then
+        return nil, string.format('description must be at most %d bytes',
+            MAX_DESCRIPTION)
+    end
 
     local r = git_exec({ 'init', '--bare', '-q',
                          '--initial-branch=' .. branch, dir })
@@ -270,19 +266,19 @@ function g_exports.repo_create(owner, name, opts)
     local rec = {
         owner = owner,
         name = name,
-        description = tostring(opts.description or ''),
+        description = description,
         private = opts.private and true or false,
         default_branch = branch,
         created_at = os.time(),
     }
-    index[key(owner, name)] = rec
-    local sok, serr = repo_index_save()
+    index[repo_key(owner, name)] = rec
+    local sok, serr = store_repo_put(rec)
     if not sok then
         -- The index is what makes a repository findable, so a repository that
         -- is not in it does not exist as far as every other code path is
         -- concerned. Roll the directory back and fail, rather than returning
         -- 201 for something that will have vanished by the next restart.
-        index[key(owner, name)] = nil
+        index[repo_key(owner, name)] = nil
         local dok = proc_exec(util_is_windows
             and { argv = { 'cmd', '/c', 'rmdir', '/s', '/q', util_path_native(dir) } }
             or  { argv = { 'rm', '-rf', dir } })
@@ -339,7 +335,7 @@ function g_exports.repo_sync_head(rec)
 
     if rec.default_branch ~= pick then
         rec.default_branch = pick
-        local sok, serr = repo_index_save()
+        local sok, serr = store_repo_put(rec)
         if not sok then
             cfg_log_warn('HEAD moved to %s but the index was not saved: %s',
                 pick, tostring(serr))
@@ -357,8 +353,8 @@ function g_exports.repo_delete(owner, name)
     if not repo_name_ok(owner) or not repo_name_ok(name) then
         return nil, 'bad repository name'
     end
-    if not index then repo_index_load() end
-    if not index[key(owner, name)] and not repo_exists(owner, name) then
+    if not have_index() then return nil, 'the repository index is unavailable' end
+    if not index[repo_key(owner, name)] and not repo_exists(owner, name) then
         return nil, 'no such repository'
     end
 
@@ -373,8 +369,8 @@ function g_exports.repo_delete(owner, name)
         return nil, 'delete failed: ' .. tostring(r.err) .. ' ' .. util_str_trim(r.stderr or '')
     end
 
-    index[key(owner, name)] = nil
-    local sok, serr = repo_index_save()
+    index[repo_key(owner, name)] = nil
+    local sok, serr = store_repo_delete(owner, name)
     if not sok then
         -- The directory is already gone, so the in-memory index is now the
         -- truthful one and re-adding the record would be a lie. Report the

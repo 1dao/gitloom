@@ -26,6 +26,9 @@ end
 
 boot.load_script('app/cfg.lua')
 boot.load_script('app/util.lua')
+boot.load_script('app/db.lua')
+boot.load_script('app/migrate.lua')
+boot.load_script('app/store.lua')
 boot.load_script('app/proc.lua')
 boot.load_script('app/pkt.lua')
 boot.load_script('app/repo.lua')
@@ -512,6 +515,65 @@ do
     local incomplete = codec.parse_request_head('POST / HTTP/1.1\r\nHost: x\r\n')
     eq('incomplete request head is reported', select(3,
        codec.parse_request_head('POST / HTTP/1.1\r\nHost: x\r\n')), 'incomplete')
+end
+
+-- ── SQL literals ──────────────────────────────────────
+--
+-- xmysql takes finished SQL and nothing underneath it escapes anything, so
+-- db_quote is the whole of the injection boundary. It encodes rather than
+-- escapes: there is no quote character in a hex literal to close early, and no
+-- backslash whose meaning depends on the server's sql_mode.
+do
+    eq('nil is NULL', db_quote(nil), 'NULL')
+    eq('true is 1', db_quote(true), '1')
+    eq('false is 0', db_quote(false), '0')
+    eq('an integer keeps its digits', db_quote(42), '42')
+    eq('a negative integer keeps its sign', db_quote(-7), '-7')
+    eq('a string becomes a utf8mb4 hex literal',
+       db_quote('hello'), "_utf8mb4 X'68656C6C6F'")
+    eq('an empty string is still a literal', db_quote(''), "_utf8mb4 X''")
+
+    -- The one that matters. Every character that could end the literal early
+    -- is a pair of hex digits by the time it reaches the server.
+    local hostile = "x' OR '1'='1"
+    local quoted = db_quote(hostile)
+    local payload = quoted:match("^_utf8mb4 X'(.*)'$")
+    check('a quote character cannot survive db_quote',
+        payload ~= nil and not payload:find("'", 1, true), quoted)
+    check('a hostile string is only hex digits',
+        payload ~= nil and payload:match('^%x*$') ~= nil, quoted)
+    eq('a backslash is hex too', db_quote('a' .. string.char(92) .. 'b'),
+       "_utf8mb4 X'615C62'")
+    eq('a NUL byte is hex too', db_quote('a' .. string.char(0) .. 'b'),
+       "_utf8mb4 X'610062'")
+
+    -- Non-ASCII round-trips as its UTF-8 bytes, which is what the introducer is
+    -- for; a bare X'...' would be a binary string and risk a collation error.
+    eq('utf-8 is encoded byte by byte', db_quote('é'), "_utf8mb4 X'C3A9'")
+
+    check('a NaN has no literal', not pcall(db_quote, 0 / 0), 'NaN was quoted')
+    check('an infinity has no literal', not pcall(db_quote, math.huge), 'inf was quoted')
+    check('a table has no literal', not pcall(db_quote, {}), 'a table was quoted')
+
+    eq('an identifier is backticked', db_ident('users'), '`users`')
+    for _, bad in ipairs({ 'has space', 'drop`table', '1leading', 'semi;colon', '' }) do
+        check(string.format('db_ident refuses %q', bad), not pcall(db_ident, bad),
+              'accepted')
+    end
+
+    -- Every column arrives as a string, whatever it was declared as, and a NULL
+    -- column is simply missing from the row.
+    eq('a numeric column parses', db_number('42'), 42)
+    eq('a missing numeric column falls back', db_number(nil, 7), 7)
+    eq('a non-numeric column falls back', db_number('abc', 3), 3)
+    eq('a truthy tinyint is true', db_boolean('1'), true)
+    eq('a zero tinyint is false', db_boolean('0'), false)
+    eq('a missing boolean is false', db_boolean(nil), false)
+    eq('a text column is text', db_text('x'), 'x')
+    eq('a missing text column falls back', db_text(nil, 'd'), 'd')
+
+    eq('the driver defaults to none', db_driver(), 'none')
+    eq('mysql is off by default', db_enabled(), false)
 end
 
 -- ── incremental chunked decoding ────────────────────────────────────

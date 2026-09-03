@@ -44,6 +44,9 @@ end
 
 boot.load_script('app/cfg.lua')      -- cfg_*                       (no deps)
 boot.load_script('app/util.lua')     -- util_*
+boot.load_script('app/db.lua')       -- db_*                        (mysql)
+boot.load_script('app/migrate.lua')  -- migrate_*                   (schema)
+boot.load_script('app/store.lua')    -- store_*   accounts and repositories
 boot.load_script('app/proc.lua')     -- proc_*
 boot.load_script('app/pkt.lua')      -- pkt_*
 boot.load_script('app/repo.lua')     -- repo_*
@@ -68,6 +71,8 @@ local router = dofile('scripts/core/share/xrouter.lua')
 router.set_log_prefix('GITLOOM')
 
 local sweep_timer = nil
+local listen_timer = nil
+local listen_now = false
 
 -- ---------------------------------------------------------------------------
 -- Boot work that has to run on a coroutine
@@ -79,6 +84,22 @@ local sweep_timer = nil
 -- boot beats finding out from a user.
 -- ---------------------------------------------------------------------------
 local function boot_async()
+    -- The database first: everything else that boots is cheaper to redo than a
+    -- half-migrated schema, and a gitloom pointed at a database it cannot reach
+    -- has nothing to serve. Here rather than in __init because every statement
+    -- yields on an RPC into the mysql worker thread.
+    if db_enabled() then
+        local applied, merr = migrate_run()
+        if not applied then
+            cfg_log_error('schema migration failed: %s', tostring(merr))
+            xthread.stop(1)
+            return
+        end
+        local st = migrate_status()
+        cfg_log_system('schema at migration %d (%d applied this boot)',
+            st and st.latest or migrate_latest(), applied)
+    end
+
     local ok, err = proc_selftest()
     if not ok then
         cfg_log_error('process pool self-test failed: %s', tostring(err))
@@ -115,6 +136,22 @@ local function boot_async()
     -- has been served yet.
     proc_tmp_purge()
 
+    -- The stores, and only now: under MySQL every one of these is a query, and
+    -- __init runs on the main state where a yield is not possible.
+    if not repo_index_load() then xthread.stop(1); return end
+    if not auth_load() then xthread.stop(1); return end
+    auth_bootstrap()
+    cfg_log_system('store: %s', store_describe())
+
+    -- LAST. Nothing is accepted until git has been checked and the stores have
+    -- answered, so there is no window in which a clone is served by an instance
+    -- that does not yet know which repositories exist.
+    --
+    -- Through a main-state timer rather than from here: http_listen arms the
+    -- serve loop's ticker, and a timer armed inside this coroutine would fire
+    -- into it after it has finished. The same rule as the scratch sweeper.
+    listen_now = true
+
     local n = #repo_list()
     cfg_log_system('gitloom ready — %d repository(ies) under %s', n, repo_root())
 end
@@ -137,14 +174,22 @@ local function __init()
     ok, err = auth_kdf_setup()
     if not ok then error('kdf worker failed to start: ' .. tostring(err)) end
 
+    -- The mysql pool is a thread too, and threads are created HERE for the same
+    -- reason timers are: xthread hands the caller a ThreadData userdata owned by
+    -- the calling lua_State, and its __gc nulls that struct. Started inside the
+    -- boot coroutine, the worker would be reclaimed out from under itself the
+    -- moment that coroutine was collected. Connecting is asynchronous, so
+    -- nothing is proven here — migrate_run in boot_async is the first statement
+    -- and therefore the real check.
+    if db_enabled() then
+        ok, err = db_start()
+        if not ok then error('mysql pool failed to start: ' .. tostring(err)) end
+    end
+
     -- git children run with HOME pointed here so they cannot pick up the
     -- operator's ~/.gitconfig. The directory has to exist or git warns on every
     -- invocation.
     util_dir_make(git_home_dir())
-
-    repo_index_load()
-    auth_load()
-    auth_bootstrap()
 
     smart_install()   -- git transport, as a path fallback
     web_install()     -- same-origin repository browser, as routes
@@ -152,8 +197,18 @@ local function __init()
     -- Order matters only in that both must be registered before the listener
     -- accepts anything; the route table is always consulted before fallbacks.
 
-    ok, err = http_listen()
-    if not ok then error(tostring(err)) end
+    -- Armed here, on the main state; it fires once boot_async has set the flag.
+    -- See the note at the end of boot_async for why the listen cannot simply
+    -- happen there.
+    listen_timer = xtimer.add(20, function()
+        if not listen_now then return end
+        listen_timer:del(); listen_timer = nil
+        local lok, lerr = http_listen()
+        if not lok then
+            cfg_log_error('listen failed: %s', tostring(lerr))
+            xthread.stop(1)
+        end
+    end, -1)
 
     -- Scratch files released by finished responses are unlinked here. Pure Lua,
     -- no shelling out, so it is safe to run straight off the timer. Armed from
@@ -174,7 +229,18 @@ local function __init()
         cfg_log_info('strict globals on')
     end
 
-    local resumed, rerr = coroutine.resume(coroutine.create(boot_async))
+    -- pcall INSIDE the coroutine, not around the resume: boot_async yields, so
+    -- the resume returns at the first yield and a raise after that point would
+    -- reach nobody. It used to be survivable — the listener was already up — but
+    -- now the listener is what boot_async switches on, so an unreported failure
+    -- here is a process that accepts nothing and logs nothing about why.
+    local resumed, rerr = coroutine.resume(coroutine.create(function()
+        local bok, berr = pcall(boot_async)
+        if not bok then
+            cfg_log_error('boot failed: %s', tostring(berr))
+            xthread.stop(1)
+        end
+    end))
     if not resumed then
         cfg_log_error('boot coroutine crashed: %s', tostring(rerr))
         xthread.stop(1)
@@ -183,6 +249,8 @@ end
 
 local function __uninit()
     if sweep_timer then sweep_timer:del(); sweep_timer = nil end
+    if listen_timer then listen_timer:del(); listen_timer = nil end
+    db_stop()
     http_close()
     xnet.uninit()
     cfg_log_system('gitloom stopped')

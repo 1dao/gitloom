@@ -10,6 +10,13 @@
 #   GIT_STREAM=off sh test/smoke.sh   force the file-staging transport
 #   BIG_MB=0 sh test/smoke.sh         skip the large-clone case (see below)
 #
+#   DB_DRIVER=mysql DB_USER=... DB_PASSWORD=... DB_NAME=... sh test/smoke.sh
+#       run the main instance against MySQL instead of JSON files. The database
+#       is dropped and recreated first, so every case starts from empty — which
+#       is what the counts below assert. The extra instances further down stay
+#       on files: what they test is the streaming transport, not the store, and
+#       one database shared between three instances is not isolation.
+#
 # Exit code 0 = every case passed.
 
 set -u
@@ -43,6 +50,14 @@ trap cleanup EXIT INT TERM
 
 mkdir -p "$ROOT" "$DATA" "$SCRATCH"
 
+# The store under test. Empty means JSON files, which is the default everywhere.
+DB_ARGS=""
+if [ "${DB_DRIVER:-}" = "mysql" ]; then
+    DB_ARGS="DB_DRIVER=mysql DB_HOST=${DB_HOST:-127.0.0.1} DB_PORT=${DB_PORT:-3306}"
+    DB_ARGS="$DB_ARGS DB_USER=${DB_USER:-} DB_PASSWORD=${DB_PASSWORD:-}"
+    DB_ARGS="$DB_ARGS DB_NAME=${DB_NAME:-gitloom_test}"
+fi
+
 # Pick the runtime by PLATFORM, not by which file happens to be executable.
 # Both binaries are committed, so an exec-bit probe would hand Linux the PE
 # binary the moment someone types the natural `chmod +x bin/*`.
@@ -53,11 +68,20 @@ esac
 [ -f "$XNET" ] || { echo "no runtime at $XNET — it ships in bin/, see README"; exit 2; }
 [ -x "$XNET" ] || { echo "$XNET is not executable — run: chmod +x $XNET"; exit 2; }
 
+# A database gitloom is pointed at has to exist, and for these counts to mean
+# anything it has to be empty. gitloom never creates one: xmysql names the
+# database in its handshake, and a pooled USE would only move one connection.
+if [ -n "$DB_ARGS" ]; then
+    # shellcheck disable=SC2086
+    "$XNET" test/dbreset.lua $DB_ARGS || { echo "could not reset the test database"; exit 2; }
+fi
+
 "$XNET" main.lua \
     LISTEN_PORT="$PORT" REPO_ROOT="$ROOT" DATA_DIR="$DATA" TMP_DIR="$SCRATCH" \
     USERS_FILE="$DATA/users.json" ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" \
     GIT_STREAM="${GIT_STREAM:-auto}" \
     TRUSTED_PROXIES=127.0.0.1 \
+    $DB_ARGS \
     > "$LOG" 2>&1 &
 PID=$!
 
@@ -243,6 +267,39 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X POST \
     -H 'Content-Type: application/json' -d '{"ttl_seconds":"soon"}' \
     "$BASE/api/v1/user/tokens")
 check 'a non-numeric ttl is refused' "$code" '400'
+
+# == Bounds on free text and on token count =================================
+# None of these were bounded while accounts and the index were JSON files that
+# simply grew. They are columns now, so an unbounded value is the difference
+# between a 400 that says what is wrong and a 500 out of the database — and the
+# two stores have to answer the same way, which is what these assert.
+# Built with awk rather than `tr` on /dev/zero: writing a NUL escape into a
+# generated script is how this line first arrived as a literal NUL byte.
+LONG=$(awk 'BEGIN { s = ""; while (length(s) < 4096) s = s "x"; print s }')
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X POST     -H 'Content-Type: application/json'     -d "{\"name\":\"toolong\",\"description\":\"$LONG\"}" "$BASE/api/v1/repos")
+check 'an over-long description is refused' "$code" '400'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X POST     -H 'Content-Type: application/json'     -d "{\"username\":\"longmail\",\"password\":\"a-password-1\",\"email\":\"$LONG\"}"     "$BASE/api/v1/users")
+check 'an over-long email is refused' "$code" '400'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X POST     -H 'Content-Type: application/json' -d "{\"label\":\"$LONG\"}"     "$BASE/api/v1/user/tokens")
+check 'an over-long token label is refused' "$code" '400'
+
+# The refusal that matters most: the token list is ONE blob in ONE column, so
+# without a cap enough tokens make the account too large to write at all — and
+# revoking one is itself a write, so the account would be wedged by its own
+# credentials. Driven on bob so the admin account the rest of the suite uses is
+# left alone.
+capped=no
+i=0
+while [ $i -lt 80 ]; do
+    c=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X POST         -H 'Content-Type: application/json' -d '{"label":"flood"}'         "$BASE/api/v1/user/tokens")
+    [ "$c" = "400" ] && { capped=yes; break; }
+    [ "$c" = "201" ] || [ "$c" = "200" ] || break
+    i=$((i+1))
+done
+check 'an account cannot hold unlimited live tokens' "$capped" 'yes'
 
 # The browser's credential: short-lived, and revoked the moment it logs out.
 SESSION=$(curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \

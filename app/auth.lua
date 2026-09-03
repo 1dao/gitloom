@@ -37,9 +37,16 @@ local users = nil          -- username -> record
 -- wrong password for the length of its own negative TTL.
 local verify_cache = {}    -- cache key -> { verdict = 'ok'|'bad', expires = ts }
 
-local function users_path()
-    return cfg_get('USERS_FILE', 'data/users.json')
-end
+-- Bounds on the two free-text fields an account carries, and on how many live
+-- tokens it may hold.
+--
+-- None of these existed while accounts were a JSON file that simply grew. They
+-- are columns now — email is VARCHAR(255) and the token list is one TEXT blob —
+-- so without them a long email is a 500 out of the database, and enough tokens
+-- make the row too large to write AT ALL, which would take revoking them down
+-- with it. Refusing at the boundary keeps both stores answering the same way.
+local MAX_EMAIL = 255
+local MAX_LABEL = 128
 
 -- ---------------------------------------------------------------------------
 -- Password hashing
@@ -192,46 +199,41 @@ end
 -- Storage
 -- ---------------------------------------------------------------------------
 
+-- Read every account into memory. COROUTINE-ONLY under MySQL, where it is a
+-- query; main.lua loads it from boot_async for that reason.
+--
+-- Returns the map, or nil plus a message. On failure `users` is left nil rather
+-- than set to {}: no accounts and "the store did not answer" are very different
+-- answers to "may this person push", and only one of them is safe to cache.
 function g_exports.auth_load()
-    users = {}
-    local raw = util_file_read(users_path())
-    if not raw or raw == '' then return users end
-    local parsed = xutils.json_unpack(raw)
-    if type(parsed) ~= 'table' or type(parsed.users) ~= 'table' then
-        cfg_log_warn('account file %s is unreadable; starting with no accounts',
-            users_path())
-        return users
+    local map, err = store_users_load()
+    if not map then
+        cfg_log_error('accounts unavailable: %s', tostring(err))
+        return nil, err
     end
-    for _, u in ipairs(parsed.users) do
-        if type(u) == 'table' and type(u.username) == 'string' then
-            u.tokens = u.tokens or {}
-            users[u.username] = u
-        end
-    end
+    users = map
     return users
 end
 
-local function auth_save()
-    local list = {}
-    for _, u in pairs(users or {}) do list[#list + 1] = u end
-    table.sort(list, function(a, b) return a.username < b.username end)
+-- Returns true, or false once auth_load has logged why not.
+local function have_users()
+    if users then return true end
+    return auth_load() ~= nil
+end
 
-    local json = xutils.json_pack({ version = 1, users = list })
-    if not json then return nil, 'account serialisation failed' end
-
-    util_dir_make(cfg_get('DATA_DIR', 'data'))
-    local ok, err = util_file_write_atomic(users_path(), json)
-    if not ok then return nil, 'account save failed: ' .. tostring(err) end
-    return true
+-- Persist ONE account the caller has already changed in `users`. Under the file
+-- backend that still rewrites the whole file; under MySQL it is a single row.
+local function auth_save(u)
+    return store_user_put(u)
 end
 
 local function auth_user_get(username)
-    if not users then auth_load() end
+    if not have_users() then return nil end
     return users[tostring(username or '')]
 end
 
 function g_exports.auth_user_list()
-    if not users then auth_load() end
+    if not have_users() then return {} end
     local out = {}
     for _, u in pairs(users) do
         out[#out + 1] = { username = u.username, admin = u.admin or false,
@@ -251,18 +253,23 @@ function g_exports.auth_user_create(username, password, opts)
         return nil, string.format('password must be at least %d characters',
             cfg_int('AUTH_MIN_PASSWORD', 8))
     end
-    if not users then auth_load() end
+    if not have_users() then return nil, 'the account store is unavailable' end
     if users[username] then return nil, 'user already exists' end
+
+    local email = tostring(opts.email or (username .. '@gitloom.local'))
+    if #email > MAX_EMAIL then
+        return nil, string.format('email must be at most %d bytes', MAX_EMAIL)
+    end
 
     users[username] = {
         username   = username,
         pwhash     = password_hash(password),
-        email      = opts.email or (username .. '@gitloom.local'),
+        email      = email,
         admin      = opts.admin and true or false,
         tokens     = {},
         created_at = os.time(),
     }
-    local ok, err = auth_save()
+    local ok, err = auth_save(users[username])
     if not ok then
         users[username] = nil
         return nil, err
@@ -283,17 +290,31 @@ function g_exports.auth_token_create(username, label, ttl_sec)
     ttl_sec = tonumber(ttl_sec)
     if ttl_sec ~= nil and ttl_sec <= 0 then return nil, 'ttl_seconds must be positive' end
 
+    label = tostring(label or 'token')
+    if #label > MAX_LABEL then
+        return nil, string.format('label must be at most %d bytes', MAX_LABEL)
+    end
+
     local clear = util_rand_hex(32)
     u.tokens = u.tokens or {}
     prune_tokens(u)
+
+    -- Pruning first, so this counts only tokens that still work: an account
+    -- that has issued thousands of short-lived browser sessions is not at its
+    -- limit, an account holding that many live credentials is.
+    local cap = cfg_int('AUTH_MAX_TOKENS', 64)
+    if cap > 0 and #u.tokens >= cap then
+        return nil, string.format(
+            'this account already holds %d live tokens; revoke one first', #u.tokens)
+    end
     local expires_at = ttl_sec and (os.time() + math.floor(ttl_sec)) or nil
     u.tokens[#u.tokens + 1] = {
-        label      = tostring(label or 'token'),
+        label      = label,
         hash       = xutils.sha256_hex(clear),
         created_at = os.time(),
         expires_at = expires_at,
     }
-    local ok, err = auth_save()
+    local ok, err = auth_save(u)
     if not ok then return nil, err end
     return clear, expires_at
 end
@@ -326,7 +347,7 @@ function g_exports.auth_token_revoke(req)
     -- AUTH_CACHE_SEC with a credential that no longer exists, which is exactly
     -- the window a logout must not leave open.
     verify_cache[cache_key(username, secret)] = nil
-    return auth_save()
+    return auth_save(u)
 end
 
 -- ---------------------------------------------------------------------------
@@ -490,7 +511,7 @@ end
 -- to leave ADMIN_PASSWORD in the config file across restarts — it will not
 -- silently reset a password that has since been changed.
 function g_exports.auth_bootstrap()
-    if not users then auth_load() end
+    if not have_users() then return false, 'the account store is unavailable' end
     if next(users) ~= nil then return false end
 
     local name = cfg_get('ADMIN_USER', '')
