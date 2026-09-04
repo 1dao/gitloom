@@ -12,6 +12,8 @@
     branch: '',
     path: '',
     commits: [],
+    commitSkip: 0,
+    commitHasMore: false,
     username: '',
     token: '',
     toastTimer: null,
@@ -22,7 +24,8 @@
   // already left, and rendering it would show them the wrong tree — which is
   // not theoretical on a server where each listing forks a git process, so a
   // slow response really does arrive after a fast one issued later.
-  var seq = { repos: 0, view: 0, file: 0, diff: 0 };
+  var seq = { repos: 0, view: 0, file: 0, diff: 0, commits: 0 };
+  var COMMIT_PAGE_SIZE = 25;
 
   var $ = function (id) { return document.getElementById(id); };
   var $$ = function (selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); };
@@ -31,6 +34,7 @@
     seq.view += 1;
     seq.file += 1;   // a panel opened under the old view must not land either
     seq.diff += 1;
+    seq.commits += 1;
     return seq.view;
   }
 
@@ -68,6 +72,10 @@
     ['bad owner name', '账号名不合法'],
     ['bad default branch name', '默认分支名不合法'],
     ['only the owner or an administrator may delete', '只有仓库所有者或管理员可以删除'],
+    ['only the owner or an administrator may update', '只有仓库所有者或管理员可以编辑'],
+    ['description must be a string', '描述必须是文字'],
+    ['private must be a boolean', '私有设置必须是布尔值'],
+    ['no repository fields to update', '没有需要保存的修改'],
     ['the repository index is unavailable', '仓库索引暂时读不到，请稍后再试'],
     ['no such repository', '仓库不存在，可能已经被删除'],
     ['cannot create a repository under another account', '不能在别人的账号下建仓库'],
@@ -241,13 +249,14 @@
   }
 
   // The browser currently knows the signed-in username, but not an administrator
-  // capability. Show the destructive action only for the owner; administrators
-  // can still use the API until a capability field is exposed to the browser.
+  // capability. Show owner-only write actions; administrators can still use the
+  // API until a capability field is exposed to the browser.
   function syncWriteActions() {
     var signedIn = !!state.username;
     $('new-repo').hidden = !signedIn;
-    var canDelete = signedIn && state.repo && state.repo.owner === state.username;
-    $('delete-repo').hidden = !canDelete;
+    var canManage = signedIn && state.repo && state.repo.owner === state.username;
+    $('edit-repo').hidden = !canManage;
+    $('delete-repo').hidden = !canManage;
   }
 
   function renderRepos() {
@@ -310,6 +319,7 @@
         var current = state.repos.find(function (repo) { return repo.full_name === state.repo.full_name; });
         if (current) {
           state.repo = current;
+          renderRepoMeta(current);
         } else {
           // The selected repository may have been deleted or become invisible
           // after a credential/account change. Do not leave its old contents on
@@ -352,6 +362,15 @@
     $('delete-confirm').focus();
   }
 
+  function openEdit() {
+    if (!state.repo) return;
+    $('edit-message').textContent = '';
+    $('edit-description').value = state.repo.description || '';
+    $('edit-private').checked = !!state.repo.private;
+    $('edit-dialog').showModal();
+    $('edit-description').focus();
+  }
+
   // `owner` is left to the server, which defaults it to whoever is signed in.
   // Sending it would only introduce a way for the page to be wrong about who
   // that is.
@@ -366,6 +385,15 @@
   function deleteRepo(repo) {
     return api('/api/v1/repos/' + encodeURIComponent(repo.owner) + '/' +
       encodeURIComponent(repo.name), { method: 'DELETE' });
+  }
+
+  function updateRepo(repo, description, isPrivate) {
+    return api('/api/v1/repos/' + encodeURIComponent(repo.owner) + '/' +
+      encodeURIComponent(repo.name), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: description, private: isPrivate }),
+      }).then(function (response) { return response.json(); });
   }
 
   function closeRepoView() {
@@ -393,6 +421,65 @@
     var input = $('clone-url');
     input.value = repo.clone_url || '';
     row.hidden = !input.value;
+  }
+
+  function renderRepoMeta(repo) {
+    $('repo-title').textContent = repo.full_name;
+    $('repo-description').textContent = repo.description || '暂无描述';
+    renderCrumbs(repo);
+    renderCloneUrl(repo);
+    var visibility = $('repo-visibility');
+    visibility.textContent = repo.private ? '私有' : '公开';
+    visibility.className = 'visibility-pill' + (repo.private ? ' private' : '');
+    $('repo-default-branch').textContent = '默认分支 · ' + (repo.default_branch || 'main');
+  }
+
+  function setFirstPush(repo, empty) {
+    var panel = $('first-push');
+    var browser = $('tree-browser');
+    panel.hidden = !empty;
+    browser.hidden = !!empty;
+    if (empty && repo) {
+      var branch = repo.default_branch || state.branch || 'main';
+      $('first-push-commands').textContent =
+        'git remote add origin ' + (repo.clone_url || '') + '\n' +
+        'git push -u origin ' + branch;
+    }
+  }
+
+  function resetCommits(message) {
+    state.commits = [];
+    state.commitHasMore = false;
+    $('commit-count').textContent = '';
+    $('commit-list').textContent = '';
+    $('commit-pagination').hidden = true;
+    $('commit-prev').disabled = true;
+    $('commit-next').disabled = true;
+    $('commit-page').textContent = '';
+    if (message) setError($('commit-list'), message);
+  }
+
+  function copyText(text, message) {
+    if (!text) return;
+    function fallback() {
+      var area = document.createElement('textarea');
+      area.className = 'copy-source';
+      area.value = text;
+      document.body.appendChild(area);
+      area.focus();
+      area.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+      area.remove();
+      showToast(ok ? message : '复制失败，请手动选择');
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        showToast(message);
+      }, fallback);
+    } else {
+      fallback();
+    }
   }
 
   function copyCloneUrl() {
@@ -424,16 +511,13 @@
     state.repo = repo;
     state.branch = repo.default_branch || 'main';
     state.path = '';
+    state.commitSkip = 0;
+    state.commitHasMore = false;
+    resetCommits();
     $('empty-state').hidden = true;
     $('repo-view').hidden = false;
-    $('repo-title').textContent = repo.full_name;
-    $('repo-description').textContent = repo.description || '暂无描述';
-    renderCrumbs(repo);
-    renderCloneUrl(repo);
-    var visibility = $('repo-visibility');
-    visibility.textContent = repo.private ? '私有' : '公开';
-    visibility.className = 'visibility-pill' + (repo.private ? ' private' : '');
-    $('repo-default-branch').textContent = '默认分支 · ' + (repo.default_branch || 'main');
+    renderRepoMeta(repo);
+    setFirstPush(repo, false);
     syncWriteActions();
     hideFile();
     $('diff-panel').hidden = true;
@@ -443,8 +527,10 @@
     // Branches first: loadBranches can correct state.branch when the recorded
     // default is not in the list, and a commit list fetched before that lands
     // is a commit list for a branch the select is no longer showing.
-    return loadBranches(view).then(function () {
+    return loadBranches(view).then(function (branches) {
       if (!viewIsCurrent(view)) return null;
+      if (!branches) return Promise.all([loadTree(view), loadCommits(view)]);
+      if (!branches.length) return [];
       return Promise.all([loadTree(view), loadCommits(view)]);
     });
   }
@@ -457,11 +543,14 @@
       if (!viewIsCurrent(view)) return [];
       var branches = Array.isArray(data.branches) ? data.branches : [];
       if (!branches.length) {
+        setFirstPush(state.repo, true);
+        resetCommits('这个分支还没有提交');
         var empty = document.createElement('option');
         empty.textContent = '暂无分支';
         empty.value = state.branch;
         select.appendChild(empty);
       } else {
+        setFirstPush(state.repo, false);
         var preferred = branches.some(function (branch) { return branch.name === state.branch; });
         if (!preferred) state.branch = branches[0].name;
         branches.forEach(function (branch) {
@@ -476,11 +565,12 @@
       return branches;
     }).catch(function () {
       if (!viewIsCurrent(view)) return [];
+      setFirstPush(state.repo, false);
       var option = document.createElement('option');
       option.value = state.branch;
       option.textContent = state.branch || 'main';
       select.appendChild(option);
-      return [];
+      return null;
     });
   }
 
@@ -577,23 +667,48 @@
     $('file-panel').hidden = true;
   }
 
-  function loadCommits(view) {
+  function updateCommitPagination() {
+    var pagination = $('commit-pagination');
+    var prev = $('commit-prev');
+    var next = $('commit-next');
+    var hasRows = state.commits.length > 0;
+    pagination.hidden = !hasRows || (state.commitSkip === 0 && !state.commitHasMore);
+    prev.disabled = state.commitSkip === 0;
+    next.disabled = !state.commitHasMore;
+    $('commit-page').textContent = '第 ' + (Math.floor(state.commitSkip / COMMIT_PAGE_SIZE) + 1) + ' 页';
+  }
+
+  function loadCommits(view, skip) {
+    var ticket = (seq.commits += 1);
+    var requestedSkip = Math.max(Number.isFinite(Number(skip)) ? Number(skip) : 0, 0);
+    requestedSkip = Math.floor(requestedSkip / COMMIT_PAGE_SIZE) * COMMIT_PAGE_SIZE;
     var list = $('commit-list');
+    $('commit-pagination').hidden = true;
     setLoading(list, '正在读取提交记录…');
-    return json(repoPath('/commits?ref=' + encodeURIComponent(state.branch) + '&limit=50')).then(function (data) {
-      if (!viewIsCurrent(view)) return [];
+    return json(repoPath('/commits?ref=' + encodeURIComponent(state.branch) +
+      '&limit=' + COMMIT_PAGE_SIZE + '&skip=' + requestedSkip)).then(function (data) {
+      if (!viewIsCurrent(view) || ticket !== seq.commits) return [];
       state.commits = Array.isArray(data.commits) ? data.commits : [];
-      $('commit-count').textContent = state.commits.length + ' 条';
+      state.commitSkip = Number.isFinite(Number(data.skip)) ? Number(data.skip) : requestedSkip;
+      state.commitHasMore = !!data.has_more;
+      var first = state.commits.length ? state.commitSkip + 1 : state.commitSkip;
+      var last = state.commitSkip + state.commits.length;
+      $('commit-count').textContent = state.commits.length ? first + '–' + last + ' 条' : '0 条';
       list.textContent = '';
       if (!state.commits.length) {
+        updateCommitPagination();
         setError(list, '这个分支还没有提交');
         return [];
       }
       state.commits.forEach(function (commit) { renderCommit(commit, list); });
+      updateCommitPagination();
       return state.commits;
     }).catch(function (error) {
-      if (!viewIsCurrent(view)) return [];
+      if (!viewIsCurrent(view) || ticket !== seq.commits) return [];
       $('commit-count').textContent = '';
+      state.commits = [];
+      state.commitHasMore = false;
+      updateCommitPagination();
       // A repository with no commits has no `main` to resolve either, so the
       // server answers 404 — which as a bare status reads "没有找到内容", about
       // a repository the user is looking straight at. It is the first thing
@@ -717,6 +832,7 @@
     });
   });
   $('new-repo').addEventListener('click', openCreate);
+  $('edit-repo').addEventListener('click', openEdit);
   $('delete-repo').addEventListener('click', openDelete);
   $('create-form').addEventListener('submit', function (event) {
     event.preventDefault();
@@ -763,7 +879,38 @@
       .catch(function (error) { $('delete-message').textContent = detailMessage(error); })
       .finally(function () { $('delete-submit').disabled = false; });
   });
+  $('edit-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var repo = state.repo;
+    if (!repo) { $('edit-dialog').close(); return; }
+    $('edit-submit').disabled = true;
+    updateRepo(repo, $('edit-description').value.trim(), $('edit-private').checked)
+      .then(function (updated) {
+        $('edit-dialog').close();
+        state.repo = updated;
+        state.repos = state.repos.map(function (item) {
+          return item.full_name === updated.full_name ? updated : item;
+        });
+        renderRepoMeta(updated);
+        syncWriteActions();
+        renderRepos();
+        showToast('仓库设置已保存');
+      })
+      .catch(function (error) { $('edit-message').textContent = detailMessage(error); })
+      .finally(function () { $('edit-submit').disabled = false; });
+  });
   $('copy-clone').addEventListener('click', copyCloneUrl);
+  $('copy-push').addEventListener('click', function () {
+    copyText($('first-push-commands').textContent, '已复制推送命令');
+  });
+  $('refresh-empty').addEventListener('click', function () {
+    if (!state.repo) return;
+    var fullName = state.repo.full_name;
+    loadRepos().then(function () {
+      var current = state.repos.find(function (repo) { return repo.full_name === fullName; });
+      if (current) selectRepo(current);
+    }).catch(function () {});
+  });
   $('auth-toggle').addEventListener('click', function () {
     if (state.username) logout(); else openAuth();
   });
@@ -793,9 +940,23 @@
     var view = beginView();
     state.branch = event.target.value;
     state.path = '';
+    state.commitSkip = 0;
+    state.commitHasMore = false;
     hideFile();
     loadTree(view);
     loadCommits(view);
+  });
+  $('commit-prev').addEventListener('click', function () {
+    if (!state.repo || state.commitSkip === 0) return;
+    seq.diff += 1;
+    $('diff-panel').hidden = true;
+    loadCommits(seq.view, state.commitSkip - COMMIT_PAGE_SIZE);
+  });
+  $('commit-next').addEventListener('click', function () {
+    if (!state.repo || !state.commitHasMore) return;
+    seq.diff += 1;
+    $('diff-panel').hidden = true;
+    loadCommits(seq.view, state.commitSkip + COMMIT_PAGE_SIZE);
   });
   $('up-directory').addEventListener('click', function () {
     var view = beginView();

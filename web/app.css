@@ -149,6 +149,11 @@ h1, h2, h3, p { margin-top: 0; }
 .button-danger:hover { color: var(--bg); border-color: var(--danger); background: var(--danger); }
 
 .browser-card, .file-panel, .diff-panel { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: rgba(17, 26, 36, .86); box-shadow: var(--shadow); }
+.first-push { border: 1px solid rgba(88, 213, 201, .28); border-radius: 12px; padding: 22px; background: linear-gradient(135deg, rgba(88, 213, 201, .08), rgba(17, 26, 36, .86) 65%); box-shadow: var(--shadow); }
+.first-push h3 { margin: 5px 0 8px; font-size: 17px; letter-spacing: -.02em; }
+.first-push p:not(.eyebrow) { max-width: 650px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.setup-commands { margin: 16px 0; padding: 14px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--accent-2); background: rgba(7, 13, 20, .65); font: 11px/1.7 "Cascadia Code", "SFMono-Regular", Consolas, monospace; white-space: pre; }
+.first-push-actions { display: flex; gap: 9px; flex-wrap: wrap; }
 .card-caption { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); color: var(--text); font-size: 12px; font-weight: 600; }
 .tree-list { min-height: 64px; }
 .tree-row { display: flex; align-items: center; gap: 12px; min-height: 49px; padding: 0 16px; border-bottom: 1px solid var(--line-soft); cursor: pointer; }
@@ -169,6 +174,8 @@ h1, h2, h3, p { margin-top: 0; }
 .code-block { max-height: 560px; }
 
 .commit-list { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: rgba(17, 26, 36, .86); box-shadow: var(--shadow); }
+.commit-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
+.commit-pagination .button:disabled { opacity: .42; cursor: default; border-color: var(--line-soft); }
 .commit-row { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: start; gap: 13px; padding: 16px 18px; border-bottom: 1px solid var(--line-soft); cursor: pointer; }
 .commit-row:last-child { border-bottom: 0; }
 .commit-row:hover { background: rgba(141, 168, 255, .055); }
@@ -193,12 +200,15 @@ h1, h2, h3, p { margin-top: 0; }
 .auth-card label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 14px; }
 .auth-card input { display: block; width: 100%; margin-top: 7px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; color: var(--text); background: var(--bg); outline: 0; }
 .auth-card input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88, 213, 201, .08); }
+.auth-card textarea { display: block; width: 100%; margin-top: 7px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; resize: vertical; color: var(--text); background: var(--bg); outline: 0; font: inherit; line-height: 1.5; }
+.auth-card textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88, 213, 201, .08); }
 .form-message { min-height: 17px; color: var(--danger); font-size: 11px; }
 .auth-card label.checkbox-label { display: flex; align-items: center; gap: 9px; font-size: 12px; }
 .auth-card label.checkbox-label input { display: inline-block; width: auto; margin: 0; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 12px; }
 .toast { position: fixed; right: 24px; bottom: 24px; opacity: 0; pointer-events: none; transform: translateY(8px); transition: .2s ease; border: 1px solid var(--line); border-radius: 9px; padding: 10px 14px; background: var(--panel-2); color: var(--text); font-size: 12px; box-shadow: var(--shadow); }
 .toast.show { opacity: 1; transform: translateY(0); }
+.copy-source { position: fixed; top: -1000px; left: -1000px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
 @media (max-width: 820px) {
   .topbar { padding: 0 18px; }

@@ -1,6 +1,6 @@
 -- app/http.lua — the HTTP server: routing, the serve loop, and responses.
 --
--- Exports: http_get, http_post, http_put, http_delete, http_route,
+-- Exports: http_get, http_post, http_put, http_patch, http_delete, http_route,
 --          http_fallback, http_body_stream, http_listen, http_dispatch,
 --          http_wait_until, http_after,
 --          http_response_text, http_response_json, http_response_error, http_response_file, http_response_redirect,
@@ -150,6 +150,7 @@ end
 function g_exports.http_get(p, h)    http_route('GET', p, h)    end
 function g_exports.http_post(p, h)   http_route('POST', p, h)   end
 function g_exports.http_put(p, h)    http_route('PUT', p, h)    end
+function g_exports.http_patch(p, h)  http_route('PATCH', p, h)  end
 function g_exports.http_delete(p, h) http_route('DELETE', p, h) end
 
 -- Register a whole-path matcher. It receives (req, ctx) and returns a response

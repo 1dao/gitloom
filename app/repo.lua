@@ -2,7 +2,7 @@
 --
 -- Exports: repo_root, repo_name_ok, repo_parse_url, repo_dir, repo_dir_of,
 --          repo_exists, repo_exists_of, repo_get, repo_list, repo_create,
---          repo_delete, repo_sync_head, repo_index_load, repo_key
+--          repo_update, repo_delete, repo_sync_head, repo_index_load, repo_key
 --
 -- ON-DISK LAYOUT
 --   <REPO_ROOT>/<owner>/<name>.git     one bare repository per directory
@@ -287,6 +287,47 @@ function g_exports.repo_create(owner, name, opts)
         return nil, 'could not persist the repository index: ' .. tostring(serr)
     end
     cfg_log_system('created repository %s/%s at %s', owner, name, dir)
+    return rec
+end
+
+-- Update mutable repository metadata without changing its on-disk git data.
+-- opts may contain description and/or private. The record is changed in memory
+-- first so every caller sees one coherent value, then persisted; a failed
+-- store rolls the record back before returning the error.
+function g_exports.repo_update(owner, name, opts)
+    if not repo_name_ok(owner) or not repo_name_ok(name) then
+        return nil, 'bad repository name', 400
+    end
+    if not have_index() then return nil, 'the repository index is unavailable', 500 end
+    opts = opts or {}
+    if type(opts) ~= 'table' then return nil, 'expected a JSON object body', 400 end
+
+    local has_description = opts.description ~= nil
+    local has_private = opts.private ~= nil
+    if not has_description and not has_private then
+        return nil, 'no repository fields to update', 400
+    end
+    if has_description and type(opts.description) ~= 'string' then
+        return nil, 'description must be a string', 400
+    end
+    if has_description and #opts.description > MAX_DESCRIPTION then
+        return nil, string.format('description must be at most %d bytes', MAX_DESCRIPTION), 400
+    end
+    if has_private and type(opts.private) ~= 'boolean' then
+        return nil, 'private must be a boolean', 400
+    end
+
+    local rec = index[repo_key(owner, name)]
+    if not rec or not repo_exists_of(rec) then return nil, 'no such repository', 404 end
+
+    local old_description, old_private = rec.description, rec.private
+    if has_description then rec.description = opts.description end
+    if has_private then rec.private = opts.private end
+    local sok, serr = store_repo_put(rec)
+    if not sok then
+        rec.description, rec.private = old_description, old_private
+        return nil, 'could not persist repository changes: ' .. tostring(serr), 500
+    end
     return rec
 end
 

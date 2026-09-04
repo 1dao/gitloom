@@ -200,7 +200,8 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 123/123 on Linux, and 112/112 on Windows and under
+2.52). `test/smoke.sh` passes 136/136 on Linux with streaming, and 125/125 on
+Windows and under
 `GIT_STREAM=off` — the eleven it does not run there are the streamed-body cases,
 which need the transport that platform does not have. `test/unit.lua` is 199 on
 Windows, 198 on Linux (one case is about Windows path spelling). Adding
@@ -261,6 +262,7 @@ missing `/bin/sh`.
 | `GET /api/v1/repos` | repositories visible to the caller |
 | `POST /api/v1/repos` | `{name, description?, private?, owner?, default_branch?}` |
 | `GET /api/v1/repos/:owner/:name` | detail, including refs and `empty` |
+| `PATCH /api/v1/repos/:owner/:name` | `{description?, private?}`; owner or administrator |
 | `DELETE /api/v1/repos/:owner/:name` | |
 | `GET /api/v1/users` | administrator only |
 | `POST /api/v1/users` | administrator only |
@@ -273,7 +275,7 @@ Browsing a repository's contents:
 |---|---|
 | `GET /api/v1/repos/:owner/:name/branches` | |
 | `GET /api/v1/repos/:owner/:name/tags` | |
-| `GET .../commits` | `?ref=` `&limit=` `&skip=` `&path=` |
+| `GET .../commits` | `?ref=` `&limit=` `&skip=` `&path=`; response includes `has_more` |
 | `GET .../commits/:ref` | one commit, with the files it touched |
 | `GET .../commits/:ref/diff` | `?path=`, bounded unified diff |
 | `GET .../tree/:ref` and `.../tree/:ref/<path>` | directory listing, directories first |

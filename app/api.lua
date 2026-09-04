@@ -13,6 +13,7 @@
 --   GET    /api/v1/repos                  repositories visible to the caller
 --   POST   /api/v1/repos                  create
 --   GET    /api/v1/repos/:owner/:name     detail, including refs
+--   PATCH  /api/v1/repos/:owner/:name     update description/private
 --   DELETE /api/v1/repos/:owner/:name
 --   GET    /api/v1/users                  admin only
 --   POST   /api/v1/users                  admin only
@@ -233,6 +234,33 @@ local function h_repo_get(req, ctx)
     return http_response_json(200, info)
 end
 
+local function h_repo_update(req, ctx)
+    local user, resp = require_user(req)
+    if not user then return resp end
+
+    local owner = ctx.params.owner
+    local name = tostring(ctx.params.name):gsub('%.git$', '')
+    local rec = repo_get(owner, name)
+    if not rec or not repo_exists_of(rec) then
+        return http_response_error(404, 'no such repository')
+    end
+    -- Keep the same existence boundary as DELETE: a caller who cannot read a
+    -- private repository gets 404, while a reader gets the useful 403.
+    if not auth_can_write(rec, user) or
+       (rec.owner ~= user.username and not user.admin) then
+        if auth_can_read(rec, user) then
+            return http_response_error(403, 'only the owner or an administrator may update')
+        end
+        return http_response_error(404, 'no such repository')
+    end
+
+    local b, berr = body_json(req)
+    if not b then return http_response_error(400, berr) end
+    local updated, uerr, status = repo_update(owner, name, b)
+    if not updated then return http_response_error(status or 400, http_safe_error(uerr)) end
+    return http_response_json(200, repo_public(updated, req, ctx))
+end
+
 local function h_repo_delete(req, ctx)
     local user, resp = require_user(req)
     if not user then return resp end
@@ -359,11 +387,15 @@ local function h_commits(req, ctx)
     local path, perr = browse_decode_path(q.path)
     if path == nil then return http_response_error(400, perr) end
 
-    local list, err = browse_log(dir, oid, { limit = q.limit, skip = q.skip, path = path })
+    local list, err, page = browse_log(dir, oid, {
+        limit = q.limit, skip = q.skip, path = path, lookahead = true,
+    })
     if not list then return http_response_error(500, http_safe_error(err)) end
+    page = page or {}
     return http_response_json(200, {
         ref = refused, oid = oid, path = path,
         commits = util_json_array(list), count = #list,
+        limit = page.limit, skip = page.skip, has_more = page.has_more and true or false,
     })
 end
 
@@ -496,6 +528,7 @@ function g_exports.api_install()
     http_get('/api/v1/repos', h_repo_list)
     http_post('/api/v1/repos', h_repo_create)
     http_get('/api/v1/repos/:owner/:name', h_repo_get)
+    http_patch('/api/v1/repos/:owner/:name', h_repo_update)
     http_delete('/api/v1/repos/:owner/:name', h_repo_delete)
 
     http_get('/api/v1/users', h_user_list)

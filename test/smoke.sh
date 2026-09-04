@@ -129,8 +129,17 @@ grep -q 'id="create-dialog"' "$WORK/web.index" \
     && ok 'browser offers repository creation' || bad 'browser offers repository creation' 'dialog missing'
 grep -q 'id="delete-dialog"' "$WORK/web.index" \
     && ok 'browser offers repository deletion' || bad 'browser offers repository deletion' 'dialog missing'
+grep -q 'id="edit-dialog"' "$WORK/web.index" \
+    && ok 'browser offers repository editing' || bad 'browser offers repository editing' 'dialog missing'
+grep -q 'id="first-push"' "$WORK/web.index" && grep -q 'id="commit-pagination"' "$WORK/web.index" \
+    && ok 'browser offers empty-repository guidance and commit pagination' \
+    || bad 'browser offers empty-repository guidance and commit pagination' 'panel missing'
 curl -s "$BASE/app.js" | grep -q 'createRepo' \
     && ok 'browser JavaScript can create' || bad 'browser JavaScript can create' 'handler missing'
+curl -s "$BASE/app.js" | grep -q "method: 'PATCH'" \
+    && ok 'browser JavaScript can edit repository metadata' || bad 'browser JavaScript can edit repository metadata' 'handler missing'
+curl -s "$BASE/app.js" | grep -q 'loadCommits(view, skip)' \
+    && ok 'browser JavaScript can page commit history' || bad 'browser JavaScript can page commit history' 'handler missing'
 curl -s "$BASE/app.js" | grep -q 'state.repo.owner === state.username' \
     && ok 'browser only offers owner deletion' || bad 'browser only offers owner deletion' 'owner guard missing'
 curl -s "$BASE/app.js" | grep -q 'requestToken && state.token === requestToken' \
@@ -180,6 +189,20 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X POST \
     -H 'Content-Type: application/json' -d '{"name":"demo","description":"smoke"}' \
     "$BASE/api/v1/repos")
 check 'create repository is 201' "$code" '201'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+    -H 'Content-Type: application/json' -d '{"description":"updated smoke"}' \
+    "$BASE/api/v1/repos/admin/demo")
+check 'update without credentials is 401' "$code" '401'
+
+body=$(curl -s -u "admin:$ADMIN_PW" -X PATCH -H 'Content-Type: application/json' \
+    -d '{"description":"updated smoke"}' "$BASE/api/v1/repos/admin/demo")
+echo "$body" | grep -q '"description":"updated smoke"' \
+    && ok 'owner can update repository description' || bad 'owner can update repository description' "$body"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{}' "$BASE/api/v1/repos/admin/demo")
+check 'empty repository update is rejected' "$code" '400'
 
 code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X POST \
     -H 'Content-Type: application/json' -d '{"name":"demo"}' "$BASE/api/v1/repos")
@@ -401,8 +424,14 @@ curl -s -D- -o /dev/null "$DEMO/raw/main/binary.dat" | grep -qi 'content-type: a
 curl -s -D- -o /dev/null "$DEMO/raw/main/binary.dat" | grep -qi 'x-content-type-options: nosniff' \
     && ok 'raw sends nosniff' || bad 'raw sends nosniff' 'header missing'
 
-curl -s "$DEMO/commits?ref=main&limit=1" | grep -q '"count":1' \
-    && ok 'commits honours limit' || bad 'commits honours limit' "$(curl -s "$DEMO/commits?ref=main&limit=1")"
+page1=$(curl -s "$DEMO/commits?ref=main&limit=1&skip=0")
+echo "$page1" | grep -q '"count":1' \
+    && ok 'commits honours limit' || bad 'commits honours limit' "$page1"
+echo "$page1" | grep -q '"has_more":true' \
+    && ok 'commits reports a following page' || bad 'commits reports a following page' "$page1"
+page2=$(curl -s "$DEMO/commits?ref=main&limit=1&skip=1")
+echo "$page2" | grep -q '"skip":1' && echo "$page2" | grep -q '"has_more":false' \
+    && ok 'commits serves the next page' || bad 'commits serves the next page' "$page2"
 
 # The initial commit must list its files. diff-tree compares against the first
 # parent, and a root commit has none, so this is zero without --root.
@@ -452,6 +481,18 @@ for ep in branches tags commits tree/main; do
 done
 code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" "$BASE/api/v1/repos/admin/secret/branches")
 check 'owner can browse a private repository' "$code" '200'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"private":true}' "$DEMO")
+check 'owner can make a repository private' "$code" '200'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$DEMO")
+check 'anonymous detail is hidden after making a repository private' "$code" '404'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"private":false}' "$DEMO")
+check 'owner can make a repository public again' "$code" '200'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X PATCH \
+    -H 'Content-Type: application/json' -d '{"description":"not yours"}' "$DEMO")
+check 'a stranger cannot update repository metadata' "$code" '403'
 
 # == Regressions ==============================================================
 # One case per finding from the 2026-08-30 review. Each of these passed silently

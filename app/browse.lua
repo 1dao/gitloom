@@ -262,14 +262,15 @@ local function parse_log(text)
 end
 
 -- Commit list reachable from `oid`, newest first.
--- opts = { limit, skip, path }
+-- opts = { limit, skip, path, lookahead }
 function g_exports.browse_log(dir, oid, opts)
     opts = opts or {}
-    local limit = math.min(math.max(tonumber(opts.limit) or 30, 1), MAX_LOG)
-    local skip  = math.max(tonumber(opts.skip) or 0, 0)
+    local limit = math.min(math.max(math.floor(tonumber(opts.limit) or 30), 1), MAX_LOG)
+    local skip  = math.max(math.floor(tonumber(opts.skip) or 0), 0)
+    local fetch_limit = opts.lookahead and (limit + 1) or limit
 
     local args = { 'log', '--format=' .. LOG_FORMAT,
-                   '--max-count=' .. limit, '--skip=' .. skip,
+                   '--max-count=' .. fetch_limit, '--skip=' .. skip,
                    '--end-of-options', oid }
     -- `--` separates revisions from paths. Without it a path that happens to
     -- look like a ref makes git guess, and it guesses differently depending on
@@ -281,7 +282,10 @@ function g_exports.browse_log(dir, oid, opts)
 
     local r = git_exec(args, { cwd = dir, max_capture = 8 * 1024 * 1024 })
     if not r.ok then return nil, 'could not read the history' end
-    return parse_log(r.stdout)
+    local out = parse_log(r.stdout)
+    local has_more = opts.lookahead and #out > limit or false
+    if has_more then out[#out] = nil end
+    return out, nil, { limit = limit, skip = skip, has_more = has_more }
 end
 
 -- One commit, with the list of files it touched.

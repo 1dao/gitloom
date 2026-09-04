@@ -266,8 +266,8 @@ Verified against a real MySQL 8.4.9, on both platforms and both stores:
 | | JSON | MySQL |
 |---|---|---|
 | `test/unit.lua` (Windows / Linux) | 199 / 198 | — |
-| `test/smoke.sh` Windows | 112/112 | 112/112 |
-| `test/smoke.sh` Linux | 123/123 | 123/123 |
+| `test/smoke.sh` Windows | 125/125 | 125/125 |
+| `test/smoke.sh` Linux | 136/136 | 136/136 |
 
 `test/dbreset.lua` empties the database first, because the counts the suite
 asserts only mean something from empty. gitloom itself never creates a database:
@@ -398,19 +398,18 @@ cost more than a click.
 
 Verified by driving a real browser: create → the repository appears, is selected,
 shows its clone URL and private pill → push to it from git → browse the tree it
-grew → delete it, confirmed gone from both the index and the disk. Plus six
-smoke cases asserting the controls and their handler ship together, since the
-markup and the behaviour live in different files and the page is only correct
-when both did.
+grew → delete it, confirmed gone from both the index and the disk. The browser
+now also pages commit history, explains exactly how to make the first push into
+an empty repository, and lets its owner edit the description and visibility.
+The API's `PATCH /api/v1/repos/:owner/:name` persists both fields in the same
+JSON/MySQL-backed index used by create and delete. Smoke covers the pagination
+lookahead and visibility boundary, and static checks keep each new panel's
+markup and handler shipped together.
 
-Still to do in the front end: commit pagination (the API already takes
-`limit`/`skip`; the browser asks for 50 and never pages, so history is silently
-truncated), a first-push panel on an empty repository, editing a description or
-visibility — which needs an update endpoint, since there is none — and syntax
-highlighting, which is the only one that is real work: the CSP is
+Still to do in the front end: syntax highlighting. The CSP is
 `default-src 'self'`, so a highlighter has to be vendored into `web/`.
 
-Estimate for the remainder: 3–5 weeks.
+Estimate for the remainder: 1–2 weeks.
 
 ## Phase 3 — collaboration
 

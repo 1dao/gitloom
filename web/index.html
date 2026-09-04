@@ -72,6 +72,7 @@
             <div class="repo-heading-meta">
               <span class="visibility-pill" id="repo-visibility">公开</span>
               <span id="repo-default-branch" class="branch-note"></span>
+              <button class="button button-quiet" id="edit-repo" type="button" hidden>编辑仓库</button>
               <button class="button button-danger" id="delete-repo" type="button" hidden>删除仓库</button>
             </div>
           </section>
@@ -91,7 +92,17 @@
               <div class="toolbar-spacer"></div>
               <span id="current-path" class="path-label">/</span>
             </div>
-            <div class="browser-card">
+            <section id="first-push" class="first-push" hidden>
+              <p class="eyebrow">FIRST PUSH</p>
+              <h3>仓库已经建好，等你推送第一笔提交</h3>
+              <p>下面命令会关联远程并推送已有提交。如果本地还没有 commit，请先按项目需要执行 <code>git add</code> 和 <code>git commit</code>；推送完成后刷新这里，就可以浏览文件和提交记录。</p>
+              <pre id="first-push-commands" class="setup-commands"></pre>
+              <div class="first-push-actions">
+                <button class="button button-quiet" id="copy-push" type="button">复制命令</button>
+                <button class="button button-primary" id="refresh-empty" type="button">推送完成，重新检查</button>
+              </div>
+            </section>
+            <div class="browser-card" id="tree-browser">
               <div class="card-caption">
                 <span id="tree-caption">文件</span>
                 <span id="tree-count" class="muted"></span>
@@ -117,6 +128,11 @@
               <span id="commit-count" class="muted"></span>
             </div>
             <div id="commit-list" class="commit-list"></div>
+            <div id="commit-pagination" class="commit-pagination" hidden>
+              <button class="button button-quiet" id="commit-prev" type="button">上一页</button>
+              <span id="commit-page" class="muted"></span>
+              <button class="button button-quiet" id="commit-next" type="button">下一页</button>
+            </div>
             <div id="diff-panel" class="diff-panel" hidden>
               <div class="file-head">
                 <div>
@@ -190,6 +206,26 @@
       <div class="dialog-actions">
         <button class="button button-quiet" data-dialog-close="delete-dialog" type="button">取消</button>
         <button class="button button-danger" id="delete-submit" value="default" type="submit">永久删除</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="edit-dialog" class="auth-dialog">
+    <form method="dialog" id="edit-form" class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">REPOSITORY SETTINGS</p>
+          <h2>编辑仓库</h2>
+        </div>
+        <button class="icon-button" id="edit-close" data-dialog-close="edit-dialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-copy">修改仓库说明或可见性。设为私有后，只有你和管理员能看到仓库及其代码。</p>
+      <label>描述（可选）<textarea id="edit-description" rows="3" maxlength="1024"></textarea></label>
+      <label class="checkbox-label"><input id="edit-private" type="checkbox"> 私有仓库</label>
+      <p id="edit-message" class="form-message" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" data-dialog-close="edit-dialog" type="button">取消</button>
+        <button class="button button-primary" id="edit-submit" value="default" type="submit">保存</button>
       </div>
     </form>
   </dialog>
