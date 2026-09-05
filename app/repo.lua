@@ -2,7 +2,9 @@
 --
 -- Exports: repo_root, repo_name_ok, repo_parse_url, repo_dir, repo_dir_of,
 --          repo_exists, repo_exists_of, repo_get, repo_list, repo_create,
---          repo_update, repo_delete, repo_sync_head, repo_index_load, repo_key
+--          repo_update, repo_collaborators, repo_collaborator_put,
+--          repo_collaborator_delete, repo_delete, repo_sync_head,
+--          repo_index_load, repo_key
 --
 -- ON-DISK LAYOUT
 --   <REPO_ROOT>/<owner>/<name>.git     one bare repository per directory
@@ -331,6 +333,79 @@ function g_exports.repo_update(owner, name, opts)
     return rec
 end
 
+function g_exports.repo_collaborators(rec)
+    local out = {}
+    if rec and type(rec.collaborators) == 'table' then
+        for username, permission in pairs(rec.collaborators) do
+            if type(username) == 'string' and
+               (permission == 'read' or permission == 'write') then
+                out[#out + 1] = { username = username, permission = permission }
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.username < b.username end)
+    return out
+end
+
+-- Add a collaborator or replace their permission. Account existence and who
+-- may manage the repository are API concerns; this layer owns validation and
+-- persistence of the repository record itself.
+function g_exports.repo_collaborator_put(owner, name, username, permission)
+    if not repo_name_ok(owner) or not repo_name_ok(name) or not repo_name_ok(username) then
+        return nil, 'bad repository or account name', 400
+    end
+    if permission ~= 'read' and permission ~= 'write' then
+        return nil, 'permission must be read or write', 400
+    end
+    if not have_index() then return nil, 'the repository index is unavailable', 500 end
+    local rec = index[repo_key(owner, name)]
+    if not rec or not repo_exists_of(rec) then return nil, 'no such repository', 404 end
+    if rec.owner == username then
+        return nil, 'the repository owner already has full access', 400
+    end
+
+    local old_table = rec.collaborators
+    local collaborators = type(old_table) == 'table' and old_table or {}
+    local old_permission = collaborators[username]
+    rec.collaborators = collaborators
+    collaborators[username] = permission
+    local sok, serr = store_repo_put(rec)
+    if not sok then
+        if old_permission == nil then
+            collaborators[username] = nil
+        else
+            collaborators[username] = old_permission
+        end
+        if old_table == nil and next(collaborators) == nil then rec.collaborators = nil end
+        return nil, 'could not persist collaborator access: ' .. tostring(serr), 500
+    end
+    return rec
+end
+
+function g_exports.repo_collaborator_delete(owner, name, username)
+    if not repo_name_ok(owner) or not repo_name_ok(name) or not repo_name_ok(username) then
+        return nil, 'bad repository or account name', 400
+    end
+    if not have_index() then return nil, 'the repository index is unavailable', 500 end
+    local rec = index[repo_key(owner, name)]
+    if not rec or not repo_exists_of(rec) then return nil, 'no such repository', 404 end
+    if type(rec.collaborators) ~= 'table' or rec.collaborators[username] == nil then
+        return nil, 'account is not a collaborator', 404
+    end
+
+    local collaborators = rec.collaborators
+    local old_permission = collaborators[username]
+    collaborators[username] = nil
+    if next(collaborators) == nil then rec.collaborators = nil end
+    local sok, serr = store_repo_put(rec)
+    if not sok then
+        rec.collaborators = collaborators
+        collaborators[username] = old_permission
+        return nil, 'could not persist collaborator access: ' .. tostring(serr), 500
+    end
+    return rec
+end
+
 -- Point HEAD at a branch that actually exists, after a push.
 --
 -- A bare repository is created with HEAD -> refs/heads/<DEFAULT_BRANCH>, but a
@@ -420,6 +495,17 @@ function g_exports.repo_delete(owner, name)
         cfg_log_error('repository %s/%s was deleted from disk but the index save failed: %s',
             owner, name, tostring(serr))
         return nil, 'repository deleted, but the index could not be saved: ' .. tostring(serr)
+    end
+    -- Issues live in their own store, so remove them after the repository index
+    -- has committed the deletion. The guard keeps repo.lua's focused unit
+    -- harness usable when it loads this module without issue.lua.
+    if type(issue_repo_delete) == 'function' then
+        local iok, ierr = issue_repo_delete(owner, name)
+        if not iok then
+            cfg_log_error('repository %s/%s was deleted but its issues could not be removed: %s',
+                owner, name, tostring(ierr))
+            return nil, 'repository deleted, but its issues could not be removed: ' .. tostring(ierr)
+        end
     end
     cfg_log_system('deleted repository %s/%s', owner, name)
     return true

@@ -2,7 +2,8 @@
 --
 -- Exports: store_backend, store_describe,
 --          store_users_load, store_user_put,
---          store_repos_load, store_repo_put, store_repo_delete
+--          store_repos_load, store_repo_put, store_repo_delete,
+--          store_issues_load, store_issue_put, store_issue_repo_delete
 --
 -- Two backends behind one interface. JSON files are the default and are what
 -- Phase 0 shipped: one process, one directory, nothing to install. MySQL is the
@@ -34,6 +35,7 @@ local xutils = require('xutils')
 -- whole file from the caller's own table without being handed it again.
 local users_map = nil
 local repos_map = nil
+local issues_map = nil
 
 function g_exports.store_backend()
     return db_enabled() and 'mysql' or 'json'
@@ -92,6 +94,10 @@ end
 
 local function repos_path()
     return util_path_join(repo_root(), 'index.json')
+end
+
+local function issues_path()
+    return util_path_join(cfg_get('DATA_DIR', 'data'), 'issues.json')
 end
 
 local function file_users_load()
@@ -173,6 +179,53 @@ local function file_repos_save()
 
     local ok, err = util_file_write_atomic(repos_path(), json)
     if not ok then return nil, 'index save failed: ' .. tostring(err) end
+    return true
+end
+
+local function file_issues_load()
+    local map = {}
+    local raw = util_file_read(issues_path())
+    if not raw or raw == '' then return map end
+    local parsed = xutils.json_unpack(raw)
+    if type(parsed) ~= 'table' or type(parsed.issues) ~= 'table' then
+        cfg_log_warn('issue store at %s is unreadable; starting empty', issues_path())
+        return map
+    end
+    for _, issue in ipairs(parsed.issues) do
+        if type(issue) == 'table' and repo_name_ok(issue.owner) and
+           repo_name_ok(issue.name) and tonumber(issue.number) and
+           tonumber(issue.number) > 0 and
+           type(issue.title) == 'string' and type(issue.body) == 'string' and
+           type(issue.author) == 'string' and
+           (issue.state == 'open' or issue.state == 'closed') then
+            local key = repo_key(issue.owner, issue.name)
+            map[key] = map[key] or {}
+            issue.number = math.floor(tonumber(issue.number))
+            issue.comments = type(issue.comments) == 'table' and issue.comments or {}
+            map[key][issue.number] = issue
+        end
+    end
+    return map
+end
+
+local function file_issues_save()
+    if not issues_map then return nil, 'issues have not been loaded' end
+
+    local list = {}
+    for _, by_number in pairs(issues_map) do
+        for _, issue in pairs(by_number) do list[#list + 1] = issue end
+    end
+    table.sort(list, function(a, b)
+        if a.owner ~= b.owner then return a.owner < b.owner end
+        if a.name ~= b.name then return a.name < b.name end
+        return a.number < b.number
+    end)
+
+    local json = xutils.json_pack({ version = 1, issues = list })
+    if not json then return nil, 'issue serialisation failed (invalid UTF-8?)' end
+    util_dir_make(cfg_get('DATA_DIR', 'data'))
+    local ok, err = util_file_write_atomic(issues_path(), json)
+    if not ok then return nil, 'issue save failed: ' .. tostring(err) end
     return true
 end
 
@@ -285,6 +338,66 @@ local function db_repo_delete(owner, name)
     return true
 end
 
+local function row_to_issue(row)
+    return {
+        owner      = db_text(row.owner, ''),
+        name       = db_text(row.name, ''),
+        number     = db_number(row.number, 0),
+        title      = db_text(row.title, ''),
+        body       = db_text(row.body, ''),
+        state      = db_text(row.state, 'open'),
+        author     = db_text(row.author, ''),
+        created_at = db_number(row.created_at, 0),
+        updated_at = db_number(row.updated_at, 0),
+        comments   = decode_sub(row.comments) or {},
+    }
+end
+
+local function db_issues_load()
+    local rows, err = db_query(
+        'SELECT owner_key, name_key, owner, name, number, title, body, state, ' ..
+        'author, created_at, updated_at, comments FROM gl_issues')
+    if not rows then return nil, 'could not read issues: ' .. tostring(err) end
+    local map = {}
+    for _, row in ipairs(rows) do
+        local issue = row_to_issue(row)
+        if repo_name_ok(issue.owner) and repo_name_ok(issue.name) and
+           issue.number and issue.number > 0 and
+           (issue.state == 'open' or issue.state == 'closed') then
+            local key = repo_key(issue.owner, issue.name)
+            map[key] = map[key] or {}
+            map[key][issue.number] = issue
+        end
+    end
+    return map
+end
+
+local function db_issue_put(issue)
+    local comments, cerr = encode_sub(issue.comments, 'issue comments')
+    if cerr then return nil, cerr end
+    local ok, err = db_exec(string.format(
+        'INSERT INTO gl_issues (owner_key, name_key, owner, name, number, title, ' ..
+        'body, state, author, created_at, updated_at, comments) VALUES ' ..
+        '(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ' ..
+        'ON DUPLICATE KEY UPDATE title=VALUES(title), body=VALUES(body), ' ..
+        'state=VALUES(state), updated_at=VALUES(updated_at), comments=VALUES(comments)',
+        db_quote(issue.owner:lower()), db_quote(issue.name:lower()),
+        db_quote(issue.owner), db_quote(issue.name), db_quote(issue.number),
+        db_quote(issue.title), db_quote(issue.body), db_quote(issue.state),
+        db_quote(issue.author), db_quote(issue.created_at or 0),
+        db_quote(issue.updated_at or 0), db_quote(comments)))
+    if not ok then return nil, 'could not save the issue: ' .. tostring(err) end
+    return true
+end
+
+local function db_issue_repo_delete(owner, name)
+    local ok, err = db_exec(string.format(
+        'DELETE FROM gl_issues WHERE owner_key = %s AND name_key = %s',
+        db_quote(tostring(owner):lower()), db_quote(tostring(name):lower())))
+    if not ok then return nil, 'could not delete repository issues: ' .. tostring(err) end
+    return true
+end
+
 -- ---------------------------------------------------------------------------
 -- The interface
 -- ---------------------------------------------------------------------------
@@ -318,4 +431,22 @@ end
 function g_exports.store_repo_delete(owner, name)
     if db_enabled() then return db_repo_delete(owner, name) end
     return file_repos_save()
+end
+
+function g_exports.store_issues_load()
+    local map, err
+    if db_enabled() then map, err = db_issues_load() else map = file_issues_load() end
+    if not map then return nil, err end
+    issues_map = map
+    return issues_map
+end
+
+function g_exports.store_issue_put(issue)
+    if db_enabled() then return db_issue_put(issue) end
+    return file_issues_save()
+end
+
+function g_exports.store_issue_repo_delete(owner, name)
+    if db_enabled() then return db_issue_repo_delete(owner, name) end
+    return file_issues_save()
 end

@@ -15,13 +15,14 @@ around it: the smart-HTTP transport, the repository model, accounts and access
 control, and an API. Packfile negotiation, delta resolution and ref locking stay
 where they already work.
 
-**Status: Phase 2 (browser slice).** Clone, fetch and push over HTTP(S) work end
-to end, with accounts, access tokens, public/private repositories, a JSON
-management API and a same-origin repository browser. The browser covers the
-repository list, branches, tree, raw files, commit history and bounded diffs,
-and can create and delete a repository — so the whole solo loop (create, push,
-browse) never leaves it. Issues and pull requests are not implemented yet, and
-commit history still stops at 50 without paging — see
+**Status: Phase 3 (collaboration foundation).** Clone, fetch and push over
+HTTP(S) work end to end, with accounts, access tokens, public/private
+repositories, a JSON management API and a same-origin repository browser. The
+browser covers the repository list, branches, tree, raw files, commit history
+and bounded diffs, and can create, edit and delete repositories. Owners can
+also grant existing accounts read or write access to private repositories, so
+the solo loop and the first multi-user loop both stay in the browser. Issues
+and pull requests are not implemented yet — see
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
@@ -200,10 +201,10 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 136/136 on Linux with streaming, and 125/125 on
+2.52). `test/smoke.sh` passes 151/151 on Linux with streaming, and 140/140 on
 Windows and under
-`GIT_STREAM=off` — the eleven it does not run there are the streamed-body cases,
-which need the transport that platform does not have. `test/unit.lua` is 199 on
+`GIT_STREAM=off` — the streamed-body cases are skipped there because they need
+the transport that platform does not have. `test/unit.lua` is 199 on
 Windows, 198 on Linux (one case is about Windows path spelling). Adding
 `DB_DRIVER=mysql` runs the same suite against MySQL instead of JSON files.
 
@@ -264,6 +265,9 @@ missing `/bin/sh`.
 | `GET /api/v1/repos/:owner/:name` | detail, including refs and `empty` |
 | `PATCH /api/v1/repos/:owner/:name` | `{description?, private?}`; owner or administrator |
 | `DELETE /api/v1/repos/:owner/:name` | |
+| `GET /api/v1/repos/:owner/:name/collaborators` | owner or administrator; lists `{username, permission}` |
+| `PUT /api/v1/repos/:owner/:name/collaborators/:username` | `{permission: read\|write}`; owner or administrator |
+| `DELETE /api/v1/repos/:owner/:name/collaborators/:username` | owner or administrator |
 | `GET /api/v1/users` | administrator only |
 | `POST /api/v1/users` | administrator only |
 | `POST /api/v1/user/tokens` | `{label?, ttl_seconds?}`; the token is shown once |

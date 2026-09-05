@@ -73,6 +73,7 @@
               <span class="visibility-pill" id="repo-visibility">公开</span>
               <span id="repo-default-branch" class="branch-note"></span>
               <button class="button button-quiet" id="edit-repo" type="button" hidden>编辑仓库</button>
+              <button class="button button-quiet" id="manage-access" type="button" hidden>协作者</button>
               <button class="button button-danger" id="delete-repo" type="button" hidden>删除仓库</button>
             </div>
           </section>
@@ -80,6 +81,7 @@
           <nav class="view-tabs" aria-label="仓库视图">
             <button class="view-tab active" type="button" data-view="code">代码</button>
             <button class="view-tab" type="button" data-view="commits">提交</button>
+            <button class="view-tab" type="button" data-view="issues">Issues</button>
           </nav>
 
           <div id="code-view" class="view-panel">
@@ -145,6 +147,33 @@
               <pre id="diff-content" class="diff-block"></pre>
             </div>
           </div>
+
+          <div id="issues-view" class="view-panel" hidden>
+            <div class="toolbar">
+              <span class="toolbar-title">Issues</span>
+              <label class="issue-filter"><span>状态</span><select id="issue-state" aria-label="Issue 状态"><option value="open">开放</option><option value="closed">已关闭</option><option value="all">全部</option></select></label>
+              <div class="toolbar-spacer"></div>
+              <button class="button button-primary" id="new-issue" type="button" hidden>新建 Issue</button>
+            </div>
+            <div id="issue-list" class="issue-list"></div>
+            <div id="issue-detail" class="issue-detail" hidden>
+              <div class="issue-detail-head">
+                <div>
+                  <p class="eyebrow">ISSUE</p>
+                  <h3 id="issue-detail-title">—</h3>
+                  <p id="issue-detail-meta" class="muted"></p>
+                </div>
+                <button class="button button-quiet" id="issue-toggle-state" type="button" hidden></button>
+              </div>
+              <div id="issue-detail-body" class="issue-body"></div>
+              <div class="issue-comments-head"><span>评论</span><span id="issue-comment-count" class="muted"></span></div>
+              <div id="issue-comments" class="issue-comments"></div>
+              <form id="issue-comment-form" class="issue-comment-form" hidden>
+                <label>添加评论<textarea id="issue-comment-body" rows="3" required></textarea></label>
+                <div class="dialog-actions"><button class="button button-primary" type="submit">发表评论</button></div>
+              </form>
+            </div>
+          </div>
         </div>
       </section>
     </main>
@@ -159,7 +188,7 @@
         </div>
         <button class="icon-button" id="auth-close" data-dialog-close="auth-dialog" type="button" aria-label="关闭">×</button>
       </div>
-      <p class="dialog-copy">登录后可以查看私有仓库。密码只用来换取一个 12 小时后自动失效的访问令牌，令牌只存在当前标签页，退出时会立即吊销——密码本身不会被保存。</p>
+      <p class="dialog-copy">登录后可以查看你有权限访问的私有仓库。密码只用来换取一个 12 小时后自动失效的访问令牌，令牌只存在当前标签页，退出时会立即吊销——密码本身不会被保存。</p>
       <label>用户名<input id="auth-user" name="username" type="text" autocomplete="username" required></label>
       <label>密码或访问令牌<input id="auth-password" name="password" type="password" autocomplete="current-password" required></label>
       <p id="auth-message" class="form-message" role="alert"></p>
@@ -182,7 +211,7 @@
       <p class="dialog-copy">仓库建在你自己的账号下，创建后用上面的克隆地址推送即可。默认分支由服务器配置决定，不必在这里选：第一次推送之后 HEAD 会自动指向你实际推上来的那个分支。</p>
       <label>仓库名<input id="create-name" type="text" autocomplete="off" required placeholder="my-project"></label>
       <label>描述（可选）<input id="create-description" type="text" autocomplete="off"></label>
-      <label class="checkbox-label"><input id="create-private" type="checkbox"> 私有仓库（只有自己和管理员能看到）</label>
+      <label class="checkbox-label"><input id="create-private" type="checkbox"> 私有仓库（自己、管理员和协作者可见）</label>
       <p id="create-message" class="form-message" role="alert"></p>
       <div class="dialog-actions">
         <button class="button button-quiet" data-dialog-close="create-dialog" type="button">取消</button>
@@ -219,13 +248,55 @@
         </div>
         <button class="icon-button" id="edit-close" data-dialog-close="edit-dialog" type="button" aria-label="关闭">×</button>
       </div>
-      <p class="dialog-copy">修改仓库说明或可见性。设为私有后，只有你和管理员能看到仓库及其代码。</p>
-      <label>描述（可选）<textarea id="edit-description" rows="3" maxlength="1024"></textarea></label>
+      <p class="dialog-copy">修改仓库说明或可见性。设为私有后，只有你、管理员和已授权协作者能看到仓库及其代码。</p>
+      <label>描述（可选）<textarea id="edit-description" rows="3"></textarea></label>
       <label class="checkbox-label"><input id="edit-private" type="checkbox"> 私有仓库</label>
       <p id="edit-message" class="form-message" role="alert"></p>
       <div class="dialog-actions">
         <button class="button button-quiet" data-dialog-close="edit-dialog" type="button">取消</button>
         <button class="button button-primary" id="edit-submit" value="default" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="access-dialog" class="auth-dialog access-dialog">
+    <section class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">REPOSITORY ACCESS</p>
+          <h2>管理协作者</h2>
+        </div>
+        <button class="icon-button" id="access-close" data-dialog-close="access-dialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-copy">给已有账号授予只读或可写权限。协作者可以访问私有仓库；可写协作者还可以推送提交。</p>
+      <div id="collaborator-list" class="collaborator-list"></div>
+      <form id="collaborator-form" class="collaborator-form">
+        <label>用户名<input id="collaborator-user" type="text" autocomplete="off" required placeholder="username"></label>
+        <label>权限<select id="collaborator-permission"><option value="read">只读</option><option value="write">可写</option></select></label>
+        <button class="button button-primary" id="collaborator-submit" type="submit">添加</button>
+      </form>
+      <p id="collaborator-message" class="form-message" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" data-dialog-close="access-dialog" type="button">完成</button>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog id="issue-dialog" class="auth-dialog">
+    <form method="dialog" id="issue-form" class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">NEW ISSUE</p>
+          <h2>新建 Issue</h2>
+        </div>
+        <button class="icon-button" data-dialog-close="issue-dialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <label>标题<input id="issue-title" type="text" autocomplete="off" required placeholder="发现一个问题"></label>
+      <label>描述（可选）<textarea id="issue-body" rows="6"></textarea></label>
+      <p id="issue-message" class="form-message" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" data-dialog-close="issue-dialog" type="button">取消</button>
+        <button class="button button-primary" id="issue-submit" type="submit">创建</button>
       </div>
     </form>
   </dialog>

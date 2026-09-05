@@ -71,6 +71,38 @@ local MIGRATIONS = {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
         },
     },
+    {
+        id = 2,
+        name = 'issues',
+        up = {
+            -- owner/name alongside owner_key/name_key for the same reason
+            -- gl_repos carries both: the key is the case-folded identity, and
+            -- these keep the casing the repository was created with. The DAO
+            -- reads them, so leaving them out is not a smaller table — it is a
+            -- SELECT of a column that does not exist, on every boot.
+            --
+            -- comments is MEDIUMTEXT, not TEXT. issue.lua allows 1000 comments
+            -- of 8 KiB, which is 8 MB; TEXT holds 65,535 bytes, so the declared
+            -- limit and the column disagreed by a factor of 125 and an issue
+            -- became unwritable — including unclosable — long before the cap.
+            [[CREATE TABLE IF NOT EXISTS gl_issues (
+                owner_key  VARCHAR(100) NOT NULL,
+                name_key   VARCHAR(100) NOT NULL,
+                owner      VARCHAR(100) NOT NULL,
+                name       VARCHAR(100) NOT NULL,
+                number     INT          NOT NULL,
+                title      VARCHAR(200) NOT NULL,
+                body       TEXT         NOT NULL,
+                state      VARCHAR(10)  NOT NULL DEFAULT 'open',
+                author     VARCHAR(100) NOT NULL,
+                created_at BIGINT       NOT NULL DEFAULT 0,
+                updated_at BIGINT       NOT NULL DEFAULT 0,
+                comments   MEDIUMTEXT   NULL,
+                PRIMARY KEY (owner_key, name_key, number),
+                KEY gl_issues_repo (owner_key, name_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
+        },
+    },
 }
 
 function g_exports.migrate_latest()

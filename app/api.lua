@@ -15,6 +15,14 @@
 --   GET    /api/v1/repos/:owner/:name     detail, including refs
 --   PATCH  /api/v1/repos/:owner/:name     update description/private
 --   DELETE /api/v1/repos/:owner/:name
+--   GET    /api/v1/repos/:owner/:name/collaborators
+--   PUT    /api/v1/repos/:owner/:name/collaborators/:username
+--   DELETE /api/v1/repos/:owner/:name/collaborators/:username
+--   GET    /api/v1/repos/:owner/:name/issues
+--   POST   /api/v1/repos/:owner/:name/issues
+--   GET    /api/v1/repos/:owner/:name/issues/:number
+--   PATCH  /api/v1/repos/:owner/:name/issues/:number
+--   POST   /api/v1/repos/:owner/:name/issues/:number/comments
 --   GET    /api/v1/users                  admin only
 --   POST   /api/v1/users                  admin only
 --   POST   /api/v1/user/tokens            issue an access token for the caller
@@ -259,6 +267,166 @@ local function h_repo_update(req, ctx)
     local updated, uerr, status = repo_update(owner, name, b)
     if not updated then return http_response_error(status or 400, http_safe_error(uerr)) end
     return http_response_json(200, repo_public(updated, req, ctx))
+end
+
+-- Resolve a repository for its owner or an administrator. A readable caller
+-- gets a 403, while someone who cannot read a private repository gets the same
+-- 404 boundary as the rest of the repository management API.
+local function managed_repo(req, ctx)
+    local user, resp = require_user(req)
+    if not user then return nil, resp end
+    local owner = ctx.params.owner
+    local name = tostring(ctx.params.name):gsub('%.git$', '')
+    local rec = repo_get(owner, name)
+    if not rec or not repo_exists_of(rec) then
+        return nil, http_response_error(404, 'no such repository')
+    end
+    if rec.owner == user.username or user.admin then return rec, user end
+    if auth_can_read(rec, user) then
+        return nil, http_response_error(403, 'only the owner or an administrator may manage collaborators')
+    end
+    return nil, http_response_error(404, 'no such repository')
+end
+
+local function h_collaborator_list(req, ctx)
+    local rec, resp = managed_repo(req, ctx)
+    if not rec then return resp end
+    local list = repo_collaborators(rec)
+    return http_response_json(200, { collaborators = util_json_array(list), count = #list })
+end
+
+local function h_collaborator_put(req, ctx)
+    local rec, resp = managed_repo(req, ctx)
+    if not rec then return resp end
+    local username = tostring(ctx.params.username or '')
+    local exists, aerr = auth_user_exists(username)
+    if aerr then return http_response_error(500, http_safe_error(aerr)) end
+    if not exists then
+        return http_response_error(404, 'no such user')
+    end
+    local b, berr = body_json(req)
+    if not b then return http_response_error(400, berr) end
+    local updated, uerr, status = repo_collaborator_put(
+        rec.owner, rec.name, username, b.permission)
+    if not updated then return http_response_error(status or 400, http_safe_error(uerr)) end
+    return http_response_json(200, { collaborator = {
+        username = username, permission = updated.collaborators[username],
+    }})
+end
+
+local function h_collaborator_delete(req, ctx)
+    local rec, resp = managed_repo(req, ctx)
+    if not rec then return resp end
+    local username = tostring(ctx.params.username or '')
+    local updated, uerr, status = repo_collaborator_delete(rec.owner, rec.name, username)
+    if not updated then return http_response_error(status or 400, http_safe_error(uerr)) end
+    return http_response_json(200, { removed = username })
+end
+
+local function issue_public(issue, with_comments)
+    local out = {
+        number = issue.number,
+        owner = issue.owner,
+        name = issue.name,
+        title = issue.title,
+        body = issue.body,
+        state = issue.state,
+        author = issue.author,
+        created_at = issue.created_at,
+        updated_at = issue.updated_at,
+        comment_count = #(issue.comments or {}),
+    }
+    if with_comments then out.comments = util_json_array(issue.comments or {}) end
+    return out
+end
+
+local function issue_number_param(ctx)
+    local n = tonumber(ctx.params.number)
+    if not n or n < 1 or n ~= math.floor(n) then return nil end
+    return n
+end
+
+local function issue_repo_for_user(req, ctx, need_user)
+    local user, bad
+    if need_user then user, bad = require_user(req) else user, bad = identify_optional(req) end
+    if bad then return nil, nil, bad end
+    local owner = ctx.params.owner
+    local name = tostring(ctx.params.name):gsub('%.git$', '')
+    local rec = repo_get(owner, name)
+    if not rec or not repo_exists_of(rec) or not auth_can_read(rec, user) then
+        return nil, user, http_response_error(404, 'no such repository')
+    end
+    return rec, user
+end
+
+local function h_issue_list(req, ctx)
+    local rec, _, bad = issue_repo_for_user(req, ctx, false)
+    if not rec then return bad end
+    local state = (req.query or {}).state or 'open'
+    if state ~= 'open' and state ~= 'closed' and state ~= 'all' then
+        return http_response_error(400, 'issue state must be open, closed or all')
+    end
+    local list = issue_list(rec.owner, rec.name, state)
+    local out = {}
+    for _, issue in ipairs(list) do out[#out + 1] = issue_public(issue, false) end
+    return http_response_json(200, { issues = util_json_array(out), count = #out, state = state })
+end
+
+local function h_issue_create(req, ctx)
+    local rec, user, bad = issue_repo_for_user(req, ctx, true)
+    if not rec then return bad end
+    local b, berr = body_json(req)
+    if not b then return http_response_error(400, berr) end
+    local issue, ierr, status = issue_create(rec.owner, rec.name, user.username, b)
+    if not issue then return http_response_error(status or 400, http_safe_error(ierr)) end
+    return http_response_json(201, issue_public(issue, true))
+end
+
+local function h_issue_get(req, ctx)
+    local rec, _, bad = issue_repo_for_user(req, ctx, false)
+    if not rec then return bad end
+    local number = issue_number_param(ctx)
+    if not number then return http_response_error(400, 'issue number must be a positive integer') end
+    local issue = issue_get(rec.owner, rec.name, number)
+    if not issue then return http_response_error(404, 'no such issue') end
+    return http_response_json(200, issue_public(issue, true))
+end
+
+local function issue_can_edit(rec, issue, user)
+    return user and (user.admin or issue.author == user.username or auth_can_write(rec, user))
+end
+
+local function h_issue_update(req, ctx)
+    local rec, user, bad = issue_repo_for_user(req, ctx, true)
+    if not rec then return bad end
+    local number = issue_number_param(ctx)
+    if not number then return http_response_error(400, 'issue number must be a positive integer') end
+    local issue = issue_get(rec.owner, rec.name, number)
+    if not issue then return http_response_error(404, 'no such issue') end
+    if not issue_can_edit(rec, issue, user) then
+        return http_response_error(403, 'only the issue author, a collaborator with write access, or an administrator may update')
+    end
+    local b, berr = body_json(req)
+    if not b then return http_response_error(400, berr) end
+    local updated, uerr, status = issue_update(rec.owner, rec.name, number, b)
+    if not updated then return http_response_error(status or 400, http_safe_error(uerr)) end
+    return http_response_json(200, issue_public(updated, true))
+end
+
+local function h_issue_comment_create(req, ctx)
+    local rec, user, bad = issue_repo_for_user(req, ctx, true)
+    if not rec then return bad end
+    local number = issue_number_param(ctx)
+    if not number then return http_response_error(400, 'issue number must be a positive integer') end
+    if not issue_get(rec.owner, rec.name, number) then
+        return http_response_error(404, 'no such issue')
+    end
+    local b, berr = body_json(req)
+    if not b then return http_response_error(400, berr) end
+    local comment, cerr, status = issue_comment_create(
+        rec.owner, rec.name, number, user.username, b.body)
+    if not comment then return http_response_error(status or 400, http_safe_error(cerr)) end
+    return http_response_json(201, comment)
 end
 
 local function h_repo_delete(req, ctx)
@@ -530,6 +698,14 @@ function g_exports.api_install()
     http_get('/api/v1/repos/:owner/:name', h_repo_get)
     http_patch('/api/v1/repos/:owner/:name', h_repo_update)
     http_delete('/api/v1/repos/:owner/:name', h_repo_delete)
+    http_get('/api/v1/repos/:owner/:name/collaborators', h_collaborator_list)
+    http_put('/api/v1/repos/:owner/:name/collaborators/:username', h_collaborator_put)
+    http_delete('/api/v1/repos/:owner/:name/collaborators/:username', h_collaborator_delete)
+    http_get('/api/v1/repos/:owner/:name/issues', h_issue_list)
+    http_post('/api/v1/repos/:owner/:name/issues', h_issue_create)
+    http_get('/api/v1/repos/:owner/:name/issues/:number', h_issue_get)
+    http_patch('/api/v1/repos/:owner/:name/issues/:number', h_issue_update)
+    http_post('/api/v1/repos/:owner/:name/issues/:number/comments', h_issue_comment_create)
 
     http_get('/api/v1/users', h_user_list)
     http_post('/api/v1/users', h_user_create)

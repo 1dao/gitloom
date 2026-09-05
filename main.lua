@@ -2,8 +2,8 @@
 --
 -- Current scope: the git smart-HTTP transport (clone / fetch / push), a
 -- repository model on disk, HTTP Basic accounts with access tokens, a JSON
--- management API, and the first same-origin repository browser. Issues and pull
--- requests come later and ride on the same API.
+-- management API, a basic issue tracker, and the first same-origin repository
+-- browser. Pull requests come later and ride on the same API.
 --
 -- Run:  bin\xnet.exe main.lua [KEY=VAL ...]      (see gitloom.cfg for keys)
 --
@@ -50,6 +50,7 @@ boot.load_script('app/store.lua')    -- store_*   accounts and repositories
 boot.load_script('app/proc.lua')     -- proc_*
 boot.load_script('app/pkt.lua')      -- pkt_*
 boot.load_script('app/repo.lua')     -- repo_*
+boot.load_script('app/issue.lua')    -- issue_*
 boot.load_script('app/git.lua')      -- git_*
 -- Before auth.lua, and not only by convention: namespace ownership is decided
 -- against the modules already loaded, so auth.lua could otherwise claim
@@ -139,6 +140,7 @@ local function boot_async()
     -- The stores, and only now: under MySQL every one of these is a query, and
     -- __init runs on the main state where a yield is not possible.
     if not repo_index_load() then xthread.stop(1); return end
+    if not issue_index_load() then xthread.stop(1); return end
     if not auth_load() then xthread.stop(1); return end
     auth_bootstrap()
     cfg_log_system('store: %s', store_describe())

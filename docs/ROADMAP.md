@@ -266,8 +266,8 @@ Verified against a real MySQL 8.4.9, on both platforms and both stores:
 | | JSON | MySQL |
 |---|---|---|
 | `test/unit.lua` (Windows / Linux) | 199 / 198 | — |
-| `test/smoke.sh` Windows | 125/125 | 125/125 |
-| `test/smoke.sh` Linux | 136/136 | 136/136 |
+| `test/smoke.sh` Windows | 155/155 | 155/155 |
+| `test/smoke.sh` Linux | 166/166 | 166/166 |
 
 `test/dbreset.lua` empties the database first, because the counts the suite
 asserts only mean something from empty. gitloom itself never creates a database:
@@ -410,6 +410,66 @@ Still to do in the front end: syntax highlighting. The CSP is
 `default-src 'self'`, so a highlighter has to be vendored into `web/`.
 
 Estimate for the remainder: 1–2 weeks.
+
+**Collaborator access: done (2026-09-04).** Owners and administrators can now
+list, grant, update and remove read/write access for existing accounts through
+the API. The browser exposes the same flow from a selected repository: the
+owner can add an account, change its permission or remove it, while the
+existing `auth_can_read` / `auth_can_write` checks enforce visibility and push
+access on every request. Smoke coverage exercises the full lifecycle,
+including cloning as a reader and pushing after promotion to write access.
+
+This deliberately stops short of an admin panel or account provisioning in the
+browser. Accounts are still created through the administrator-only users API;
+the admin panel remains a Phase 4 item.
+
+**A basic issue tracker: done (2026-09-04).** `app/issue.lua` keeps numbered
+issues per repository with a title, body, state and comments; the API adds list,
+create, read, update and comment, and the browser gets a panel for them. Reading
+follows the repository — anonymous on a public one, `auth_can_read` on a private
+one — and updating is the author, a write collaborator, or an administrator.
+
+**A review of it found six things, all fixed.** One was fatal and the rest were
+the same shape as each other:
+
+- **MySQL would not start at all.** `gl_issues` was created without `owner` and
+  `name`, but the DAO selects and inserts both — so `issue_index_load` failed
+  with `Unknown column 'owner'`, and boot_async turns that into `xthread.stop(1)`.
+  Not "issues are broken": the whole MySQL backend, which the previous commit had
+  just made a supported deployment, refused to boot. The columns are back, for
+  the reason `gl_repos` has them — the key is the case-folded identity and these
+  keep the casing.
+- **Every limit was in the wrong unit for its column.** `comments` allowed
+  1000 x 8 KiB = 8 MB into a `TEXT` that holds 65,535 bytes — a factor of 125,
+  and the same failure as the token cap before it: past the limit the row cannot
+  be written AT ALL, so the issue could no longer be closed or edited either.
+  `body` allowed exactly one byte more than `TEXT`. And `title` counted bytes
+  against a `VARCHAR(200)` that counts characters, so an English title got the
+  whole column and a Chinese one stopped at 66. Now: `comments` is `MEDIUMTEXT`,
+  the body limit is 65,535 bytes, and the title is measured in characters.
+- **`test/dbreset.lua` hung for ever when the database was unreachable**, so the
+  suite that would have caught the first item hung instead of failing. It gives
+  up after `DBRESET_TIMEOUT_SEC` now.
+- **`store_issue_delete` had no caller** in either backend, and no endpoint
+  deletes a single issue. Removed rather than left as a shape for something that
+  does not exist.
+
+Verified against MySQL 8.4: the schema applies, an issue survives a restart with
+its Chinese title, comment count and state intact, and nothing is written to the
+JSON files. With the two columns removed again the instance fails to boot with
+that exact error, so the fix is what makes it work rather than something that
+happened to be true.
+
+**If you already ran the broken migration**, editing it in place does not help:
+the runner records `id = 2` and never repeats it. Drop `gl_issues` and its
+ledger row, or drop the database. `test/dbreset.lua` already does that for the
+test databases.
+
+One thing left, deliberately: `issue_list` answers `{}` when the store cannot be
+read, which reports "no issues" for "could not ask". `repo_list` and
+`auth_user_list` do the same, so changing one of the three alone would be worse
+than the inconsistency. All three are only reachable if the initial load failed,
+and boot refuses to continue in that case.
 
 ## Phase 3 — collaboration
 

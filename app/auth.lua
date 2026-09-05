@@ -1,6 +1,6 @@
 -- app/auth.lua — accounts, HTTP Basic authentication, and access decisions.
 --
--- Exports: auth_load, auth_user_list, auth_user_create,
+-- Exports: auth_load, auth_user_list, auth_user_exists, auth_user_create,
 --          auth_token_create, auth_token_revoke,
 --          auth_identify, auth_can_read, auth_can_write, auth_challenge,
 --          auth_bootstrap, auth_kdf_setup, auth_too_many
@@ -230,6 +230,11 @@ end
 local function auth_user_get(username)
     if not have_users() then return nil end
     return users[tostring(username or '')]
+end
+
+function g_exports.auth_user_exists(username)
+    if not have_users() then return nil, 'the account store is unavailable' end
+    return users[tostring(username or '')] ~= nil
 end
 
 function g_exports.auth_user_list()

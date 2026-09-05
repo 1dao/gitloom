@@ -131,6 +131,10 @@ grep -q 'id="delete-dialog"' "$WORK/web.index" \
     && ok 'browser offers repository deletion' || bad 'browser offers repository deletion' 'dialog missing'
 grep -q 'id="edit-dialog"' "$WORK/web.index" \
     && ok 'browser offers repository editing' || bad 'browser offers repository editing' 'dialog missing'
+grep -q 'id="access-dialog"' "$WORK/web.index" \
+    && ok 'browser offers collaborator management' || bad 'browser offers collaborator management' 'dialog missing'
+grep -q 'id="issues-view"' "$WORK/web.index" && grep -q 'id="issue-dialog"' "$WORK/web.index" \
+    && ok 'browser offers issue tracking' || bad 'browser offers issue tracking' 'panel missing'
 grep -q 'id="first-push"' "$WORK/web.index" && grep -q 'id="commit-pagination"' "$WORK/web.index" \
     && ok 'browser offers empty-repository guidance and commit pagination' \
     || bad 'browser offers empty-repository guidance and commit pagination' 'panel missing'
@@ -140,6 +144,10 @@ curl -s "$BASE/app.js" | grep -q "method: 'PATCH'" \
     && ok 'browser JavaScript can edit repository metadata' || bad 'browser JavaScript can edit repository metadata' 'handler missing'
 curl -s "$BASE/app.js" | grep -q 'loadCommits(view, skip)' \
     && ok 'browser JavaScript can page commit history' || bad 'browser JavaScript can page commit history' 'handler missing'
+curl -s "$BASE/app.js" | grep -q 'loadCollaborators' \
+    && ok 'browser JavaScript can manage collaborators' || bad 'browser JavaScript can manage collaborators' 'handler missing'
+curl -s "$BASE/app.js" | grep -q 'createIssueComment' \
+    && ok 'browser JavaScript can discuss issues' || bad 'browser JavaScript can discuss issues' 'handler missing'
 curl -s "$BASE/app.js" | grep -q 'state.repo.owner === state.username' \
     && ok 'browser only offers owner deletion' || bad 'browser only offers owner deletion' 'owner guard missing'
 curl -s "$BASE/app.js" | grep -q 'requestToken && state.token === requestToken' \
@@ -287,6 +295,124 @@ curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
 code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 \
     "$BASE/api/v1/repos/admin/secret")
 check 'private repository is 404 to another account' "$code" '404'
+
+# ── Collaborator access ─────────────────────────────────────────────────────
+# Access is granted to an existing account by the owner, then exercised through
+# both the browser-facing API and real smart-HTTP clone/push requests. A reader
+# can fetch a private repository but cannot push until promoted to write.
+code=$(curl -s -o /dev/null -w '%{http_code}' \
+    "$BASE/api/v1/repos/admin/secret/collaborators")
+check 'collaborator list without credentials is 401' "$code" '401'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PUT \
+    -H 'Content-Type: application/json' -d '{"permission":"read"}' \
+    "$BASE/api/v1/repos/admin/secret/collaborators/missing")
+check 'unknown collaborator account is rejected' "$code" '404'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PUT \
+    -H 'Content-Type: application/json' -d '{"permission":"admin"}' \
+    "$BASE/api/v1/repos/admin/secret/collaborators/bob")
+check 'invalid collaborator permission is rejected' "$code" '400'
+
+body=$(curl -s -u "admin:$ADMIN_PW" -X PUT -H 'Content-Type: application/json' \
+    -d '{"permission":"read"}' \
+    "$BASE/api/v1/repos/admin/secret/collaborators/bob")
+echo "$body" | grep -q '"username":"bob"' && echo "$body" | grep -q '"permission":"read"' \
+    && ok 'owner grants read collaborator access' || bad 'owner grants read collaborator access' "$body"
+
+body=$(curl -s -u "admin:$ADMIN_PW" \
+    "$BASE/api/v1/repos/admin/secret/collaborators")
+echo "$body" | grep -q '"count":1' && echo "$body" | grep -q '"username":"bob"' \
+    && ok 'owner can list collaborators' || bad 'owner can list collaborators' "$body"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 \
+    "$BASE/api/v1/repos/admin/secret/collaborators")
+check 'a collaborator cannot manage the access list' "$code" '403'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 \
+    "$BASE/api/v1/repos/admin/secret")
+check 'read collaborator can browse private repository' "$code" '200'
+
+$GIT clone -q "http://bob:bob-password-1@127.0.0.1:$PORT/admin/secret.git" "$WORK/wbob" 2>"$WORK/ebobclone" \
+    && ok 'read collaborator can clone' || bad 'read collaborator can clone' "$(cat "$WORK/ebobclone")"
+
+( cd "$WORK/w1" && $GIT push -q \
+    "http://bob:bob-password-1@127.0.0.1:$PORT/admin/secret.git" \
+    HEAD:refs/heads/main 2>"$WORK/ebobread" )
+if [ $? -ne 0 ]; then ok 'read collaborator cannot push'
+else bad 'read collaborator cannot push' 'push succeeded'; fi
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PUT \
+    -H 'Content-Type: application/json' -d '{"permission":"write"}' \
+    "$BASE/api/v1/repos/admin/secret/collaborators/bob")
+check 'owner promotes collaborator to write' "$code" '200'
+
+( cd "$WORK/w1" && $GIT push -q \
+    "http://bob:bob-password-1@127.0.0.1:$PORT/admin/secret.git" \
+    HEAD:refs/heads/main 2>"$WORK/ebobwrite" ) \
+    && ok 'write collaborator can push' || bad 'write collaborator can push' "$(cat "$WORK/ebobwrite")"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X DELETE \
+    "$BASE/api/v1/repos/admin/secret/collaborators/bob")
+check 'owner removes collaborator' "$code" '200'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 \
+    "$BASE/api/v1/repos/admin/secret")
+check 'removed collaborator loses access' "$code" '404'
+
+# ── Issues ───────────────────────────────────────────────────────────────────
+ISSUES="$BASE/api/v1/repos/admin/demo/issues"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$ISSUES")
+check 'issue list is public on a public repository' "$code" '200'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' -d '{"title":"nope"}' "$ISSUES")
+check 'creating an issue without credentials is 401' "$code" '401'
+
+body=$(curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+    -d '{"title":"Track smoke regression","body":"The browser should show this issue."}' "$ISSUES")
+echo "$body" | grep -q '"number":1' && echo "$body" | grep -q '"state":"open"' \
+    && ok 'owner can create an issue' || bad 'owner can create an issue' "$body"
+
+body=$(curl -s "$ISSUES")
+echo "$body" | grep -q '"count":1' && echo "$body" | grep -q 'Track smoke regression' \
+    && ok 'issue list returns the new issue' || bad 'issue list returns the new issue' "$body"
+
+body=$(curl -s "$ISSUES/1")
+echo "$body" | grep -q 'The browser should show this issue' && echo "$body" | grep -q '"comment_count":0' \
+    && ok 'issue detail includes its body' || bad 'issue detail includes its body' "$body"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' -d '{"body":"nope"}' "$ISSUES/1/comments")
+check 'commenting without credentials is 401' "$code" '401'
+
+body=$(curl -s -u bob:bob-password-1 -X POST -H 'Content-Type: application/json' \
+    -d '{"body":"I can reproduce this."}' "$ISSUES/1/comments")
+echo "$body" | grep -q '"author":"bob"' && echo "$body" | grep -q 'I can reproduce this' \
+    && ok 'a signed-in reader can comment on an issue' || bad 'a signed-in reader can comment on an issue' "$body"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X PATCH \
+    -H 'Content-Type: application/json' -d '{"state":"closed"}' "$ISSUES/1")
+check 'a reader cannot close somebody else issue' "$code" '403'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"state":"closed"}' "$ISSUES/1")
+check 'owner can close an issue' "$code" '200'
+
+body=$(curl -s "$ISSUES")
+echo "$body" | grep -q '"count":0' \
+    && ok 'open issue list hides a closed issue' || bad 'open issue list hides a closed issue' "$body"
+body=$(curl -s "$ISSUES?state=closed")
+echo "$body" | grep -q '"count":1' && echo "$body" | grep -q '"state":"closed"' \
+    && ok 'closed issue list returns the issue' || bad 'closed issue list returns the issue' "$body"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"state":"unknown"}' "$ISSUES/1")
+check 'invalid issue state is rejected' "$code" '400'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"state":"open"}' "$ISSUES/1")
+check 'owner can reopen an issue' "$code" '200'
 
 # ── Access tokens ───────────────────────────────────────────────────────────
 TOKEN=$(curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \

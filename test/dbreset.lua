@@ -57,6 +57,17 @@ local function __init()
     })
     if not ok then return fail('connect failed: %s', tostring(err)) end
 
+    -- Give up rather than wait for ever. xmysql retries a refused connection on
+    -- a timer, so a database that is simply not running produces no error here
+    -- at all — this script just never returned, and the smoke suite that calls
+    -- it hung instead of failing, which is how a broken MySQL schema stayed
+    -- invisible.
+    local limit = tonumber(arg_or('DBRESET_TIMEOUT_SEC', '20')) or 20
+    xtimer.add(limit * 1000, function()
+        fail('gave up after %ds waiting for %s:%s', limit,
+            arg_or('DB_HOST', '127.0.0.1'), arg_or('DB_PORT', '3306'))
+    end, 1)
+
     -- The pool connects asynchronously; the first query is what proves it is up.
     xtimer.add(600, function()
         local co = coroutine.create(function()

@@ -14,6 +14,10 @@
     commits: [],
     commitSkip: 0,
     commitHasMore: false,
+    issues: [],
+    issue: null,
+    issueState: 'open',
+    collaborators: [],
     username: '',
     token: '',
     toastTimer: null,
@@ -24,7 +28,7 @@
   // already left, and rendering it would show them the wrong tree — which is
   // not theoretical on a server where each listing forks a git process, so a
   // slow response really does arrive after a fast one issued later.
-  var seq = { repos: 0, view: 0, file: 0, diff: 0, commits: 0 };
+  var seq = { repos: 0, view: 0, file: 0, diff: 0, commits: 0, access: 0, issues: 0, issue: 0 };
   var COMMIT_PAGE_SIZE = 25;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -35,6 +39,8 @@
     seq.file += 1;   // a panel opened under the old view must not land either
     seq.diff += 1;
     seq.commits += 1;
+    seq.issues += 1;
+    seq.issue += 1;
     return seq.view;
   }
 
@@ -254,8 +260,10 @@
   function syncWriteActions() {
     var signedIn = !!state.username;
     $('new-repo').hidden = !signedIn;
+    $('new-issue').hidden = !signedIn || !state.repo;
     var canManage = signedIn && state.repo && state.repo.owner === state.username;
     $('edit-repo').hidden = !canManage;
+    $('manage-access').hidden = !canManage;
     $('delete-repo').hidden = !canManage;
   }
 
@@ -388,6 +396,9 @@
   }
 
   function updateRepo(repo, description, isPrivate) {
+    // The server owns the byte limit for descriptions. Keeping no duplicated
+    // maxlength here means a future config change cannot leave this form with
+    // a stale client-side ceiling.
     return api('/api/v1/repos/' + encodeURIComponent(repo.owner) + '/' +
       encodeURIComponent(repo.name), {
         method: 'PATCH',
@@ -396,9 +407,292 @@
       }).then(function (response) { return response.json(); });
   }
 
+  function collaboratorsPath(repo) {
+    return '/api/v1/repos/' + encodeURIComponent(repo.owner) + '/' +
+      encodeURIComponent(repo.name) + '/collaborators';
+  }
+
+  function loadCollaborators(repo) {
+    var ticket = (seq.access += 1);
+    var list = $('collaborator-list');
+    setLoading(list, '正在读取协作者…');
+    return json(collaboratorsPath(repo)).then(function (data) {
+      if (ticket !== seq.access || !state.repo || state.repo.full_name !== repo.full_name) return [];
+      state.collaborators = Array.isArray(data.collaborators) ? data.collaborators : [];
+      renderCollaborators();
+      return state.collaborators;
+    }).catch(function (error) {
+      if (ticket !== seq.access) return [];
+      state.collaborators = [];
+      setError(list, error.message);
+      throw error;
+    });
+  }
+
+  function putCollaborator(repo, username, permission) {
+    return api(collaboratorsPath(repo) + '/' + encodeURIComponent(username), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ permission: permission }),
+    }).then(function (response) { return response.json(); });
+  }
+
+  function removeCollaborator(repo, username) {
+    return api(collaboratorsPath(repo) + '/' + encodeURIComponent(username), {
+      method: 'DELETE',
+    });
+  }
+
+  function collaboratorError(error) {
+    var detail = (error && error.detail) || '';
+    var known = [
+      ['no such user', '账号不存在'],
+      ['permission must be read or write', '权限只能是只读或可写'],
+      ['the repository owner already has full access', '仓库所有者不需要添加为协作者'],
+      ['account is not a collaborator', '这个账号不是协作者'],
+      ['only the owner or an administrator may manage collaborators', '只有仓库所有者或管理员可以管理协作者'],
+    ];
+    for (var i = 0; i < known.length; i += 1) {
+      if (detail.indexOf(known[i][0]) !== -1) return known[i][1];
+    }
+    return detailMessage(error);
+  }
+
+  function renderCollaborators() {
+    var list = $('collaborator-list');
+    list.textContent = '';
+    if (!state.collaborators.length) {
+      setError(list, '还没有协作者');
+      return;
+    }
+    state.collaborators.forEach(function (item) {
+      var row = document.createElement('div');
+      row.className = 'collaborator-row';
+      var name = document.createElement('strong');
+      name.className = 'collaborator-name';
+      name.textContent = item.username;
+      row.appendChild(name);
+      var permission = document.createElement('select');
+      permission.className = 'collaborator-permission';
+      permission.setAttribute('aria-label', item.username + ' 的权限');
+      [['read', '只读'], ['write', '可写']].forEach(function (optionData) {
+        var option = document.createElement('option');
+        option.value = optionData[0];
+        option.textContent = optionData[1];
+        option.selected = item.permission === optionData[0];
+        permission.appendChild(option);
+      });
+      row.appendChild(permission);
+      var save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'button button-quiet';
+      save.textContent = '保存';
+      save.addEventListener('click', function () {
+        save.disabled = true;
+        putCollaborator(state.repo, item.username, permission.value)
+          .then(function () { showToast('协作者权限已更新'); return loadCollaborators(state.repo); })
+          .catch(function (error) { $('collaborator-message').textContent = collaboratorError(error); })
+          .finally(function () { save.disabled = false; });
+      });
+      row.appendChild(save);
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'button button-danger';
+      remove.textContent = '移除';
+      remove.addEventListener('click', function () {
+        remove.disabled = true;
+        removeCollaborator(state.repo, item.username)
+          .then(function () { showToast('已移除协作者'); return loadCollaborators(state.repo); })
+          .catch(function (error) { $('collaborator-message').textContent = collaboratorError(error); })
+          .finally(function () { remove.disabled = false; });
+      });
+      row.appendChild(remove);
+      list.appendChild(row);
+    });
+  }
+
+  function openCollaborators() {
+    if (!state.repo) return;
+    $('collaborator-message').textContent = '';
+    $('collaborator-user').value = '';
+    $('collaborator-permission').value = 'read';
+    $('access-dialog').showModal();
+    $('collaborator-user').focus();
+    loadCollaborators(state.repo).catch(function () {});
+  }
+
+  function issuesPath(repo, suffix) {
+    return '/api/v1/repos/' + encodeURIComponent(repo.owner) + '/' +
+      encodeURIComponent(repo.name) + '/issues' + (suffix || '');
+  }
+
+  function issueError(error) {
+    var detail = (error && error.detail) || '';
+    var known = [
+      ['issue title is required', '请输入 Issue 标题'],
+      ['issue title must be at most', 'Issue 标题太长了'],
+      ['issue body must be at most', 'Issue 描述太长了'],
+      ['issue state must be open, closed or all', 'Issue 状态不正确'],
+      ['issue state must be open or closed', 'Issue 状态不正确'],
+      ['comment body is required', '请输入评论内容'],
+      ['only the issue author, a collaborator with write access, or an administrator may update', '只有作者、可写协作者或管理员可以修改 Issue'],
+      ['no such issue', 'Issue 不存在'],
+    ];
+    for (var i = 0; i < known.length; i += 1) {
+      if (detail.indexOf(known[i][0]) !== -1) return known[i][1];
+    }
+    return detailMessage(error);
+  }
+
+  function loadIssues(view) {
+    if (!state.repo) return Promise.resolve([]);
+    var repo = state.repo;
+    var ticket = (seq.issues += 1);
+    var list = $('issue-list');
+    $('issue-detail').hidden = true;
+    setLoading(list, '正在读取 Issues…');
+    return json(issuesPath(repo, '?state=' + encodeURIComponent(state.issueState))).then(function (data) {
+      if (!viewIsCurrent(view) || ticket !== seq.issues || !state.repo || state.repo.full_name !== repo.full_name) return [];
+      state.issues = Array.isArray(data.issues) ? data.issues : [];
+      renderIssues();
+      return state.issues;
+    }).catch(function (error) {
+      if (!viewIsCurrent(view) || ticket !== seq.issues) return [];
+      state.issues = [];
+      setError(list, error.message);
+      return [];
+    });
+  }
+
+  function renderIssues() {
+    var list = $('issue-list');
+    list.textContent = '';
+    if (!state.issues.length) {
+      setError(list, state.issueState === 'open' ? '还没有开放的 Issue' : '没有符合条件的 Issue');
+      return;
+    }
+    state.issues.forEach(function (issue) {
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'issue-row' + (state.issue && state.issue.number === issue.number ? ' active' : '');
+      var number = document.createElement('span');
+      number.className = 'issue-number';
+      number.textContent = '#' + issue.number;
+      row.appendChild(number);
+      var copy = document.createElement('span');
+      copy.className = 'issue-row-copy';
+      var title = document.createElement('strong');
+      title.className = 'issue-row-title';
+      title.textContent = issue.title;
+      copy.appendChild(title);
+      var meta = document.createElement('span');
+      meta.className = 'issue-row-meta';
+      meta.textContent = issue.author + ' · ' + formatDate(issue.updated_at) + ' · ' + (issue.comment_count || 0) + ' 条评论';
+      copy.appendChild(meta);
+      row.appendChild(copy);
+      var statePill = document.createElement('span');
+      statePill.className = 'issue-state-pill' + (issue.state === 'closed' ? ' closed' : '');
+      statePill.textContent = issue.state === 'closed' ? '已关闭' : '开放';
+      row.appendChild(statePill);
+      row.addEventListener('click', function () { loadIssue(issue.number); });
+      list.appendChild(row);
+    });
+  }
+
+  function loadIssue(number) {
+    if (!state.repo) return;
+    var repo = state.repo;
+    var ticket = (seq.issue += 1);
+    var detail = $('issue-detail');
+    detail.hidden = false;
+    $('issue-detail-title').textContent = '正在读取…';
+    $('issue-detail-body').textContent = '';
+    $('issue-comments').textContent = '';
+    $('issue-comment-form').hidden = true;
+    return json(issuesPath(repo, '/' + encodeURIComponent(number))).then(function (issue) {
+      if (ticket !== seq.issue || !state.repo || state.repo.full_name !== repo.full_name) return null;
+      state.issue = issue;
+      renderIssue(issue);
+      renderIssues();
+      detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return issue;
+    }).catch(function (error) {
+      if (ticket !== seq.issue) return null;
+      state.issue = null;
+      detail.hidden = true;
+      setError($('issue-list'), issueError(error));
+      return null;
+    });
+  }
+
+  function renderIssue(issue) {
+    $('issue-detail-title').textContent = '#' + issue.number + ' ' + issue.title;
+    $('issue-detail-meta').textContent = issue.author + ' · ' + formatDate(issue.created_at);
+    $('issue-detail-body').textContent = issue.body || '没有描述';
+    $('issue-comment-count').textContent = (issue.comments || []).length + ' 条';
+    var comments = $('issue-comments');
+    comments.textContent = '';
+    (issue.comments || []).forEach(function (comment) {
+      var item = document.createElement('article');
+      item.className = 'issue-comment';
+      var meta = document.createElement('div');
+      meta.className = 'issue-comment-meta';
+      meta.textContent = comment.author + ' · ' + formatDate(comment.created_at);
+      item.appendChild(meta);
+      var body = document.createElement('div');
+      body.className = 'issue-comment-body';
+      body.textContent = comment.body;
+      item.appendChild(body);
+      comments.appendChild(item);
+    });
+    var canEdit = !!state.username &&
+      (state.username === issue.author || (state.repo && state.repo.owner === state.username));
+    var toggle = $('issue-toggle-state');
+    toggle.hidden = !canEdit;
+    toggle.textContent = issue.state === 'open' ? '关闭 Issue' : '重新打开';
+    $('issue-comment-form').hidden = !state.username;
+  }
+
+  function openIssueDialog() {
+    if (!state.repo || !state.username) return;
+    $('issue-message').textContent = '';
+    $('issue-title').value = '';
+    $('issue-body').value = '';
+    $('issue-dialog').showModal();
+    $('issue-title').focus();
+  }
+
+  function createIssue(repo, title, body) {
+    return api(issuesPath(repo), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title, body: body }),
+    }).then(function (response) { return response.json(); });
+  }
+
+  function updateIssue(repo, number, stateValue) {
+    return api(issuesPath(repo, '/' + encodeURIComponent(number)), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: stateValue }),
+    }).then(function (response) { return response.json(); });
+  }
+
+  function createIssueComment(repo, number, body) {
+    return api(issuesPath(repo, '/' + encodeURIComponent(number) + '/comments'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: body }),
+    }).then(function (response) { return response.json(); });
+  }
+
   function closeRepoView() {
     beginView();
     state.repo = null;
+    state.collaborators = [];
+    state.issues = [];
+    state.issue = null;
+    if ($('access-dialog').open) $('access-dialog').close();
     $('repo-view').hidden = true;
     $('empty-state').hidden = false;
     syncWriteActions();
@@ -509,6 +803,11 @@
   function selectRepo(repo) {
     var view = beginView();
     state.repo = repo;
+    state.collaborators = [];
+    state.issues = [];
+    state.issue = null;
+    state.issueState = 'open';
+    $('issue-state').value = 'open';
     state.branch = repo.default_branch || 'main';
     state.path = '';
     state.commitSkip = 0;
@@ -798,6 +1097,8 @@
     $$('.view-tab').forEach(function (tab) { tab.classList.toggle('active', tab.dataset.view === view); });
     $('code-view').hidden = view !== 'code';
     $('commits-view').hidden = view !== 'commits';
+    $('issues-view').hidden = view !== 'issues';
+    if (view === 'issues' && state.repo) loadIssues(seq.view);
   }
 
   function openAuth() {
@@ -833,6 +1134,8 @@
   });
   $('new-repo').addEventListener('click', openCreate);
   $('edit-repo').addEventListener('click', openEdit);
+  $('manage-access').addEventListener('click', openCollaborators);
+  $('new-issue').addEventListener('click', openIssueDialog);
   $('delete-repo').addEventListener('click', openDelete);
   $('create-form').addEventListener('submit', function (event) {
     event.preventDefault();
@@ -898,6 +1201,83 @@
       })
       .catch(function (error) { $('edit-message').textContent = detailMessage(error); })
       .finally(function () { $('edit-submit').disabled = false; });
+  });
+  $('collaborator-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var repo = state.repo;
+    var username = $('collaborator-user').value.trim();
+    if (!repo || !username) return;
+    $('collaborator-submit').disabled = true;
+    $('collaborator-message').textContent = '';
+    putCollaborator(repo, username, $('collaborator-permission').value)
+      .then(function () {
+        $('collaborator-user').value = '';
+        showToast('已添加协作者');
+        return loadCollaborators(repo);
+      })
+      .catch(function (error) { $('collaborator-message').textContent = collaboratorError(error); })
+      .finally(function () { $('collaborator-submit').disabled = false; });
+  });
+  $('access-dialog').addEventListener('close', function () { seq.access += 1; });
+  $('issue-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var repo = state.repo;
+    var title = $('issue-title').value.trim();
+    if (!repo || !title) {
+      $('issue-message').textContent = '请输入 Issue 标题';
+      return;
+    }
+    $('issue-submit').disabled = true;
+    $('issue-message').textContent = '';
+    createIssue(repo, title, $('issue-body').value)
+      .then(function (issue) {
+        $('issue-dialog').close();
+        state.issueState = 'open';
+        $('issue-state').value = 'open';
+        showToast('已创建 Issue #' + issue.number);
+        return loadIssues(seq.view).then(function () { return loadIssue(issue.number); });
+      })
+      .catch(function (error) { $('issue-message').textContent = issueError(error); })
+      .finally(function () { $('issue-submit').disabled = false; });
+  });
+  $('issue-state').addEventListener('change', function (event) {
+    state.issueState = event.target.value;
+    state.issue = null;
+    $('issue-detail').hidden = true;
+    if (state.repo) loadIssues(seq.view);
+  });
+  $('issue-toggle-state').addEventListener('click', function () {
+    if (!state.repo || !state.issue) return;
+    var issue = state.issue;
+    var nextState = issue.state === 'open' ? 'closed' : 'open';
+    $('issue-toggle-state').disabled = true;
+    updateIssue(state.repo, issue.number, nextState)
+      .then(function (updated) {
+        state.issue = updated;
+        renderIssue(updated);
+        showToast(nextState === 'open' ? 'Issue 已重新打开' : 'Issue 已关闭');
+        return loadIssues(seq.view);
+      })
+      .catch(function (error) { $('issue-detail-meta').textContent = issueError(error); })
+      .finally(function () { $('issue-toggle-state').disabled = false; });
+  });
+  $('issue-comment-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (!state.repo || !state.issue) return;
+    var body = $('issue-comment-body').value.trim();
+    if (!body) return;
+    var repo = state.repo;
+    var number = state.issue.number;
+    var submit = event.target.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    createIssueComment(repo, number, body)
+      .then(function () {
+        $('issue-comment-body').value = '';
+        showToast('评论已发布');
+        return loadIssue(number);
+      })
+      .catch(function (error) { $('issue-detail-meta').textContent = issueError(error); })
+      .finally(function () { submit.disabled = false; });
   });
   $('copy-clone').addEventListener('click', copyCloneUrl);
   $('copy-push').addEventListener('click', function () {
