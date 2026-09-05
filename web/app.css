@@ -7,6 +7,7 @@
   --line: #26384a;
   --line-soft: #1c2a38;
   --text: #e6edf3;
+  --text-soft: #c8d6e2;
   --muted: #8da0b3;
   --dim: #62758a;
   --accent: #58d5c9;
@@ -14,6 +15,12 @@
   --warning: #f4c36a;
   --danger: #ff8f8f;
   --shadow: 0 22px 60px rgba(0, 0, 0, .28);
+  --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  /* A repository page is a column of text, and a column of text that runs the
+     full width of a 27" monitor is unreadable — the title ends up a screen away
+     from the buttons that act on it. Both gitea and GitHub cap the page rather
+     than the window; this is that cap. */
+  --page-max: 1180px;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
@@ -109,7 +116,7 @@ h1, h2, h3, p { margin-top: 0; }
 .empty-state p:last-child { color: var(--muted); font-size: 13px; }
 
 .repo-heading { display: flex; justify-content: space-between; gap: 22px; align-items: flex-end; border-bottom: 1px solid var(--line-soft); padding-bottom: 24px; }
-.crumbs { color: var(--muted); font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 11px; margin-bottom: 12px; }
+.crumbs { color: var(--muted); font-family: var(--mono); font-size: 11px; margin-bottom: 12px; }
 .crumbs span { color: var(--dim); }
 .repo-heading h2 { font-size: clamp(25px, 3vw, 34px); letter-spacing: -.045em; margin: 0 0 8px; }
 .repo-description { color: var(--muted); font-size: 13px; margin: 0; max-width: 680px; }
@@ -119,17 +126,25 @@ h1, h2, h3, p { margin-top: 0; }
   flex: 1; min-width: 0;
   background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 8px;
   color: var(--muted); padding: 7px 10px;
-  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 11px;
+  font-family: var(--mono); font-size: 11px;
 }
 .clone-row input:focus { outline: none; border-color: var(--line); color: var(--text); }
 
 .repo-heading-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
 .visibility-pill { border: 1px solid rgba(88, 213, 201, .27); color: var(--accent); background: rgba(88, 213, 201, .08); border-radius: 999px; padding: 5px 10px; font-size: 10px; }
 .visibility-pill.private { border-color: rgba(244, 195, 106, .28); color: var(--warning); background: rgba(244, 195, 106, .08); }
-.branch-note { color: var(--dim); font-family: monospace; font-size: 11px; }
+.branch-note { color: var(--dim); font-family: var(--mono); font-size: 11px; }
+
+/* The repository page is capped rather than the window; --page-max says why. */
+#repo-view { max-width: var(--page-max); margin: 0 auto; }
 
 .view-tabs { display: flex; gap: 20px; margin: 24px 0 14px; border-bottom: 1px solid var(--line-soft); }
-.view-tab { border: 0; border-bottom: 2px solid transparent; padding: 0 2px 12px; margin-bottom: -1px; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; }
+.view-tab { display: inline-flex; align-items: center; gap: 7px; border: 0; border-bottom: 2px solid transparent; padding: 0 2px 12px; margin-bottom: -1px; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; }
+/* Drawn here rather than pulled in: three glyphs is not a reason to take on an
+   icon set, and these have to inherit the tab's colour anyway. */
+.tab-icon { flex: 0 0 auto; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.tab-count { min-width: 20px; border-radius: 999px; padding: 1px 7px; background: var(--panel-3); color: var(--muted); font-size: 10px; font-weight: 600; text-align: center; }
+.view-tab.active .tab-count { background: rgba(88, 213, 201, .14); color: var(--accent); }
 .view-tab:hover, .view-tab.active { color: var(--text); }
 .view-tab.active { border-color: var(--accent); }
 .toolbar { display: flex; align-items: center; gap: 13px; min-height: 43px; margin-bottom: 14px; }
@@ -138,7 +153,18 @@ h1, h2, h3, p { margin-top: 0; }
 .branch-select select:focus { border-color: var(--accent); }
 .toolbar-spacer { flex: 1; }
 .toolbar-title { color: var(--text); font-size: 14px; font-weight: 650; }
-.path-label { color: var(--muted); font-family: monospace; font-size: 11px; }
+.path-label { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+
+/* Where you are, as the path you took to get there. Every segment but the last
+   is a button, so any level above the current one is one click away — which is
+   what replaced the single "up one level" button that could only ever undo the
+   last step. */
+.path-crumbs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; font-family: var(--mono); font-size: 12px; }
+.crumb { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; border-radius: 6px; padding: 4px 6px; background: transparent; color: var(--accent); cursor: pointer; font: inherit; }
+.crumb:hover { background: var(--panel-2); }
+.crumb.current { flex-shrink: 0; color: var(--text); font-weight: 650; cursor: default; }
+.crumb.current:hover { background: transparent; }
+.crumb-sep { flex: 0 0 auto; color: var(--dim); }
 
 .button { border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer; font-size: 12px; background: var(--panel); }
 .button:hover { border-color: var(--accent); background: var(--panel-2); }
@@ -163,10 +189,16 @@ h1, h2, h3, p { margin-top: 0; }
 .first-push { border: 1px solid rgba(88, 213, 201, .28); border-radius: 12px; padding: 22px; background: linear-gradient(135deg, rgba(88, 213, 201, .08), rgba(17, 26, 36, .86) 65%); box-shadow: var(--shadow); }
 .first-push h3 { margin: 5px 0 8px; font-size: 17px; letter-spacing: -.02em; }
 .first-push p:not(.eyebrow) { max-width: 650px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.setup-commands { margin: 16px 0; padding: 14px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--accent-2); background: rgba(7, 13, 20, .65); font: 11px/1.7 "Cascadia Code", "SFMono-Regular", Consolas, monospace; white-space: pre; }
+.setup-commands { margin: 16px 0; padding: 14px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--accent-2); background: rgba(7, 13, 20, .65); font: 11px/1.7 var(--mono); white-space: pre; }
 .first-push-actions { display: flex; gap: 9px; flex-wrap: wrap; }
 .card-caption { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); color: var(--text); font-size: 12px; font-weight: 600; }
 .tree-list { min-height: 64px; }
+/* Every row in this file and the commit list is a <button>, and a button that
+   is not told otherwise keeps the platform's own chrome: a grey face, a 1.6px
+   outset border, and — under `display: flex` — a shrink-to-fit width, which is
+   what made these rows a staircase of grey boxes instead of a list. `.repo-item`
+   in the sidebar has always reset all three; these two never did. */
+.tree-row, .commit-row { appearance: none; width: 100%; border: 0; background: transparent; color: inherit; text-align: left; }
 .tree-row { display: flex; align-items: center; gap: 12px; min-height: 49px; padding: 0 16px; border-bottom: 1px solid var(--line-soft); cursor: pointer; }
 .tree-row:last-child { border-bottom: 0; }
 .tree-row:hover { background: rgba(88, 213, 201, .055); }
@@ -174,14 +206,32 @@ h1, h2, h3, p { margin-top: 0; }
 .tree-row.file .tree-icon { color: var(--accent-2); }
 .tree-name { min-width: 0; flex: 1; font-size: 12px; }
 .tree-name strong { font-weight: 600; }
-.tree-path { color: var(--dim); font-family: monospace; font-size: 10px; }
-.tree-size { color: var(--dim); font-family: monospace; font-size: 10px; }
-.tree-chevron { color: var(--dim); font-size: 14px; }
+.tree-path { color: var(--dim); font-family: var(--mono); font-size: 10px; }
+.tree-size { color: var(--dim); font-family: var(--mono); font-size: 10px; }
+
+/* A file listing answers two questions, and the name only answers one. The
+   second — who last touched this, and when — arrives in its own request, so the
+   columns are laid out empty and filled in when it lands.
+
+   Proportional columns rather than a grid spanning the whole card: each row is
+   its own grid, and `2fr 3fr` is relative to the same card width in every one of
+   them, so they line up without the rows having to give up being buttons. */
+.tree-row.entry { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) 6.5rem; gap: 14px; text-align: left; }
+.tree-entry-name { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.tree-entry-commit { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.tree-entry-age { overflow: hidden; color: var(--dim); font-family: var(--mono); font-size: 11px; text-align: right; white-space: nowrap; }
+.tree-entry-commit.pending, .tree-entry-age.pending { color: var(--line); }
+.tree-row.parent .tree-name { color: var(--muted); }
+
+.tree-latest { display: flex; align-items: baseline; gap: 10px; padding: 11px 16px; border-bottom: 1px solid var(--line-soft); background: rgba(22, 34, 49, .55); font-size: 12px; }
+.tree-latest-author { flex: 0 0 auto; color: var(--text); font-weight: 600; }
+.tree-latest-subject { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.tree-latest-age { flex: 0 0 auto; color: var(--dim); font-family: var(--mono); font-size: 11px; }
 
 .file-panel, .diff-panel { margin-top: 18px; }
 .file-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; padding: 18px 18px 15px; border-bottom: 1px solid var(--line-soft); }
 .file-head h3 { margin: 0; font-size: 15px; letter-spacing: -.01em; word-break: break-all; }
-.code-block, .diff-block { margin: 0; padding: 18px; overflow: auto; color: #d5e1ea; background: #0c141d; font: 12px/1.65 "Cascadia Code", "SFMono-Regular", Consolas, monospace; tab-size: 2; white-space: pre; }
+.code-block, .diff-block { margin: 0; padding: 18px; overflow: auto; color: #d5e1ea; background: #0c141d; font: 12px/1.65 var(--mono); tab-size: 2; white-space: pre; }
 .code-block { max-height: 560px; }
 
 .commit-list { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: rgba(17, 26, 36, .86); box-shadow: var(--shadow); }
@@ -193,7 +243,7 @@ h1, h2, h3, p { margin-top: 0; }
 .commit-dot { width: 8px; height: 8px; margin-top: 5px; border: 2px solid var(--accent-2); border-radius: 50%; box-shadow: 0 0 0 3px rgba(141, 168, 255, .08); }
 .commit-subject { font-size: 13px; line-height: 1.4; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-meta { color: var(--muted); font-size: 10px; }
-.commit-meta code { color: var(--accent-2); font-family: monospace; }
+.commit-meta code { color: var(--accent-2); font-family: var(--mono); }
 .commit-date { color: var(--dim); font-size: 10px; white-space: nowrap; }
 .diff-meta { padding: 12px 18px; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--line-soft); }
 .diff-block { max-height: 620px; }
@@ -278,6 +328,11 @@ h1, h2, h3, p { margin-top: 0; }
   .issue-filter span { display: none; }
   .issue-row { gap: 8px; padding: 10px; }
   .issue-state-pill { display: none; }
+  /* Name and age; at this width the commit subject truncates to nothing useful
+     anyway, and the row is a link to a page that spells it out. */
+  .tree-row.entry { grid-template-columns: minmax(0, 1fr) 5rem; gap: 10px; }
+  .tree-entry-commit { display: none; }
+  .view-tabs { gap: 14px; }
 }
 
 /* Rendered Markdown and coloured source.
@@ -303,7 +358,7 @@ h1, h2, h3, p { margin-top: 0; }
 .md-link { color: var(--accent-2); text-decoration: none; border-bottom: 1px solid rgba(141, 168, 255, .3); cursor: pointer; }
 .md-link:hover { border-bottom-color: var(--accent-2); }
 
-.md-code { padding: 2px 6px; border-radius: 5px; background: rgba(88, 213, 201, .1); color: var(--accent); font: 12px/1.5 "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+.md-code { padding: 2px 6px; border-radius: 5px; background: rgba(88, 213, 201, .1); color: var(--accent); font: 12px/1.5 var(--mono); }
 .md-pre { margin: 0 0 14px; border-radius: 10px; }
 .md-pre .md-code, .md-pre code { padding: 0; background: none; color: inherit; font: inherit; }
 
@@ -334,7 +389,7 @@ h1, h2, h3, p { margin-top: 0; }
 /* Rename, tokens and search. */
 
 .dialog-note { margin: -6px 0 14px; color: var(--muted); font-size: 11px; line-height: 1.6; }
-.dialog-note code { color: var(--accent); font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+.dialog-note code { color: var(--accent); font-family: var(--mono); }
 
 .access-list { min-height: 52px; margin: 0 0 16px; border: 1px solid var(--line-soft); border-radius: 9px; overflow: hidden; }
 .access-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px 12px; border-bottom: 1px solid var(--line-soft); }
@@ -346,7 +401,7 @@ h1, h2, h3, p { margin-top: 0; }
 .search-form input { width: 190px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; color: var(--text); background: var(--bg); outline: 0; font-size: 12px; }
 .search-form input:focus { border-color: var(--accent-2); }
 .search-hit { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 4px; text-align: left; }
-.search-line { display: block; overflow: hidden; text-overflow: ellipsis; white-space: pre; color: var(--muted); font: 11.5px/1.5 "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+.search-line { display: block; overflow: hidden; text-overflow: ellipsis; white-space: pre; color: var(--muted); font: 11.5px/1.5 var(--mono); }
 
 @media (max-width: 860px) {
   .search-form { width: 100%; }

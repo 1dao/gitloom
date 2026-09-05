@@ -80,9 +80,19 @@
           </section>
 
           <nav class="view-tabs" aria-label="仓库视图">
-            <button class="view-tab active" type="button" data-view="code">代码</button>
-            <button class="view-tab" type="button" data-view="commits">提交</button>
-            <button class="view-tab" type="button" data-view="issues">Issues</button>
+            <button class="view-tab active" type="button" data-view="code">
+              <svg class="tab-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.6 3.6 1.4 8l4.2 4.4M10.4 3.6 14.6 8l-4.2 4.4"/></svg>
+              代码
+            </button>
+            <button class="view-tab" type="button" data-view="commits">
+              <svg class="tab-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M.9 8h4M11.1 8h4"/></svg>
+              提交
+            </button>
+            <button class="view-tab" type="button" data-view="issues">
+              <svg class="tab-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/></svg>
+              Issues
+              <span class="tab-count" id="issue-count-badge" hidden></span>
+            </button>
           </nav>
 
           <div id="code-view" class="view-panel">
@@ -91,13 +101,12 @@
                 <span>分支</span>
                 <select id="branch-select" aria-label="选择分支"></select>
               </label>
-              <button class="button button-quiet" id="up-directory" type="button" hidden>↑ 返回上级</button>
+              <nav id="path-crumbs" class="path-crumbs" aria-label="目录路径"></nav>
               <div class="toolbar-spacer"></div>
               <form id="search-form" class="search-form">
                 <input id="search-input" type="search" placeholder="在这个版本里查找" aria-label="在仓库中搜索" autocomplete="off">
                 <button class="button button-quiet" type="submit">查找</button>
               </form>
-              <span id="current-path" class="path-label">/</span>
             </div>
             <div id="search-panel" class="browser-card" hidden>
               <div class="card-caption">
@@ -120,6 +129,11 @@
               <div class="card-caption">
                 <span id="tree-caption">文件</span>
                 <span id="tree-count" class="muted"></span>
+              </div>
+              <div id="tree-latest" class="tree-latest" hidden>
+                <span class="tree-latest-author" id="tree-latest-author"></span>
+                <span class="tree-latest-subject" id="tree-latest-subject"></span>
+                <span class="tree-latest-age" id="tree-latest-age"></span>
               </div>
               <div id="tree-list" class="tree-list"></div>
             </div>

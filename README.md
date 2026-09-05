@@ -341,6 +341,7 @@ Browsing a repository's contents:
 | `GET .../commits/:ref` | one commit, with the files it touched |
 | `GET .../commits/:ref/diff` | `?path=`, bounded unified diff |
 | `GET .../tree/:ref` and `.../tree/:ref/<path>` | directory listing, directories first |
+| `GET .../lastcommits/:ref` and `.../lastcommits/:ref/<path>` | newest commit per entry, from one bounded history walk |
 | `GET .../raw/:ref/<path>` | file contents |
 
 Authentication is HTTP Basic, with either a password or an access token as the

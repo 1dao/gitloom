@@ -2,7 +2,8 @@
 --
 -- Exports: browse_path_ok, browse_decode_path, browse_resolve,
 --          browse_tree, browse_blob_info, browse_blob_file,
---          browse_log, browse_commit, browse_diff, browse_refs, browse_search
+--          browse_log, browse_last_commits, browse_commit, browse_diff,
+--          browse_refs, browse_search
 --
 -- Everything here answers "what is IN this repository", as opposed to repo.lua,
 -- which answers "which repositories are there". All of it shells out; all of it
@@ -286,6 +287,83 @@ function g_exports.browse_log(dir, oid, opts)
     local has_more = opts.lookahead and #out > limit or false
     if has_more then out[#out] = nil end
     return out, nil, { limit = limit, skip = skip, has_more = has_more }
+end
+
+-- How far back the listing walk is willing to look. See browse_last_commits.
+local MAX_LASTCOMMIT_SCAN = 400
+
+-- The newest commit touching each direct child of a directory — the "who last
+-- changed this, and when" column a file listing wants.
+--
+-- ONE process, not one per entry. `git log --name-only` walks newest first and
+-- prints the files each commit touched, so the FIRST time a name appears is by
+-- definition the last commit that changed it. A `git log -1 -- <entry>` per
+-- entry would be exact, but a directory of forty files is then forty forks
+-- through a process pool that is also serving every other request.
+--
+-- Two things this deliberately does not do, both visible as a blank column
+-- rather than a wrong one:
+--
+--   * The walk is capped. A file nobody has touched in MAX_LASTCOMMIT_SCAN
+--     commits comes back unattributed instead of making the listing wait for a
+--     full traversal of a long history.
+--   * --name-only prints nothing for a merge commit, so a change that only ever
+--     landed through one is not attributed to a file either.
+--
+-- Returns an array of { name, commit }, and the newest commit touching the
+-- directory as a whole as the third value.
+function g_exports.browse_last_commits(dir, oid, path)
+    -- %x01 and %x02 rather than the literal control bytes the other formats in
+    -- this file use: git substitutes these itself, so neither byte has to
+    -- survive the trip out through a command line.
+    local fmt = '%x02%H%x01%h%x01%cI%x01%an%x01%s'
+    local args = { 'log', '--format=' .. fmt, '--name-only', '-z',
+                   '--no-renames', '--max-count=' .. MAX_LASTCOMMIT_SCAN,
+                   '--end-of-options', oid }
+    if path ~= '' then
+        args[#args + 1] = '--'
+        args[#args + 1] = path
+    end
+
+    local r = git_exec(args, { cwd = dir, max_capture = 8 * 1024 * 1024 })
+    if not r.ok then return nil, 'could not read the history' end
+
+    local prefix = (path == '' and '' or (path .. '/'))
+    local plen = #prefix
+    local seen, out, latest = {}, {}, nil
+
+    for record in tostring(r.stdout):gmatch('([^' .. RECORD .. ']+)') do
+        -- <header> NUL [ LF <name> NUL ... ]. Neither the header nor a name can
+        -- contain a NUL, which is the whole reason -z is here: an UNQUOTED name
+        -- may contain anything else, newlines included, so nothing but the NUL
+        -- can be trusted to end one.
+        local header, rest = record:match('^([^%z]*)%z(.*)$')
+        if not header then header, rest = record, '' end
+        local f = {}
+        for field in (header .. FIELD):gmatch('([^' .. FIELD .. ']*)' .. FIELD) do
+            f[#f + 1] = field
+        end
+        if f[1] and f[1]:match('^%x+$') then
+            local commit = {
+                oid = f[1], short = f[2], date = f[3],
+                author = f[4] or '', subject = f[5] or '',
+            }
+            if not latest then latest = commit end
+            -- The LF git puts between the header and the first name is not part
+            -- of that name; every other LF in there is.
+            local files = rest:gsub('^\n', '', 1)
+            for name in files:gmatch('([^%z]+)') do
+                if prefix == '' or name:sub(1, plen) == prefix then
+                    local child = name:sub(plen + 1):match('^([^/]+)')
+                    if child and not seen[child] then
+                        seen[child] = true
+                        out[#out + 1] = { name = child, commit = commit }
+                    end
+                end
+            end
+        end
+    end
+    return out, nil, latest
 end
 
 -- One commit, with the list of files it touched.

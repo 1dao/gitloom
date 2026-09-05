@@ -38,6 +38,11 @@
   var seq = { repos: 0, view: 0, file: 0, diff: 0, commits: 0, access: 0, issues: 0, issue: 0, readme: 0 };
   var COMMIT_PAGE_SIZE = 25;
 
+  // The two cells of each file row that the last-commit walk fills in, by entry
+  // name. Replaced wholesale by every listing rather than emptied, so a response
+  // still in flight can tell by identity that its rows are gone.
+  var treeCells = Object.create(null);
+
   var $ = function (id) { return document.getElementById(id); };
   var $$ = function (selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); };
 
@@ -569,6 +574,31 @@
     return detailMessage(error);
   }
 
+  // The count on the Issues tab. Open issues only -- a closed one is not
+  // something the tab is asking you to look at.
+  function setIssueBadge(count) {
+    var badge = $('issue-count-badge');
+    var n = Number(count);
+    if (!Number.isFinite(n) || n <= 0) {
+      badge.hidden = true;
+      badge.textContent = '';
+      return;
+    }
+    badge.textContent = String(n);
+    badge.hidden = false;
+  }
+
+  // Cheap enough to ask for on its own: the list endpoint reports its own count
+  // and this one never touches git. Called when a repository opens, and again
+  // whenever the list is reloaded under a filter that cannot supply the number.
+  function loadIssueBadge(repo) {
+    if (!repo) return Promise.resolve();
+    return json(issuesPath(repo, '?state=open')).then(function (data) {
+      if (!state.repo || state.repo.full_name !== repo.full_name) return;
+      setIssueBadge(data && data.count);
+    }).catch(function () {});
+  }
+
   function loadIssues(view) {
     if (!state.repo) return Promise.resolve([]);
     var repo = state.repo;
@@ -579,6 +609,10 @@
     return json(issuesPath(repo, '?state=' + encodeURIComponent(state.issueState))).then(function (data) {
       if (!viewIsCurrent(view) || ticket !== seq.issues || !state.repo || state.repo.full_name !== repo.full_name) return [];
       state.issues = Array.isArray(data.issues) ? data.issues : [];
+      // This list IS the open list, so it already carries the number; under any
+      // other filter it does not, and the badge has to go and ask.
+      if (state.issueState === 'open') setIssueBadge(data.count);
+      else loadIssueBadge(repo);
       renderIssues();
       return state.issues;
     }).catch(function (error) {
@@ -727,6 +761,7 @@
     state.collaborators = [];
     state.issues = [];
     state.issue = null;
+    setIssueBadge(0);
     if ($('access-dialog').open) $('access-dialog').close();
     $('repo-view').hidden = true;
     $('empty-state').hidden = false;
@@ -873,7 +908,11 @@
     }
     $('diff-panel').hidden = true;
     renderRepos();
+    setIssueBadge(0);
     showView(target.view || 'code');
+    // showView already loaded the list when it opened on Issues, and that sets
+    // the badge itself; asking again here would be the same number twice.
+    if (state.view !== 'issues') loadIssueBadge(repo);
     // A click is what puts the address bar somewhere new, so it writes here,
     // before the network. A restore must NOT: at this point the file has not
     // been fetched and the issue has not been read, so encoding the state now
@@ -990,13 +1029,57 @@
     });
   }
 
+  // Move the listing to a directory. Every way of getting there -- a row, a
+  // breadcrumb, the `..` row -- is the same three steps, and they were drifting
+  // apart when each caller spelled them out.
+  function openDirectory(path) {
+    var view = beginView();
+    state.path = path || '';
+    hideFile();
+    routeWrite();
+    loadTree(view);
+  }
+
+  // `<repo> / dir / subdir`, the last segment plain text because it is where
+  // you already are. Built rather than assembled as markup for the same reason
+  // renderCrumbs is: these are path segments out of somebody's repository.
+  function renderPathCrumbs() {
+    var nav = $('path-crumbs');
+    nav.textContent = '';
+    if (!state.repo) return;
+    var segments = (state.path || '').split('/').filter(Boolean);
+
+    function crumb(label, path, current) {
+      var node = document.createElement(current ? 'span' : 'button');
+      node.className = 'crumb' + (current ? ' current' : '');
+      node.textContent = label;
+      if (!current) {
+        node.type = 'button';
+        node.addEventListener('click', function () { openDirectory(path); });
+      }
+      nav.appendChild(node);
+    }
+
+    crumb(state.repo.name, '', segments.length === 0);
+    segments.forEach(function (name, index) {
+      var separator = document.createElement('span');
+      separator.className = 'crumb-sep';
+      separator.textContent = '/';
+      nav.appendChild(separator);
+      crumb(name, segments.slice(0, index + 1).join('/'), index === segments.length - 1);
+    });
+  }
+
   function loadTree(view) {
     var list = $('tree-list');
     var path = encodePath(state.path);
     var suffix = '/tree/' + encodeRef(state.branch) + (path ? '/' + path : '');
     setLoading(list, '正在读取文件树…');
-    $('current-path').textContent = '/' + (state.path || '');
-    $('up-directory').hidden = !state.path;
+    renderPathCrumbs();
+    // Cells belonging to the directory being left; the last-commit response for
+    // it must not land in the rows of the one being entered.
+    treeCells = Object.create(null);
+    $('tree-latest').hidden = true;
     return json(repoPath(suffix)).then(function (data) {
       if (!viewIsCurrent(view)) return [];
       var entries = Array.isArray(data.entries) ? data.entries : [];
@@ -1007,7 +1090,11 @@
         setError(list, '这个目录是空的');
         return entries;
       }
+      if (state.path) renderParentRow(list);
       entries.forEach(function (entry) { renderTreeEntry(entry, list); });
+      // Neither of these is waited on: the listing is already readable, and both
+      // only add to it.
+      loadLastCommits(view);
       // Whatever directory is on screen, its own README goes under it -- which
       // is the whole point for the repository root, and costs nothing anywhere
       // else. Not waited on: the listing should not sit blank behind it.
@@ -1031,40 +1118,134 @@
     return (n / 1024 / 1024 / 1024).toFixed(1) + ' GB';
   }
 
+  // The row above the listing, one level up. The breadcrumb reaches any
+  // ancestor, but the step people actually take is the one back, and having it
+  // in the list means the pointer does not have to leave it.
+  function renderParentRow(list) {
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'tree-row parent';
+    var icon = document.createElement('span');
+    icon.className = 'tree-icon';
+    icon.textContent = '↰';
+    row.appendChild(icon);
+    var name = document.createElement('span');
+    name.className = 'tree-name';
+    name.textContent = '..';
+    row.appendChild(name);
+    row.addEventListener('click', function () {
+      openDirectory(state.path.replace(/\/?[^\/]*$/, ''));
+    });
+    list.appendChild(row);
+  }
+
   function renderTreeEntry(entry, list) {
     var row = document.createElement('button');
     row.type = 'button';
-    row.className = 'tree-row ' + (entry.type === 'tree' ? 'directory' : 'file');
+    row.className = 'tree-row entry ' + (entry.type === 'tree' ? 'directory' : 'file');
+
+    var cell = document.createElement('span');
+    cell.className = 'tree-entry-name';
     var icon = document.createElement('span');
     icon.className = 'tree-icon';
     icon.textContent = entry.type === 'tree' ? '▱' : '·';
-    row.appendChild(icon);
+    cell.appendChild(icon);
     var name = document.createElement('span');
     name.className = 'tree-name';
     var strong = document.createElement('strong');
     strong.textContent = entry.name;
     name.appendChild(strong);
-    row.appendChild(name);
+    cell.appendChild(name);
     var size = document.createElement('span');
     size.className = 'tree-size';
     size.textContent = entry.type === 'blob' ? formatBytes(entry.size) : '';
-    row.appendChild(size);
-    var chevron = document.createElement('span');
-    chevron.className = 'tree-chevron';
-    chevron.textContent = entry.type === 'tree' ? '›' : '';
-    row.appendChild(chevron);
+    cell.appendChild(size);
+    row.appendChild(cell);
+
+    // Both columns start empty and are filled by loadLastCommits. They stay
+    // empty if it fails, and also if it ran but did not reach far enough back to
+    // find this entry -- see the cap in browse_last_commits. Blank is the honest
+    // answer for both, and neither is worth failing a listing over.
+    var message = document.createElement('span');
+    message.className = 'tree-entry-commit pending';
+    message.textContent = '…';
+    row.appendChild(message);
+    var age = document.createElement('span');
+    age.className = 'tree-entry-age pending';
+    row.appendChild(age);
+    // A directory can hold a file called `__proto__`, so this map has no
+    // prototype to collide with.
+    treeCells[entry.name] = { message: message, age: age };
+
     row.addEventListener('click', function () {
       if (entry.type === 'tree') {
-        var view = beginView();
-        state.path = entry.path;
-        hideFile();
-        loadTree(view);
+        openDirectory(entry.path);
       } else {
         loadFile(entry.path);
+        routeWrite();
       }
-      routeWrite();
     });
     list.appendChild(row);
+  }
+
+  // Clear whatever is still showing the placeholder: either the walk did not
+  // reach these entries or it never arrived at all.
+  function settlePendingCells() {
+    Object.keys(treeCells).forEach(function (key) {
+      var cells = treeCells[key];
+      if (cells.message.className.indexOf('pending') === -1) return;
+      cells.message.className = 'tree-entry-commit';
+      cells.message.textContent = '';
+      cells.age.className = 'tree-entry-age';
+    });
+  }
+
+  function renderTreeLatest(commit) {
+    var strip = $('tree-latest');
+    if (!commit) {
+      strip.hidden = true;
+      return;
+    }
+    $('tree-latest-author').textContent = commit.author || '';
+    var subject = $('tree-latest-subject');
+    subject.textContent = commit.subject || '';
+    subject.title = commit.subject || '';
+    var age = $('tree-latest-age');
+    age.textContent = relativeTime(commit.date);
+    age.title = formatDate(commit.date);
+    strip.hidden = false;
+  }
+
+  // The other half of a file listing: what last changed each entry. Its own
+  // request because on the server it is a history walk and the listing is not --
+  // the names are on screen before this is even asked for. A failure here fills
+  // nothing in; it does not take the directory down with it.
+  function loadLastCommits(view) {
+    var path = encodePath(state.path);
+    var suffix = '/lastcommits/' + encodeRef(state.branch) + (path ? '/' + path : '');
+    var cells = treeCells;
+    return json(repoPath(suffix)).then(function (data) {
+      // Both tests: the ticket catches a directory left behind, and the identity
+      // check catches a listing reloaded in place under the same one.
+      if (!viewIsCurrent(view) || cells !== treeCells) return;
+      var entries = Array.isArray(data.entries) ? data.entries : [];
+      entries.forEach(function (item) {
+        if (!item || !item.commit) return;
+        var target = Object.prototype.hasOwnProperty.call(cells, item.name) ? cells[item.name] : null;
+        if (!target) return;
+        target.message.className = 'tree-entry-commit';
+        target.message.textContent = item.commit.subject || '';
+        target.message.title = item.commit.subject || '';
+        target.age.className = 'tree-entry-age';
+        target.age.textContent = relativeTime(item.commit.date);
+        target.age.title = formatDate(item.commit.date);
+      });
+      settlePendingCells();
+      renderTreeLatest(data.latest);
+    }).catch(function () {
+      if (!viewIsCurrent(view) || cells !== treeCells) return;
+      settlePendingCells();
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1530,6 +1711,31 @@
     // every issue in the list has been dated until now.
     var date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
     return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  }
+
+  // "3 天前" rather than a timestamp, for the columns where the question is how
+  // stale something is and not exactly when it happened. The exact time is on
+  // the title attribute of every one of them, because sometimes it is.
+  //
+  // Rounded DOWN at every step: "1 天前" for something 23 hours old reads as a
+  // day of staleness that has not happened yet.
+  function relativeTime(value) {
+    if (!value) return '';
+    var date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    // A commit stamped in the future is a committer's clock, not an error, and
+    // is not worth a special case beyond not printing a negative number.
+    var seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (seconds < 60) return '刚刚';
+    var minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + ' 分钟前';
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + ' 小时前';
+    var days = Math.floor(hours / 24);
+    if (days < 30) return days + ' 天前';
+    var months = Math.floor(days / 30);
+    if (months < 12) return months + ' 个月前';
+    return Math.floor(months / 12) + ' 年前';
   }
 
   function loadDiff(commit) {
@@ -2025,15 +2231,6 @@
     seq.diff += 1;
     $('diff-panel').hidden = true;
     loadCommits(seq.view, state.commitSkip + COMMIT_PAGE_SIZE);
-  });
-  $('up-directory').addEventListener('click', function () {
-    var view = beginView();
-    var parts = state.path.split('/');
-    parts.pop();
-    state.path = parts.join('/');
-    hideFile();
-    routeWrite();
-    loadTree(view);
   });
   $('close-file').addEventListener('click', function () { hideFile(); routeWrite(); });
   // The source is already in hand, so this is a re-render rather than a fetch.

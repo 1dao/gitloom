@@ -38,6 +38,7 @@
 --   GET    /api/v1/repos/:owner/:name/commits/:oid
 --   GET    /api/v1/repos/:owner/:name/commits/:oid/diff  ?path=
 --   GET    /api/v1/repos/:owner/:name/tree/:ref/*path   directory listing
+--   GET    /api/v1/repos/:owner/:name/lastcommits/:ref/*path  per-entry history
 --   GET    /api/v1/repos/:owner/:name/raw/:ref/*path    file contents
 --   GET    /api/v1/repos/:owner/:name/search           ?q= &ref= &limit=
 
@@ -774,6 +775,31 @@ local function h_tree(req, ctx)
     })
 end
 
+-- GET /api/v1/repos/:owner/:name/lastcommits/:ref/*path
+--
+-- The "last changed by" column of a file listing, split off from the tree
+-- itself because it costs a history walk and a listing does not. The browser
+-- paints the names as soon as the tree lands and fills this in when it arrives,
+-- so a slow or failed walk leaves a column blank instead of a directory
+-- unreadable — which is the entire reason it is a second request.
+local function h_last_commits(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+
+    local oid, refused = resolve_ref(dir, rec, ctx.params.ref)
+    if not oid then return refused end
+
+    local path, perr = browse_decode_path(ctx.params.path)
+    if path == nil then return http_response_error(400, perr) end
+
+    local entries, err, latest = browse_last_commits(dir, oid, path)
+    if not entries then return http_response_error(500, http_safe_error(err)) end
+    return http_response_json(200, {
+        ref = refused, oid = oid, path = path,
+        entries = util_json_array(entries), latest = latest,
+    })
+end
+
 -- GET /api/v1/repos/:owner/:name/search?q=...&ref=...
 --
 -- Behind readable_repo, so searching a private repository needs the same access
@@ -899,6 +925,8 @@ function g_exports.api_install()
     http_get('/api/v1/repos/:owner/:name/commits/:oid/diff', h_commit_diff)
     http_get('/api/v1/repos/:owner/:name/tree/:ref', h_tree)
     http_get('/api/v1/repos/:owner/:name/tree/:ref/*path', h_tree)
+    http_get('/api/v1/repos/:owner/:name/lastcommits/:ref', h_last_commits)
+    http_get('/api/v1/repos/:owner/:name/lastcommits/:ref/*path', h_last_commits)
     http_get('/api/v1/repos/:owner/:name/raw/:ref/*path', h_raw)
     http_get('/api/v1/repos/:owner/:name/search', h_search)
 

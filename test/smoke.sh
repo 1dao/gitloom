@@ -697,6 +697,42 @@ curl -s "$DEMO/tree/main/src" | grep -q '"name":"app.lua"' \
 first=$(curl -s "$DEMO/tree/main" | sed -n 's/.*"entries":\[{[^}]*"type":"\([a-z]*\)".*/\1/p')
 check 'tree sorts directories first' "$first" 'tree'
 
+# The listing's second column: the newest commit touching each entry, from one
+# history walk rather than a `git log -1` per file. Two commits exist here --
+# 'initial commit' touched README.md, src/app.lua and binary.dat, and 'second'
+# touched only README.md -- so the two answers have to differ, and a walk that
+# simply attributed the tip commit to everything would pass a weaker assertion.
+L="$DEMO/lastcommits/main"
+curl -s "$L" | tr ',' '\n' | grep -q '"subject":"second"' \
+    && ok 'last commit is reported for a changed file' \
+    || bad 'last commit is reported for a changed file' "$(curl -s "$L")"
+curl -s "$L" | tr ',' '\n' | grep -q '"subject":"initial commit"' \
+    && ok 'an untouched entry keeps its older commit' \
+    || bad 'an untouched entry keeps its older commit' "$(curl -s "$L")"
+# A directory is attributed by what happened INSIDE it: `src` itself never
+# appears in a commit, only src/app.lua does.
+curl -s "$L" | grep -q '"name":"src"' \
+    && ok 'a directory is attributed by its contents' \
+    || bad 'a directory is attributed by its contents' "$(curl -s "$L")"
+curl -s "$L" | grep -q '"latest"' \
+    && ok 'the directory reports its own newest commit' \
+    || bad 'the directory reports its own newest commit' "$(curl -s "$L")"
+# Scoped to the subdirectory, and to its direct children only.
+curl -s "$L/src" | grep -q '"name":"app.lua"' \
+    && ok 'last commits scope to a subdirectory' \
+    || bad 'last commits scope to a subdirectory' "$(curl -s "$L/src")"
+if curl -s "$L/src" | grep -q '"name":"README.md"'; then
+    bad 'a subdirectory listing excludes its siblings' "$(curl -s "$L/src")"
+else
+    ok 'a subdirectory listing excludes its siblings'
+fi
+# Same ref and path handling as every other browsing route: both are resolved by
+# the same code, and both are hostile input.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$DEMO/lastcommits/no-such-ref")
+check 'last commits on an unknown ref is a 404' "$code" '404'
+code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/lastcommits/main/../../etc")
+check 'last commits refuses a traversing path' "$code" '400'
+
 curl -s "$DEMO/raw/main/README.md" | grep -q 'hello gitloom' \
     && ok 'raw serves file contents' || bad 'raw serves file contents' "$(curl -s "$DEMO/raw/main/README.md" | head -c 60)"
 
@@ -762,7 +798,7 @@ for pth in '..%2f..%2fgitloom.cfg' '%2e%2e/%2e%2e/etc/passwd' '.git/config' '-rf
 done
 
 # Browsing obeys the same visibility rule as the transport.
-for ep in branches tags commits tree/main; do
+for ep in branches tags commits tree/main lastcommits/main; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/repos/admin/secret/$ep")
     check "private repo hidden from browsing: $ep" "$code" '404'
 done
