@@ -31,7 +31,7 @@ local ASSET_VERSION = 'dev'
 local SECURITY = {
     ['X-Content-Type-Options'] = 'nosniff',
     ['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; " ..
-        "style-src 'self'; img-src 'self' data:; connect-src 'self'; " ..
+        "style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; " ..
         "base-uri 'none'; frame-ancestors 'none'",
 }
 

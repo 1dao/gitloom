@@ -265,9 +265,9 @@ Verified against a real MySQL 8.4.9, on both platforms and both stores:
 
 | | JSON | MySQL |
 |---|---|---|
-| `test/unit.lua` (Windows / Linux) | 199 / 198 | — |
-| `test/smoke.sh` Windows | 166/166 | 166/166 |
-| `test/smoke.sh` Linux | 177/177 | 177/177 |
+| `test/unit.lua` (Windows / Linux) | 208 / 207 | — |
+| `test/smoke.sh` Windows | 172/172 | 172/172 |
+| `test/smoke.sh` Linux | 183/183 | 183/183 |
 
 `test/dbreset.lua` empties the database first, because the counts the suite
 asserts only mean something from empty. gitloom itself never creates a database:
@@ -561,8 +561,101 @@ git does, so this was a control that did not exist rather than a capability that
 did not. Verified by tagging two commits, selecting the older tag and reading
 the file back at that ref.
 
-Still missing for a single operator: renaming a repository, and listing or
-revoking tokens other than the current one.
+**Two more, both the same shape as the tag one: the server was already right
+and nothing reached it.**
+
+`clone_url` took its scheme from whether OUR socket was TLS. Behind a proxy that
+terminates TLS — which is one of the two things README tells an operator to do —
+that socket is plain HTTP, so a page served over https handed out an `http://`
+clone URL. Not cosmetic: git follows it and re-sends HTTP Basic credentials on
+every request of every clone and push, which is the exact exposure the advice
+exists to prevent. `X-Forwarded-For` was already honoured from `TRUSTED_PROXIES`;
+`X-Forwarded-Proto` simply was not read. Now it is, under the same trust rule and
+verified for all four cases — trusted with the header, trusted with a two-hop
+chain, trusted without it, and an untrusted peer that cannot forge it. The other
+half of that advice, in-process `HTTPS=1`, was never tested either and turns out
+to be sound: a self-signed certificate serves the API and `git clone` over TLS.
+
+The browser read every file with `response.text()` into a `<pre>`, so a PNG was
+a screen of replacement characters and nothing could be downloaded at all —
+while `h_raw` had been serving `image/png` correctly all along. It now fetches
+bytes and branches on the response's Content-Type rather than on a second copy
+of the extension list, which is what keeps it in step with `INLINE_TYPES`; that
+list is a security decision, and two copies of it drift. Through `api()` and a
+blob rather than pointing `<img src>` at the raw URL, because that URL needs an
+Authorization header an `<img>` cannot send — a private repository's images
+would 401. `img-src` gained `blob:` for it. Anything that decodes to NULs or a
+body of replacement characters says so instead of showing the garbage.
+
+Verified against a private repository: a 1×1 PNG decodes (`naturalWidth` 1) from
+a `blob:` URL, a UTF-8 text file still reads, a 10 KB binary says it cannot be
+shown, and all three offer a download named after the file. No console errors
+and no policy violation.
+
+A review of both found two things. `http_client_scheme` went in beside
+`http_client_ip` — which has a whole trust-set fixture and nine cases, for the
+reason its comment gives — with no test of its own; it takes `trusted` as a
+parameter precisely so it can be tested, and now is, including the spoof. And
+`closeRepoView` released everything about the repository view except the object
+URL behind an open file, which is a document-lifetime reference to those bytes
+that nothing else would ever drop — on the path a token expiring takes, which is
+not a rare one.
+
+Still missing for a single operator: rendering a repository's README on its
+page, renaming a repository, listing or revoking tokens other than the current
+one, and searching inside a repository.
+
+### The address bar
+
+The whole browser lived at one URL. A refresh went back to the repository list,
+there was nothing to bookmark, and nothing to paste to anybody — which for a
+single operator is most of what a web front end over a git repository is *for*.
+So the state now lives in the address bar, and everything else that gets built
+hangs off it, which is why it went first.
+
+A hash, not a path. `/<owner>/<name>.git/...` is the git transport and
+`/api/v1/...` is the API; serving `index.html` for arbitrary paths would shadow
+both and turn every genuine 404 into the page. The grammar mirrors GitHub's:
+
+    #/<owner>/<name>/tree/<ref>[/<dir>]
+    #/<owner>/<name>/blob/<ref>/<file>
+    #/<owner>/<name>/commits/<ref>
+    #/<owner>/<name>/issues[/<number>]
+
+`tree` and `blob` are separate because the URL cannot otherwise say which one a
+path is, and guessing means a reload of a file link lands in a directory
+listing. Each segment is `encodeURIComponent`d on the way out and decoded on the
+way in, so a file called `我的 docs/读我 note#1.md` survives the round trip —
+including the `#`, which is the character that would otherwise truncate the
+address at the file name.
+
+Restoring inverts who owns the address bar, and getting that backwards was the
+bug. A click is what puts the browser somewhere new, so a click writes the URL
+immediately, before the network. A restore must not: `selectRepo` writes the URL
+before it fetches, and the file is fetched only once the branch list has landed
+and corrected the ref — so the write encoded a state with no file in it yet, and
+opening a link to a file replaced that link with the repository root before the
+file had loaded. The same write dropped an issue number. A restore therefore
+writes at the *end*, once the target has been applied, and with `replace()`:
+what comes back may not be what was asked for — a deleted branch falls back to
+the default, an issue number that does not exist stays null — and a correction
+is not somewhere anyone should have to press Back through. A blob URL also has
+to set the directory the file sits in, which is what the click path leaves on
+screen and so what a link to it has to reproduce.
+
+Verified in a browser against a live instance, not by reading the code: the hash
+follows a click into a directory, a file, a tag, the commit log and an issue;
+a reload restores each of them, listing included; Back and Forward walk the same
+sequence in both directions and add no entries of their own. A bookmark that has
+outlived its target degrades rather than blanks — a missing repository says
+`找不到仓库 <name>` and returns to the list, a missing branch is corrected in
+place to the default, a missing file keeps its URL and reports itself in the
+panel, a missing issue number falls back to the list. No console errors.
+
+One thing this cost an hour: the page had cached `app.js` under the asset digest
+stamped at boot, so the first fix appeared to do nothing. The digest is computed
+once at startup by design, which is right for deployment and a trap in
+development — a server restart is part of testing a change to `web/`.
 
 ## Phase 3 — collaboration
 

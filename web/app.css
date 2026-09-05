@@ -147,6 +147,13 @@ h1, h2, h3, p { margin-top: 0; }
 .button-quiet { color: var(--muted); }
 /* Browsers paint an optgroup label with their own defaults, which on this dark
    ground comes out as black on black in more than one of them. */
+.file-actions { display: flex; gap: 9px; align-items: center; }
+/* The panel is a fixed-height reading pane; an image has to fit it rather than
+   set its own size, and a checkerboard is what makes a transparent PNG legible
+   on a dark ground. */
+.file-image { padding: 18px; text-align: center; background:
+  repeating-conic-gradient(rgba(255,255,255,.04) 0% 25%, transparent 0% 50%) 50% / 18px 18px; }
+.file-image img { max-width: 100%; max-height: 60vh; border-radius: 8px; }
 .branch-select optgroup { color: var(--muted); background: var(--panel); font-style: normal; }
 .branch-select option { color: var(--text); background: var(--panel); }
 .button-danger { color: var(--danger); border-color: rgba(255, 143, 143, .3); }

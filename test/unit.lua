@@ -481,6 +481,59 @@ do
        http_client_ip('10.0.0.1', xff('  1.2.3.4  '), PROXY), '1.2.3.4')
 end
 
+-- ── the scheme behind a proxy ──────────────────────────────────────────────
+--
+-- Same trust rule as the address above, and the same reason for testing it
+-- here: the only cases that matter are the ones where a caller lies. This one
+-- decides the clone URL people copy, and git re-sends HTTP Basic credentials on
+-- every request of a clone or push — so an http:// URL handed to somebody on an
+-- https:// page puts their password on the wire, repeatedly.
+do
+    local NONE  = {}
+    local PROXY = { ['10.0.0.1'] = true }
+
+    local function xfp(v) return { ['x-forwarded-proto'] = v } end
+
+    -- Our own socket being TLS settles it, header or no header.
+    eq('a TLS connection is https regardless',
+       http_client_scheme('203.0.113.9', xfp('http'), true, NONE), true)
+
+    -- With no proxy configured the header is not evidence of anything.
+    eq('no trusted proxies: header ignored',
+       http_client_scheme('203.0.113.9', xfp('https'), false, NONE), false)
+
+    -- THE SPOOF. Anyone may send this header; believing a stranger would let
+    -- them turn every clone URL on the instance into https:// on an instance
+    -- that does not speak it, and clones would simply fail.
+    eq('untrusted peer cannot claim https',
+       http_client_scheme('203.0.113.9', xfp('https'), false, PROXY), false)
+
+    -- The peer IS the proxy, so what it says about the client is worth reading.
+    eq('trusted peer: header honoured',
+       http_client_scheme('10.0.0.1', xfp('https'), false, PROXY), true)
+
+    -- Unlike X-Forwarded-For this is not a chain a proxy appends to: each hop
+    -- SETS it, so the leftmost value is the scheme the client actually used.
+    eq('leftmost value wins in a two-hop chain',
+       http_client_scheme('10.0.0.1', xfp('https, http'), false, PROXY), true)
+
+    -- A proxy that says plainly it was not TLS must be believed too.
+    eq('a trusted http is still http',
+       http_client_scheme('10.0.0.1', xfp('http'), false, PROXY), false)
+
+    -- Real headers arrive with whitespace and in whatever case the proxy chose.
+    eq('spaces and case do not matter',
+       http_client_scheme('10.0.0.1', xfp('  HTTPS  '), false, PROXY), true)
+
+    -- Nothing to read is not a claim.
+    eq('a trusted peer with no header is http',
+       http_client_scheme('10.0.0.1', {}, false, PROXY), false)
+
+    -- Junk must not read as https just because it is present.
+    eq('rubbish is not https',
+       http_client_scheme('10.0.0.1', xfp('httpsx'), false, PROXY), false)
+end
+
 -- ── incremental HTTP request headers ───────────────────────────────────────
 --
 -- Smart-HTTP needs to route and authorise a request before its potentially

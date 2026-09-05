@@ -117,9 +117,15 @@
                   <p class="eyebrow">FILE</p>
                   <h3 id="file-title">—</h3>
                 </div>
-                <button class="button button-quiet" id="close-file" type="button">关闭</button>
+                <div class="file-actions">
+                  <a class="button button-quiet" id="download-file" download hidden>下载</a>
+                  <button class="button button-quiet" id="close-file" type="button">关闭</button>
+                </div>
               </div>
               <pre id="file-content" class="code-block"><code></code></pre>
+              <div id="file-image-wrap" class="file-image" hidden>
+                <img id="file-image" alt="">
+              </div>
             </div>
           </div>
 

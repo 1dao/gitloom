@@ -146,6 +146,19 @@ curl -s "$BASE/app.js" | grep -q 'createRepo' \
 # pushed was invisible. Asserted on the grouping the selector now builds.
 curl -s "$BASE/app.js" | grep -q "refGroup" \
     && ok 'browser can select a tag' || bad 'browser can select a tag' 'ref grouping missing'
+
+# The page read every file with response.text() and put the result in a <pre>,
+# so a PNG -- which most repositories have -- was a screen of replacement
+# characters, and there was no way to download one either. The server had been
+# serving image/png correctly the whole time.
+curl -s "$BASE/app.js" | grep -q 'createObjectURL' \
+    && ok 'browser renders an image as an image' || bad 'browser renders an image as an image' 'blob path missing'
+grep -q 'id="download-file"' "$WORK/web.index" \
+    && ok 'browser offers a file download' || bad 'browser offers a file download' 'control missing'
+# blob: is what an <img> fed from an authenticated fetch needs; without it the
+# image is blocked and a private repository shows nothing at all.
+grep -qi 'img-src[^;]*blob:' "$WORK/web.headers" \
+    && ok 'the policy allows a blob image' || bad 'the policy allows a blob image' "$(grep -i content-security "$WORK/web.headers")"
 curl -s "$BASE/app.js" | grep -q "method: 'PATCH'" \
     && ok 'browser JavaScript can edit repository metadata' || bad 'browser JavaScript can edit repository metadata' 'handler missing'
 curl -s "$BASE/app.js" | grep -q 'loadCommits(view, skip)' \
@@ -154,6 +167,22 @@ curl -s "$BASE/app.js" | grep -q 'loadCollaborators' \
     && ok 'browser JavaScript can manage collaborators' || bad 'browser JavaScript can manage collaborators' 'handler missing'
 curl -s "$BASE/app.js" | grep -q 'createIssueComment' \
     && ok 'browser JavaScript can discuss issues' || bad 'browser JavaScript can discuss issues' 'handler missing'
+
+# The whole browser lived at one URL: a refresh went back to the repository
+# list, and there was nothing to bookmark or paste to anyone. The address bar
+# now carries the state, and these three are what that rests on.
+curl -s "$BASE/app.js" | grep -q 'function routeApply' \
+    && ok 'browser restores state from the address bar' || bad 'browser restores state from the address bar' 'router missing'
+# tree vs blob: the URL cannot otherwise say which one a path is, and guessing
+# means a reload of a file link lands in a directory listing instead.
+curl -s "$BASE/app.js" | grep -q "state.file ? '/blob/' : '/tree/'" \
+    && ok 'a file URL and a directory URL are distinguishable' || bad 'a file URL and a directory URL are distinguishable' 'grammar missing'
+# The restore must not write the address bar on its way in. It did, and because
+# the file is fetched after the branch list lands, the write encoded a state
+# that had no file in it yet -- so opening a link to a file rewrote that link
+# to the repository root before the file had loaded.
+curl -s "$BASE/app.js" | grep -q 'if (!restoring) routeWrite();' \
+    && ok 'restoring does not overwrite the link being restored' || bad 'restoring does not overwrite the link being restored' 'ordering guard missing'
 curl -s "$BASE/app.js" | grep -q 'state.repo.owner === state.username' \
     && ok 'browser only offers owner deletion' || bad 'browser only offers owner deletion' 'owner guard missing'
 curl -s "$BASE/app.js" | grep -q 'requestToken && state.token === requestToken' \

@@ -2,7 +2,7 @@
 --
 -- Exports: http_get, http_post, http_put, http_patch, http_delete, http_route,
 --          http_fallback, http_body_stream, http_listen, http_dispatch,
---          http_wait_until, http_after,
+--          http_wait_until, http_after, http_client_scheme,
 --          http_response_text, http_response_json, http_response_error, http_response_file, http_response_redirect,
 --          http_safe_error
 --
@@ -305,6 +305,33 @@ function g_exports.http_client_ip(peer, headers, trusted)
 
     -- Every hop was a proxy of ours, so the chain never names a client.
     return peer
+end
+
+-- Was the request HTTPS from the CLIENT's point of view?
+--
+-- `connection_https` is the truth about OUR socket, and behind a proxy that
+-- terminates TLS it is false for a request the user made over https. Only one
+-- thing reads this — the clone URL the browser shows and people copy — and
+-- getting it wrong there is not cosmetic: git follows that URL and re-sends
+-- HTTP Basic credentials on every request of a clone or push, so an http:// URL
+-- handed to somebody on an https:// page puts their password on the wire
+-- repeatedly. Which is the exact thing README tells them to front gitloom with
+-- TLS to avoid.
+--
+-- Trusted the same way X-Forwarded-For is, and for the same reason: the header
+-- is client-supplied, so it is read ONLY when the socket's peer is itself a
+-- configured proxy. Unlike that header this one is not a chain — a proxy SETS
+-- it rather than appending — so the first value is the client's scheme.
+function g_exports.http_client_scheme(peer, headers, connection_https, trusted)
+    if connection_https then return true end
+    trusted = trusted or proxies()
+    if not peer or not trusted[peer] then return false end
+
+    local proto = headers and headers['x-forwarded-proto']
+    if not proto then return false end
+    -- 'https, http' from a two-hop chain: the leftmost is what the client used.
+    local first = tostring(proto):match('^%s*([%a]+)')
+    return first ~= nil and first:lower() == 'https'
 end
 
 -- For the boot banner: say whether the header is honoured at all, and from whom.
@@ -762,9 +789,13 @@ local function dispatch_request(conn, st, req)
     -- chunk is still treated as "already committed" and not answered twice.
     stream_reset(conn)
 
+    -- The scheme the CLIENT used, which behind a TLS-terminating proxy is not
+    -- the scheme of our own socket. See http_client_scheme.
+    local client_https = http_client_scheme(st.ip, req.headers, st.https)
+
     local co = coroutine.create(function()
         local ctx = { ip = client_ip, peer_ip = st.ip, conn = conn,
-                      https = st.https }
+                      https = client_https }
         local ok, resp = pcall(http_dispatch, req, ctx)
         if not ok then
             cfg_log_error('handler error on %s %s: %s', req.method, req.path, tostring(resp))

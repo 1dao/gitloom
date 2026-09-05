@@ -21,11 +21,13 @@ where they already work.
 **Status: Phase 3 (collaboration foundation).** Clone, fetch and push over
 HTTP(S) work end to end, with accounts, access tokens, public/private
 repositories, a JSON management API and a same-origin repository browser. The
-browser covers the repository list, branches, tree, raw files, commit history
-and bounded diffs, and can create, edit and delete repositories. Owners can
-also grant existing accounts read or write access to private repositories, so
-the solo loop and the first multi-user loop both stay in the browser. Issues
-and pull requests are not implemented yet — see
+browser covers the repository list, branches and tags, tree, raw files, images,
+commit history and bounded diffs, and can create, edit and delete repositories.
+Where you are is in the address bar, so a file, a directory, a tag, the commit
+log and an issue can each be bookmarked, shared, reloaded and gone Back from.
+Owners can also grant existing accounts read or write access to private
+repositories, so the solo loop and the first multi-user loop both stay in the
+browser. Issues have a tracker; pull requests are not implemented yet — see
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
@@ -248,10 +250,10 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 177/177 on Linux with streaming, and 166/166 on
+2.52). `test/smoke.sh` passes 183/183 on Linux with streaming, and 172/172 on
 Windows and under `GIT_STREAM=off` — the streamed-body cases are skipped there
-because they need the transport that platform does not have. `test/unit.lua` is 199 on
-Windows, 198 on Linux (one case is about Windows path spelling). Adding
+because they need the transport that platform does not have. `test/unit.lua` is 208 on
+Windows, 207 on Linux (one case is about Windows path spelling). Adding
 `DB_DRIVER=mysql` runs the same suite against MySQL instead of JSON files.
 
 What was checked in the runtime underneath, and is fine:

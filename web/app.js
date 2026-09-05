@@ -21,6 +21,11 @@
     username: '',
     token: '',
     toastTimer: null,
+    fileBlobUrl: '',   // released in releaseFileBlob; see loadFile
+    // Which view is showing and which file is open used to live only in the
+    // DOM. The address bar has to be able to say both, so they live here now.
+    view: 'code',
+    file: '',
   };
 
   // Every navigation takes a ticket. A response whose ticket is no longer the
@@ -612,6 +617,7 @@
     return json(issuesPath(repo, '/' + encodeURIComponent(number))).then(function (issue) {
       if (ticket !== seq.issue || !state.repo || state.repo.full_name !== repo.full_name) return null;
       state.issue = issue;
+      routeWrite();
       renderIssue(issue);
       renderIssues();
       detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -688,6 +694,11 @@
 
   function closeRepoView() {
     beginView();
+    // Also releases the object URL behind an open file. beginView already
+    // cancels anything in flight, but a blob is a document-lifetime reference
+    // to those bytes and nothing else would ever let go of it -- and this is
+    // the path a token expiring takes, which is not a rare one.
+    hideFile();
     state.repo = null;
     state.collaborators = [];
     state.issues = [];
@@ -696,6 +707,7 @@
     $('repo-view').hidden = true;
     $('empty-state').hidden = false;
     syncWriteActions();
+    routeWrite();
   }
 
   // `<span>workspace</span> / owner / name`, built rather than assembled as
@@ -800,7 +812,15 @@
     }
   }
 
-  function selectRepo(repo) {
+  // `target` restores a place the address bar named: a ref, a directory or file
+  // under it, a view, an issue. Absent — every call that is a person clicking a
+  // repository — it means the default branch at the root, which is what this
+  // always did.
+  function selectRepo(repo, target) {
+    // Restoring means the address bar is the source rather than the result, and
+    // that inverts who writes it — see the two routeWrite calls below.
+    var restoring = !!target;
+    target = target || {};
     var view = beginView();
     state.repo = repo;
     state.collaborators = [];
@@ -808,8 +828,8 @@
     state.issue = null;
     state.issueState = 'open';
     $('issue-state').value = 'open';
-    state.branch = repo.default_branch || 'main';
-    state.path = '';
+    state.branch = target.ref || repo.default_branch || 'main';
+    state.path = target.path || '';
     state.commitSkip = 0;
     state.commitHasMore = false;
     resetCommits();
@@ -818,19 +838,54 @@
     renderRepoMeta(repo);
     setFirstPush(repo, false);
     syncWriteActions();
-    hideFile();
+    hideFile();          // clears state.file; the file itself is fetched below
+    // A blob URL names a file, and the listing behind it has to be the
+    // directory that file sits in — that is what the click path leaves on
+    // screen, so it is what a link back to the same place has to reproduce.
+    if (target.file) {
+      state.file = target.file;
+      state.path = target.file.replace(/\/?[^\/]*$/, '');
+    }
     $('diff-panel').hidden = true;
     renderRepos();
-    showView('code');
+    showView(target.view || 'code');
+    // A click is what puts the address bar somewhere new, so it writes here,
+    // before the network. A restore must NOT: at this point the file has not
+    // been fetched and the issue has not been read, so encoding the state now
+    // would overwrite the very deep link being restored with the repository
+    // root. It writes at the end instead.
+    if (!restoring) routeWrite();
+
+    // Whatever the address bar named beyond the repository itself, applied once
+    // the ref it hangs off is settled. Every path through the chain below ends
+    // here, including the one where the branch listing failed: a file named in
+    // a URL should still open, and dropping it silently is worse than a panel
+    // that reports its own error.
+    function applyTarget(done) {
+      if (target.file) loadFile(target.file);
+      if (target.issue) loadIssue(target.issue);
+      // Now the URL can be written, and with replace(): the state may differ
+      // from what was asked for — loadBranches falls back when the ref is gone,
+      // and an issue number that does not exist stays null — and a correction
+      // is not somewhere the person should have to press Back through.
+      if (restoring) routeWrite(true);
+      return done;
+    }
 
     // Branches first: loadBranches can correct state.branch when the recorded
     // default is not in the list, and a commit list fetched before that lands
     // is a commit list for a branch the select is no longer showing.
     return loadBranches(view).then(function (branches) {
       if (!viewIsCurrent(view)) return null;
-      if (!branches) return Promise.all([loadTree(view), loadCommits(view)]);
-      if (!branches.length) return [];
-      return Promise.all([loadTree(view), loadCommits(view)]);
+      // loadBranches may correct state.branch when the ref in the URL is in
+      // neither list — a bookmark to a deleted branch, or a tag since removed.
+      // An empty list is a repository with no commits at all: there is no tree
+      // to read, and no file a URL could name inside one.
+      if (branches && !branches.length) return applyTarget([]);
+      return Promise.all([loadTree(view), loadCommits(view)]).then(function (done) {
+        if (!viewIsCurrent(view)) return done;
+        return applyTarget(done);
+      });
     });
   }
 
@@ -977,29 +1032,102 @@
       } else {
         loadFile(entry.path);
       }
+      routeWrite();
     });
     list.appendChild(row);
   }
 
+  // An object URL is a document-lifetime reference to the bytes behind it, so
+  // one has to be released or every file opened in a session is still in memory
+  // when the tab closes.
+  function releaseFileBlob() {
+    if (!state.fileBlobUrl) return;
+    URL.revokeObjectURL(state.fileBlobUrl);
+    state.fileBlobUrl = '';
+  }
+
+  // Does this decode to something worth putting in a <pre>?
+  //
+  // A NUL byte does not occur in text, and a decoder emits U+FFFD for every
+  // byte sequence it could not make sense of — a handful is a mis-encoded file
+  // worth showing anyway, a body full of them is a zip.
+  function looksBinary(text) {
+    if (text.indexOf('\u0000') !== -1) return true;
+    var bad = (text.match(/�/g) || []).length;
+    return bad > 8 && bad > text.length / 64;
+  }
+
+  // Fetched as BYTES, then decided on.
+  //
+  // The old version read every file with response.text() and put the result in
+  // a <pre>, so a PNG — which most repositories have — was a screen of
+  // replacement characters. The server has been serving image/png correctly the
+  // whole time; nothing here ever looked.
+  //
+  // Branching on the response's Content-Type rather than on the extension keeps
+  // this in step with the server's INLINE_TYPES allowlist by construction. That
+  // list is a security decision (an .html or .svg served inline would be script
+  // on our own origin), and duplicating it here as a second list is how the two
+  // drift apart.
+  //
+  // Through api() and a blob rather than pointing <img src> at the raw URL: the
+  // URL needs an Authorization header, which an <img> cannot send, so a private
+  // repository's images would 401.
   function loadFile(path) {
     var ticket = (seq.file += 1);
     var panel = $('file-panel');
+    var text = $('file-content');
+    var wrap = $('file-image-wrap');
+    var link = $('download-file');
+
+    state.file = path;
     panel.hidden = false;
+    wrap.hidden = true;
+    link.hidden = true;
+    text.hidden = false;
     $('file-title').textContent = path;
-    $('file-content').textContent = '正在读取…';
+    text.textContent = '正在读取…';
+
     var suffix = '/raw/' + encodeRef(state.branch) + '/' + encodePath(path);
-    api(repoPath(suffix)).then(function (response) { return response.text(); }).then(function (body) {
+    api(repoPath(suffix)).then(function (response) {
+      var type = (response.headers.get('content-type') || '').toLowerCase();
+      return response.blob().then(function (blob) { return { type: type, blob: blob }; });
+    }).then(function (got) {
       if (ticket !== seq.file) return;
-      $('file-content').textContent = body;
-      panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      releaseFileBlob();
+      state.fileBlobUrl = URL.createObjectURL(got.blob);
+
+      link.href = state.fileBlobUrl;
+      link.download = path.split('/').pop() || 'file';
+      link.hidden = false;
+
+      if (got.type.indexOf('image/') === 0) {
+        $('file-image').src = state.fileBlobUrl;
+        text.hidden = true;
+        wrap.hidden = false;
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
+      return got.blob.text().then(function (body) {
+        if (ticket !== seq.file) return;
+        text.textContent = looksBinary(body)
+          ? '这是二进制文件，没法在这里显示。用上面的「下载」取回原始内容。'
+          : body;
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
     }).catch(function (error) {
       if (ticket !== seq.file) return;
-      $('file-content').textContent = error.message;
+      text.hidden = false;
+      wrap.hidden = true;
+      text.textContent = error.message;
     });
   }
 
   function hideFile() {
     seq.file += 1;   // whatever is in flight no longer has a panel to land in
+    state.file = '';
+    releaseFileBlob();
+    $('file-image').removeAttribute('src');
     $('file-panel').hidden = true;
   }
 
@@ -1130,7 +1258,99 @@
     pre.appendChild(fragment);
   }
 
+  // ── the address bar ────────────────────────────────────────────────────────
+  //
+  // The page had no URL state at all: whatever you were looking at, the address
+  // was the bare origin. Refreshing put you back on the empty page, nothing
+  // could be bookmarked or pasted into your own notes, and Back left the
+  // application entirely.
+  //
+  // A HASH rather than a path, and not for the usual "no server config" reason —
+  // the paths are already taken. `/<owner>/<name>.git/...` is the git transport
+  // and `/<owner>/<name>` is the API's, so serving index.html for arbitrary
+  // paths would shadow both and turn every real 404 into the page. Behind the
+  // hash nothing on the server has to know this exists.
+  //
+  // The shape follows the one people already have in their fingers:
+  //
+  //   #/                                     nothing selected
+  //   #/<owner>/<name>                       the repository, code view
+  //   #/<owner>/<name>/tree/<ref>/<dir>      a directory at a ref
+  //   #/<owner>/<name>/blob/<ref>/<file>     a file at a ref
+  //   #/<owner>/<name>/commits/<ref>
+  //   #/<owner>/<name>/issues[/<number>]
+  //
+  // tree vs blob because the URL cannot otherwise say which one a path is, and
+  // guessing means a reload of a file URL lands in a directory listing.
+  function routeEncode() {
+    if (!state.repo) return '#/';
+    var base = '#/' + encodeURIComponent(state.repo.owner) + '/' +
+               encodeURIComponent(state.repo.name);
+    if (state.view === 'issues') {
+      return base + '/issues' + (state.issue ? '/' + state.issue.number : '');
+    }
+    if (state.view === 'commits') {
+      return base + '/commits/' + encodeRef(state.branch);
+    }
+    var target = state.file || state.path;
+    return base + (state.file ? '/blob/' : '/tree/') + encodeRef(state.branch) +
+           (target ? '/' + encodePath(target) : '');
+  }
+
+  // Write the current state to the address bar. `replace` is for the first
+  // paint, which should not leave an entry to go Back to.
+  function routeWrite(replace) {
+    var next = routeEncode();
+    if (next === (location.hash || '#/')) return;
+    if (replace) location.replace(location.pathname + location.search + next);
+    else location.hash = next;
+  }
+
+  // Apply whatever the address bar says. Returns nothing; the panels load
+  // themselves through selectRepo.
+  //
+  // The repository has to be found in a list that is already loaded, so the
+  // first call waits for loadRepos — see the bottom of this file.
+  function routeApply() {
+    var raw = (location.hash || '').replace(/^#\/?/, '');
+    var parts = [];
+    raw.split('/').forEach(function (piece) {
+      if (piece !== '') parts.push(decodeURIComponent(piece));
+    });
+    if (parts.length < 2) {
+      if (state.repo) closeRepoView();
+      return;
+    }
+
+    var full = parts[0] + '/' + parts[1];
+    var repo = state.repos.find(function (r) { return r.full_name === full; });
+    if (!repo) {
+      // Renamed, deleted, or not visible to whoever is signed in. Saying so
+      // beats a silent empty page, because the usual way to arrive here is a
+      // bookmark that has outlived the repository.
+      closeRepoView();
+      showToast('找不到仓库 ' + full);
+      return;
+    }
+
+    var kind = parts[2];
+    var target = { view: 'code' };
+    if (kind === 'issues') {
+      target.view = 'issues';
+      target.issue = parts[3] ? Number(parts[3]) : null;
+    } else if (kind === 'commits') {
+      target.view = 'commits';
+      target.ref = parts[3];
+    } else if (kind === 'tree' || kind === 'blob') {
+      target.ref = parts[3];
+      var rest = parts.slice(4).join('/');
+      if (kind === 'blob') target.file = rest; else target.path = rest;
+    }
+    selectRepo(repo, target);
+  }
+
   function showView(view) {
+    state.view = view;
     $$('.view-tab').forEach(function (tab) { tab.classList.toggle('active', tab.dataset.view === view); });
     $('code-view').hidden = view !== 'code';
     $('commits-view').hidden = view !== 'commits';
@@ -1281,6 +1501,7 @@
     state.issueState = event.target.value;
     state.issue = null;
     $('issue-detail').hidden = true;
+    routeWrite();
     if (state.repo) loadIssues(seq.view);
   });
   $('issue-toggle-state').addEventListener('click', function () {
@@ -1360,6 +1581,7 @@
     state.commitSkip = 0;
     state.commitHasMore = false;
     hideFile();
+    routeWrite();
     loadTree(view);
     loadCommits(view);
   });
@@ -1381,16 +1603,34 @@
     parts.pop();
     state.path = parts.join('/');
     hideFile();
+    routeWrite();
     loadTree(view);
   });
-  $('close-file').addEventListener('click', hideFile);
+  $('close-file').addEventListener('click', function () { hideFile(); routeWrite(); });
   $('close-diff').addEventListener('click', function () {
     seq.diff += 1;
     $('diff-panel').hidden = true;
   });
-  $$('.view-tab').forEach(function (tab) { tab.addEventListener('click', function () { showView(tab.dataset.view); }); });
+  $$('.view-tab').forEach(function (tab) {
+    tab.addEventListener('click', function () { showView(tab.dataset.view); routeWrite(); });
+  });
+
+  // Back and Forward, and somebody editing the address by hand. A write of our
+  // own also fires this, so compare against what the current state would encode
+  // and do nothing when they already agree — which is cheaper and more reliable
+  // than tracking the last value we wrote.
+  window.addEventListener('hashchange', function () {
+    if ((location.hash || '#/') === routeEncode()) return;
+    routeApply();
+  });
 
   loadCredentials();
   updateAuthButton();
-  loadRepos().catch(function () {});
+  // The address bar can only be applied once the repository list is in: it names
+  // a repository by owner/name, and the record behind it is what selectRepo
+  // needs. A failed load leaves the page on the empty state, which is what it
+  // showed before any of this existed.
+  loadRepos().then(function () {
+    if ((location.hash || '').length > 2) routeApply();
+  }).catch(function () {});
 })();
