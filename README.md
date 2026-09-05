@@ -5,9 +5,12 @@ A git hosting service written in Lua on the **xnet2lua** runtime —
 Lua layer. gitloom is the application; xnet2lua is the event loop, thread pool,
 TLS, HTTP codec and crypto underneath it.
 
-The runtime binaries for Windows (`bin/xnet.exe`) and Linux (`bin/xnet`) are
-committed, so a clone runs with no toolchain. If `bin/` is empty in your
-checkout, build them from the upstream repository — see [Upstream](#upstream).
+**`bin/` is not in the repository, and a fresh clone therefore does not run
+yet.** The runtime is copied from xnet2lua per platform, the way `../xpauth`
+does it: `bin/xnet.exe` for Windows, `bin/xnet` for Linux, side by side in the
+same directory. Build or copy the one you need before the first start — see
+[Upstream](#upstream). A binary built for the other platform sitting next to it
+is harmless; `test/smoke.sh` picks by `uname`, not by which file is executable.
 
 Like gitea — which shells out to `git` in 232 places and requires git ≥ 2.25 —
 gitloom does not reimplement git. It drives the real binary and owns the parts
@@ -63,6 +66,50 @@ sh test/smoke.sh
 ```bash
 bin/xnet.exe test/unit.lua
 ```
+
+## If you forget the password
+
+The first boot prints a recovery code for the administrator account and says to
+write it down:
+
+```
+[GITLOOM] bootstrapped administrator account "admin"
+[GITLOOM] recovery code for "admin": S3YT-PSSJ-RQ2N-4KVH
+[GITLOOM] ^ write that down and delete this line from the log — it is the only
+          way back in if the password is lost, and it cannot be shown again
+```
+
+Keep it somewhere that is not the server. Then:
+
+```bash
+curl -X POST -H 'Content-Type: application/json' \
+     -d '{"username":"admin","recovery_code":"S3YT-PSSJ-RQ2N-4KVH","new_password":"the-new-one"}' \
+     http://127.0.0.1:8686/api/v1/user/password/reset
+```
+
+The answer carries a **replacement** code, because spending one must never leave
+the account with no way back in. Lower case and missing dashes are accepted —
+it is typed by hand, often months later.
+
+Changing a password you still know needs no code:
+
+```bash
+curl -u admin:the-old-one -X POST -H 'Content-Type: application/json' \
+     -d '{"old_password":"the-old-one","new_password":"the-new-one"}' \
+     http://127.0.0.1:8686/api/v1/user/password
+```
+
+Both paths **revoke every access token** the account holds, so a password that
+has been given away stops working everywhere rather than at the next login.
+
+Why this exists at all: the administrator is created from `ADMIN_USER` /
+`ADMIN_PASSWORD` only when **no account exists yet**, so once there is one,
+changing the config and restarting does nothing. Passwords are stored as PBKDF2,
+so a replacement cannot be written into the account store by hand either. For a
+single operator with no second administrator to ask, the alternative to a
+recovery code is deleting the account store. The design — the alphabet with no
+`0/O/1/I/L`, hashing the code with its own salt, handing back a fresh one — is
+taken from `../xpauth`, which solved this first.
 
 ## Layout
 
@@ -201,10 +248,9 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 151/151 on Linux with streaming, and 140/140 on
-Windows and under
-`GIT_STREAM=off` — the streamed-body cases are skipped there because they need
-the transport that platform does not have. `test/unit.lua` is 199 on
+2.52). `test/smoke.sh` passes 177/177 on Linux with streaming, and 166/166 on
+Windows and under `GIT_STREAM=off` — the streamed-body cases are skipped there
+because they need the transport that platform does not have. `test/unit.lua` is 199 on
 Windows, 198 on Linux (one case is about Windows path spelling). Adding
 `DB_DRIVER=mysql` runs the same suite against MySQL instead of JSON files.
 

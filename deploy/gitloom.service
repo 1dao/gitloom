@@ -1,0 +1,51 @@
+[Unit]
+Description=gitloom - a git hosting service on the xnet2lua runtime
+# mariadb.service only matters with DB_DRIVER=mysql; it is harmless when the
+# unit is not installed, and the default (JSON files) needs nothing here.
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust to where you deploy. main.lua reads gitloom.cfg from WorkingDirectory,
+# and everything it writes lives underneath: repos/, data/, tmp/ and logs/.
+WorkingDirectory=/opt/gitloom
+ExecStart=/opt/gitloom/bin/xnet main.lua
+Restart=on-failure
+RestartSec=3
+
+# Without this the service inherits systemd's default RLIMIT_CORE of 0 and a
+# SIGSEGV leaves no core behind -- the crash is still logged by
+# systemd-coredump, but 'coredumpctl list' shows COREFILE=none and there is
+# nothing to feed gdb. Copied from ../xpauth, which learned it the hard way.
+LimitCORE=infinity
+
+User=gitloom
+Group=gitloom
+
+# Light hardening. Remove any that conflict with your setup.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+# ProtectHome hides /home, /root and /run/user from the service. gitloom is
+# fine with that BECAUSE it already points git's HOME at DATA_DIR/githome --
+# without that, every git child would read the operator's ~/.gitconfig, which is
+# the thing GIT_CONFIG_NOSYSTEM and the isolated HOME exist to prevent.
+ProtectHome=true
+
+# ProtectSystem=full leaves /opt writable, which is where WorkingDirectory and
+# all four writable directories live. They must exist and be owned by User=:
+#
+#   repos/  the bare repositories -- this IS the data
+#   data/   accounts and, with DB_DRIVER=none, the issue store; also githome
+#   tmp/    request/response staging for the file-staging transport
+#   logs/   the runtime's own log files
+ReadWritePaths=/opt/gitloom/repos /opt/gitloom/data /opt/gitloom/tmp /opt/gitloom/logs
+
+# Below 1024 needs this; on 8686 it is unnecessary and can be deleted. Prefer a
+# reverse proxy to giving the service the capability at all.
+#AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

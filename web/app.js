@@ -834,13 +834,47 @@
     });
   }
 
+  function refGroup(select, label, names) {
+    if (!names.length) return;
+    var group = document.createElement('optgroup');
+    group.label = label;
+    names.forEach(function (name) {
+      var option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      option.selected = name === state.branch;
+      group.appendChild(option);
+    });
+    select.appendChild(group);
+  }
+
+  // Branches AND tags, in one control with two groups.
+  //
+  // Every endpoint behind this takes a `ref` and resolves it the way git does,
+  // so a tag has always worked — there was simply no way to pick one, and a
+  // release somebody had tagged and pushed was invisible in the browser while
+  // /api/v1/repos/:owner/:name/tags answered perfectly well.
+  //
+  // The two requests go out together rather than in sequence: they are
+  // independent, and a repository with many refs forks a git process for each.
+  // A repository with no tags is the common case and answers with an empty
+  // list, so nothing here treats that as a failure.
   function loadBranches(view) {
     var select = $('branch-select');
     select.textContent = '';
     select.disabled = true;
-    return json(repoPath('/branches')).then(function (data) {
+    return Promise.all([
+      json(repoPath('/branches')),
+      // A tag listing that fails must not take the branch listing down with it:
+      // the tree and the commit log both key off the branch, and losing them
+      // because a tag could not be read would be the wrong trade.
+      json(repoPath('/tags')).catch(function () { return { tags: [] }; }),
+    ]).then(function (answers) {
       if (!viewIsCurrent(view)) return [];
+      var data = answers[0] || {};
       var branches = Array.isArray(data.branches) ? data.branches : [];
+      var tags = Array.isArray((answers[1] || {}).tags) ? answers[1].tags : [];
+
       if (!branches.length) {
         setFirstPush(state.repo, true);
         resetCommits('这个分支还没有提交');
@@ -850,17 +884,20 @@
         select.appendChild(empty);
       } else {
         setFirstPush(state.repo, false);
-        var preferred = branches.some(function (branch) { return branch.name === state.branch; });
-        if (!preferred) state.branch = branches[0].name;
-        branches.forEach(function (branch) {
-          var option = document.createElement('option');
-          option.value = branch.name;
-          option.textContent = branch.name;
-          option.selected = branch.name === state.branch;
-          select.appendChild(option);
-        });
+        var names = branches.map(function (branch) { return branch.name; });
+        var tagNames = tags.map(function (tag) { return tag.name; });
+        // Fall back to the first branch only when the selected ref is in
+        // NEITHER list. Checking the branches alone would throw away a tag
+        // every time this ran — today selectRepo always resets to the default
+        // branch first, so it would not fire, but that is a property of one
+        // caller rather than of this function.
+        if (names.indexOf(state.branch) === -1 && tagNames.indexOf(state.branch) === -1) {
+          state.branch = names[0];
+        }
+        refGroup(select, '分支', names);
+        refGroup(select, '标签', tagNames);
+        select.disabled = names.length + tagNames.length < 2;
       }
-      select.disabled = branches.length < 2;
       return branches;
     }).catch(function () {
       if (!viewIsCurrent(view)) return [];

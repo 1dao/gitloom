@@ -241,6 +241,10 @@ local function row_to_user(row)
     return {
         username   = db_text(row.username, ''),
         pwhash     = db_text(row.pwhash, ''),
+        -- Absent rather than '' when unset, so `u.recovery` reads as a plain
+        -- "has one / does not" everywhere else. The column defaults to '',
+        -- which is what an account created before migration 3 carries.
+        recovery   = (db_text(row.recovery, '') ~= '') and db_text(row.recovery, '') or nil,
         email      = db_text(row.email, ''),
         admin      = db_boolean(row.is_admin),
         created_at = db_number(row.created_at, 0),
@@ -250,7 +254,7 @@ end
 
 local function db_users_load()
     local rows, err = db_query(
-        'SELECT username, pwhash, email, is_admin, created_at, tokens FROM gl_users')
+        'SELECT username, pwhash, email, is_admin, created_at, tokens, recovery FROM gl_users')
     if not rows then return nil, 'could not read accounts: ' .. tostring(err) end
     local map = {}
     for _, row in ipairs(rows) do
@@ -268,13 +272,14 @@ local function db_user_put(u)
     if terr then return nil, terr end
 
     local ok, err = db_exec(string.format(
-        'INSERT INTO gl_users (username, pwhash, email, is_admin, created_at, tokens) ' ..
-        'VALUES (%s, %s, %s, %s, %s, %s) ' ..
+        'INSERT INTO gl_users (username, pwhash, email, is_admin, created_at, tokens, recovery) ' ..
+        'VALUES (%s, %s, %s, %s, %s, %s, %s) ' ..
         'ON DUPLICATE KEY UPDATE pwhash=VALUES(pwhash), email=VALUES(email), ' ..
-        'is_admin=VALUES(is_admin), created_at=VALUES(created_at), tokens=VALUES(tokens)',
+        'is_admin=VALUES(is_admin), created_at=VALUES(created_at), tokens=VALUES(tokens), ' ..
+        'recovery=VALUES(recovery)',
         db_quote(u.username), db_quote(u.pwhash or ''), db_quote(u.email or ''),
         db_quote(u.admin and true or false), db_quote(u.created_at or 0),
-        db_quote(tokens)))
+        db_quote(tokens), db_quote(u.recovery or '')))
     if not ok then return nil, 'could not save the account: ' .. tostring(err) end
     return true
 end

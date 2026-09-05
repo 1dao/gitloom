@@ -3,7 +3,8 @@
 -- Exports: auth_load, auth_user_list, auth_user_exists, auth_user_create,
 --          auth_token_create, auth_token_revoke,
 --          auth_identify, auth_can_read, auth_can_write, auth_challenge,
---          auth_bootstrap, auth_kdf_setup, auth_too_many
+--          auth_bootstrap, auth_kdf_setup, auth_too_many,
+--          auth_recovery_ensure, auth_password_change, auth_password_reset
 --
 -- Phase 0 keeps accounts in data/users.json. The shape is deliberately the one
 -- a `users` table would have, so moving to MySQL later is a change of storage
@@ -235,6 +236,166 @@ end
 function g_exports.auth_user_exists(username)
     if not have_users() then return nil, 'the account store is unavailable' end
     return users[tostring(username or '')] ~= nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Account recovery codes
+--
+-- The one credential somebody who has forgotten their password can still
+-- produce. Modelled on ../xpauth, which had to solve this first — down to the
+-- shape and the alphabet: XXXX-XXXX-XXXX-XXXX with no 0/O/1/I/L, because it is
+-- read off a screen and typed back in by hand, often months later.
+--
+-- Without it a forgotten password is UNRECOVERABLE, and more so here than in a
+-- team. auth_bootstrap only creates the administrator when no account exists at
+-- all, so changing ADMIN_PASSWORD and restarting does nothing once there is
+-- one; and pwhash is PBKDF2, so a replacement cannot be written by hand. A solo
+-- operator has no second administrator to ask, which leaves deleting the
+-- account store as the only way back in.
+--
+-- Hashed exactly like a password, which in this codebase means the salt travels
+-- inside the `pbkdf2$iter$salt$hex` string. That gives for free the property
+-- xpauth needs a separate salt column for: a password change rewrites `pwhash`
+-- and cannot touch `recovery`, so a code written down months ago still works.
+--
+-- The consequence everywhere else: a stored code cannot be read back, only
+-- replaced. Every function here that produces one returns it as the single copy
+-- that will ever exist.
+-- ---------------------------------------------------------------------------
+
+local CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+
+local function gen_code()
+    local raw = util_rand_hex(16)      -- 32 hex characters, two per output one
+    local out = {}
+    for i = 1, 16 do
+        local byte = tonumber(raw:sub(i * 2 - 1, i * 2), 16) or 0
+        out[i] = CODE_ALPHABET:sub((byte % #CODE_ALPHABET) + 1,
+                                   (byte % #CODE_ALPHABET) + 1)
+    end
+    local s = table.concat(out)
+    return s:sub(1, 4) .. '-' .. s:sub(5, 8) .. '-' .. s:sub(9, 12) .. '-' .. s:sub(13, 16)
+end
+
+-- Canonicalise what somebody typed: upper case, drop everything that is not a
+-- letter or a digit, regroup. Returns '' when it is not 16 code characters, so
+-- spaces, lower case and missing dashes all still work.
+local function normalize_code(code)
+    local plain = tostring(code or ''):upper():gsub('[^%w]', '')
+    if #plain ~= 16 then return '' end
+    return plain:sub(1, 4) .. '-' .. plain:sub(5, 8) .. '-' ..
+           plain:sub(9, 12) .. '-' .. plain:sub(13, 16)
+end
+
+-- Issue a code only if the account has none. Returns the code when it just
+-- issued one and nil when the account already had one — which is how an account
+-- created before this existed picks one up, without invalidating a code
+-- somebody has already written down.
+--
+-- COROUTINE-ONLY: hashing goes to the KDF thread.
+function g_exports.auth_recovery_ensure(username)
+    local u = auth_user_get(username)
+    if not u then return nil, 'no such user' end
+    if u.recovery then return nil end
+
+    local code = gen_code()
+    u.recovery = password_hash(code)
+    local ok, err = auth_save(u)
+    if not ok then
+        u.recovery = nil
+        return nil, err
+    end
+    return code
+end
+
+-- Change a password, given the current one. Returns (true, code) where the code
+-- is non-nil only when the account did not have a recovery code yet.
+--
+-- EVERY TOKEN IS REVOKED. xpauth records that its own change cannot do this —
+-- its sessions authenticate by token, and a token does not know the password
+-- behind it changed — and lists restarting the service as the only way to cut
+-- them off. gitloom already had to solve that for logout, so here a password
+-- change can do what a password change is supposed to do.
+--
+-- COROUTINE-ONLY.
+function g_exports.auth_password_change(username, old_password, new_password)
+    local u = auth_user_get(username)
+    if not u then return nil, 'no such user' end
+    if type(new_password) ~= 'string' or #new_password < cfg_int('AUTH_MIN_PASSWORD', 8) then
+        return nil, string.format('password must be at least %d characters',
+            cfg_int('AUTH_MIN_PASSWORD', 8))
+    end
+    if not password_verify(tostring(old_password or ''), u.pwhash) then
+        return nil, 'the current password is not correct'
+    end
+
+    local old_hash, old_tokens = u.pwhash, u.tokens
+    u.pwhash = password_hash(new_password)
+    u.tokens = {}
+    local code = nil
+    if not u.recovery then
+        code = gen_code()
+        u.recovery = password_hash(code)
+    end
+
+    local ok, err = auth_save(u)
+    if not ok then
+        u.pwhash, u.tokens = old_hash, old_tokens
+        if code then u.recovery = nil end
+        return nil, err
+    end
+    -- The positive verification cache answers for AUTH_CACHE_SEC without looking
+    -- at the record again, so the old password would go on working until it
+    -- expired. Dropping it is what makes the change take effect now.
+    verify_cache = {}
+    return true, code
+end
+
+-- Spend a recovery code: set a new password and hand back a REPLACEMENT code,
+-- so using one never leaves the account with no way back in.
+--
+-- Deliberately unauthenticated — somebody who has forgotten their password
+-- cannot authenticate — which is why api.lua puts it behind the same
+-- credential-failure lockout as a login. Every rejection here is a guess.
+--
+-- COROUTINE-ONLY.
+function g_exports.auth_password_reset(username, code, new_password)
+    if type(new_password) ~= 'string' or #new_password < cfg_int('AUTH_MIN_PASSWORD', 8) then
+        return nil, string.format('password must be at least %d characters',
+            cfg_int('AUTH_MIN_PASSWORD', 8)), 'invalid'
+    end
+    local canon = normalize_code(code)
+    local u = auth_user_get(username)
+    -- One answer for "no such account" and "wrong code". This endpoint is
+    -- reachable without credentials, and telling the two apart turns it into a
+    -- way to enumerate accounts.
+    if not u or canon == '' then
+        return nil, 'invalid account or recovery code', 'rejected'
+    end
+    if not u.recovery then
+        -- Said plainly rather than hidden behind "wrong code": this account
+        -- cannot be recovered this way at all, and whoever is holding a code
+        -- needs to stop retyping it. Only reachable for an account that predates
+        -- migration 3.
+        return nil, 'this account has no recovery code', 'rejected'
+    end
+    if not password_verify(canon, u.recovery) then
+        return nil, 'invalid account or recovery code', 'rejected'
+    end
+
+    local old_hash, old_recovery, old_tokens = u.pwhash, u.recovery, u.tokens
+    local fresh = gen_code()
+    u.pwhash = password_hash(new_password)
+    u.recovery = password_hash(fresh)
+    u.tokens = {}      -- as with a change: whoever held the old password is out
+
+    local ok, err = auth_save(u)
+    if not ok then
+        u.pwhash, u.recovery, u.tokens = old_hash, old_recovery, old_tokens
+        return nil, err, 'error'
+    end
+    verify_cache = {}
+    return fresh
 end
 
 function g_exports.auth_user_list()
@@ -533,5 +694,26 @@ function g_exports.auth_bootstrap()
         return false
     end
     cfg_log_system('bootstrapped administrator account %q', name)
+
+    -- The recovery code goes to the LOG, which is the only channel this account
+    -- has. Everywhere else a code is handed back in the response to whoever
+    -- asked for it; nobody asked for this one — it belongs to an account the
+    -- service created for itself out of the config file at boot.
+    --
+    -- A secret in a log file is a real cost, and it is the smaller one. Without
+    -- it a forgotten ADMIN_PASSWORD is unrecoverable: this function only runs
+    -- when NO account exists, so changing the config and restarting does
+    -- nothing, and the alternative is deleting the account store. The log is on
+    -- the operator's own machine, and the line says to move the code off it.
+    local code, cerr = auth_recovery_ensure(name)
+    if code then
+        cfg_log_system('recovery code for %q: %s', name, code)
+        cfg_log_system('^ write that down and delete this line from the log — ' ..
+                       'it is the only way back in if the password is lost, ' ..
+                       'and it cannot be shown again')
+    elseif cerr then
+        cfg_log_warn('could not issue a recovery code for %q: %s — ' ..
+                     'a forgotten password will not be recoverable', name, tostring(cerr))
+    end
     return true
 end

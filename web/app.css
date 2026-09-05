@@ -145,6 +145,10 @@ h1, h2, h3, p { margin-top: 0; }
 .button-primary { color: var(--bg); border-color: var(--accent); background: var(--accent); font-weight: 700; }
 .button-primary:hover { background: #78e5dc; border-color: #78e5dc; }
 .button-quiet { color: var(--muted); }
+/* Browsers paint an optgroup label with their own defaults, which on this dark
+   ground comes out as black on black in more than one of them. */
+.branch-select optgroup { color: var(--muted); background: var(--panel); font-style: normal; }
+.branch-select option { color: var(--text); background: var(--panel); }
 .button-danger { color: var(--danger); border-color: rgba(255, 143, 143, .3); }
 .button-danger:hover { color: var(--bg); border-color: var(--danger); background: var(--danger); }
 

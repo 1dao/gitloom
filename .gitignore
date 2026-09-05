@@ -9,14 +9,12 @@ logs/
 # gitloom.cfg and therefore wins over it.
 gitloom.local.cfg
 
-# bin/ is deliberately TRACKED: the xnet2lua runtime binaries for Windows and
-# Linux are committed so a clone runs with no toolchain (see README's Upstream
-# section).
+# The runtime is NOT tracked. It is copied from xnet2lua per platform, the same
+# way ../xpauth does it, so there is nothing here to ignore or to un-ignore —
+# bin/ simply never gets added.
 #
-# The negation is required, not decorative. This machine's global gitignore
-# (core.excludesFile) carries a Visual Studio ruleset with *.exe and *.dll, so
-# without it `git add bin/xnet.exe` is silently a no-op and the binary quietly
-# never reaches the repository. A rule in the repository's own .gitignore
-# outranks core.excludesFile, so this wins — but only here, and only for bin/.
-!bin/
-!bin/*
+# It used to say the opposite, and un-ignored bin/ so the binaries could be
+# committed. They never were: `git ls-files bin/` was empty the whole time while
+# README promised a clone that runs with no toolchain. Both now say the same
+# thing, which is the thing that is true.
+bin/

@@ -14,6 +14,12 @@
 --   1. Statements must be idempotent — IF NOT EXISTS, or a guard. A crash
 --      between a statement and the record that says it ran leaves the migration
 --      pending, and the next boot starts it again from the top.
+--
+--      CREATE TABLE says IF NOT EXISTS and ALTER TABLE ... ADD COLUMN does not:
+--      that spelling is MariaDB's, and this runs on MySQL. So a step may also
+--      be a FUNCTION returning the same (ok, err) db_exec does, which is where
+--      the "does this column already exist" question gets asked. See
+--      column_absent below.
 --   2. A first boot of two processes against one empty database is NOT
 --      coordinated. GET_LOCK would be the obvious answer and does not work
 --      here: the xmysql pool hands each query to whichever connection is free,
@@ -37,6 +43,31 @@ local MIGRATIONS_TABLE = 'gl_schema_migrations'
 -- exact string); repositories are not, and repo.lua folds the case itself into
 -- owner_key/name_key. A case-insensitive collation here would quietly make
 -- `Alice` and `alice` one account.
+-- Is `column` missing from `table_name`? Returns true, false, or nil plus a
+-- message when the catalogue itself cannot be read.
+--
+-- information_schema rather than a failed ALTER: MySQL answers a duplicate
+-- column with error 1060, and keying a migration off an error STRING is how a
+-- server upgrade or a translated build turns a working migration into a broken
+-- one. Asking is cheap and says what it means.
+local function column_absent(table_name, column)
+    local rows, err = db_query(string.format(
+        'SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() ' ..
+        'AND table_name = %s AND column_name = %s LIMIT 1',
+        db_quote(table_name), db_quote(column)))
+    if not rows then return nil, err end
+    return #rows == 0
+end
+
+-- ALTER TABLE ... ADD COLUMN, but only when it is not already there.
+local function add_column(table_name, column, definition)
+    local absent, err = column_absent(table_name, column)
+    if absent == nil then return nil, err end
+    if not absent then return true end
+    return db_exec(string.format('ALTER TABLE %s ADD COLUMN %s %s',
+        db_ident(table_name), db_ident(column), definition))
+end
+
 local MIGRATIONS = {
     {
         id = 1,
@@ -103,6 +134,21 @@ local MIGRATIONS = {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
         },
     },
+    {
+        id = 3,
+        name = 'account recovery codes',
+        up = {
+            -- The one credential someone who has forgotten their password can
+            -- still produce. Stored exactly like a password — pbkdf2$... — and
+            -- therefore with its own embedded salt, which is what keeps a
+            -- password change from silently invalidating the code the user
+            -- wrote down months ago.
+            function()
+                return add_column('gl_users', 'recovery',
+                    "VARCHAR(255) NOT NULL DEFAULT ''")
+            end,
+        },
+    },
 }
 
 function g_exports.migrate_latest()
@@ -145,10 +191,12 @@ function g_exports.migrate_run()
     local applied = 0
     for _, m in ipairs(MIGRATIONS) do
         if not seen[m.id] then
-            for i, sql in ipairs(m.up) do
-                local rc, xerr = db_exec(sql)
+            for i, step in ipairs(m.up) do
+                local rc, xerr
+                if type(step) == 'function' then rc, xerr = step()
+                else rc, xerr = db_exec(step) end
                 if not rc then
-                    return nil, string.format('migration %d (%s) statement %d failed: %s',
+                    return nil, string.format('migration %d (%s) step %d failed: %s',
                         m.id, m.name, i, tostring(xerr))
                 end
             end

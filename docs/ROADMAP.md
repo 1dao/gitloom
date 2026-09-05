@@ -266,8 +266,8 @@ Verified against a real MySQL 8.4.9, on both platforms and both stores:
 | | JSON | MySQL |
 |---|---|---|
 | `test/unit.lua` (Windows / Linux) | 199 / 198 | — |
-| `test/smoke.sh` Windows | 155/155 | 155/155 |
-| `test/smoke.sh` Linux | 166/166 | 166/166 |
+| `test/smoke.sh` Windows | 166/166 | 166/166 |
+| `test/smoke.sh` Linux | 177/177 | 177/177 |
 
 `test/dbreset.lua` empties the database first, because the counts the suite
 asserts only mean something from empty. gitloom itself never creates a database:
@@ -470,6 +470,99 @@ read, which reports "no issues" for "could not ask". `repo_list` and
 `auth_user_list` do the same, so changing one of the three alone would be worse
 than the inconsistency. All three are only reachable if the initial load failed,
 and boot refuses to continue in that case.
+
+## Running it, rather than demonstrating it (2026-09-05)
+
+A pass over what a single operator hits that no feature covers. Most of it was
+already solved next door: `../xpauth` has been deployed for real, and the house
+rule about not rewriting what xnet2lua or xpauth already has applies to
+operations as much as to code.
+
+**The README was wrong about the binary, in the direction that breaks a move to
+a new machine.** It promised "binaries are committed, so a clone runs with no
+toolchain" and `git ls-files bin/` was empty the whole time; `.gitignore` even
+carried a paragraph explaining why `bin/` was deliberately tracked, un-ignoring
+it for binaries that were never added. xpauth does not commit its runtime
+either — it copies it from xnet2lua per platform and says so. Both files now say
+that, which is the thing that is true.
+
+**A forgotten password was unrecoverable, and worse for one operator than for a
+team.** `auth_bootstrap` only creates the administrator when NO account exists,
+so changing `ADMIN_PASSWORD` and restarting does nothing once there is one, and
+PBKDF2 means no replacement can be written into the store by hand. With no
+second administrator to ask, the only way back in was deleting the account
+store.
+
+Fixed by taking xpauth's recovery-code model whole, including the parts that are
+not obvious until it has been in front of users:
+
+- `XXXX-XXXX-XXXX-XXXX` from an alphabet with no `0/O/1/I/L`, because it is read
+  off a screen and typed back in months later. `normalize_code` accepts it lower
+  case, with the dashes missing, or both.
+- Hashed like a password. Here that needs no second salt column the way xpauth
+  needs one: `pwhash` is a self-contained `pbkdf2$iter$salt$hex`, so a password
+  change rewrites that string and cannot touch `recovery`. The property xpauth
+  had to engineer comes for free from the format.
+- Spending a code returns a REPLACEMENT, so using one never leaves the account
+  with no way back in — and the old one cannot be replayed, because the stored
+  hash it would have to match is gone.
+- `POST /api/v1/user/password` and `/password/reset`. The reset takes no
+  credentials, by definition, so it sits behind the same failure lockout a login
+  uses; only a rejection is counted as a guess, never a malformed body or a
+  store failure, so a database outage cannot lock out everyone who tried during
+  it.
+
+**One place gitloom does better than the model it copied.** xpauth records that
+its password change cannot cut off live sessions — they authenticate by token,
+and a token does not know the password behind it changed — and lists restarting
+the service as the only remedy. gitloom already had token revocation for logout,
+so a change and a reset both revoke every token the account holds, and the
+verification cache is dropped so the old password stops working immediately
+rather than at the end of `AUTH_CACHE_SEC`.
+
+The administrator's code goes to the boot LOG, which is the only channel an
+account the service created for itself out of a config file has. A secret in a
+log file is a real cost and the smaller one; the line says to move it and delete
+it, and `deploy/README.md` repeats that where it talks about backups.
+
+Migration 3 adds the column, and adding it needed the runner to grow one thing:
+a step may now be a FUNCTION as well as a SQL string, because `CREATE TABLE` has
+`IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN` does not — that spelling is
+MariaDB's. `add_column` asks `information_schema` instead of keying off MySQL's
+error 1060, since keying a migration off an error string is how a server upgrade
+breaks one.
+
+**Deployment, backups and logs**, which is where a personal instance actually
+lives:
+
+- `deploy/gitloom.service`, adapted from xpauth's including the comments it
+  earned — `LimitCORE=infinity` or a SIGSEGV leaves no core, and `ReadWritePaths`
+  for the four directories gitloom writes. `ProtectHome=true` is safe here only
+  because git's HOME already points at `DATA_DIR/githome`.
+- `deploy/README.md` on what to back up and, more importantly, why copying
+  `repos/` while the service runs is not safe: git renames objects and packfiles
+  into place under lockfiles, so a copy taken during a push can hold a ref that
+  points at an object the copy never reached. Stop-copy-start, `clone --mirror`,
+  or a filesystem snapshot — with the MySQL half alongside it.
+- `LOG_MAX_FILE_MB` bounds one log file. Nothing bounds the NUMBER of them: the
+  runtime rolls to the next number and never deletes, in xnet2lua and therefore
+  in xpauth too. logrotate with `copytruncate`, because the runtime holds its
+  file open and does not reopen on a signal.
+
+Verified against MySQL 8.4 and JSON on both platforms — `test/unit.lua` 199/198,
+`test/smoke.sh` 166 on Windows and 177 on Linux, both stores — with the whole
+forgotten-password path driven end to end: bootstrap logs a code, a wrong one is
+refused, a loosely typed one resets, the old password and every token issued
+before it stop working, and the spent code cannot be replayed.
+
+**Tags are browsable.** The ref selector lists branches and tags in two
+groups; every endpoint behind it already took a `ref` and resolved it the way
+git does, so this was a control that did not exist rather than a capability that
+did not. Verified by tagging two commits, selecting the older tag and reading
+the file back at that ref.
+
+Still missing for a single operator: renaming a repository, and listing or
+revoking tokens other than the current one.
 
 ## Phase 3 — collaboration
 

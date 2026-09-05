@@ -140,6 +140,12 @@ grep -q 'id="first-push"' "$WORK/web.index" && grep -q 'id="commit-pagination"' 
     || bad 'browser offers empty-repository guidance and commit pagination' 'panel missing'
 curl -s "$BASE/app.js" | grep -q 'createRepo' \
     && ok 'browser JavaScript can create' || bad 'browser JavaScript can create' 'handler missing'
+
+# Tags were browsable through the API and unreachable in the page: the ref
+# selector only ever listed branches, so a release somebody had tagged and
+# pushed was invisible. Asserted on the grouping the selector now builds.
+curl -s "$BASE/app.js" | grep -q "refGroup" \
+    && ok 'browser can select a tag' || bad 'browser can select a tag' 'ref grouping missing'
 curl -s "$BASE/app.js" | grep -q "method: 'PATCH'" \
     && ok 'browser JavaScript can edit repository metadata' || bad 'browser JavaScript can edit repository metadata' 'handler missing'
 curl -s "$BASE/app.js" | grep -q 'loadCommits(view, skip)' \
@@ -438,6 +444,77 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X POST \
     -H 'Content-Type: application/json' -d '{"ttl_seconds":"soon"}' \
     "$BASE/api/v1/user/tokens")
 check 'a non-numeric ttl is refused' "$code" '400'
+# == Passwords and recovery codes ===========================================
+# The one thing a solo operator cannot talk their way out of: auth_bootstrap
+# only runs when NO account exists, so before recovery codes a forgotten
+# password meant deleting the account store. Driven on a throwaway account
+# rather than admin, whose password every case below this one still needs.
+#
+# Bodies that interpolate a value go through a file. Writing them inline means
+# nesting quotes inside quotes, and the version of this block that did produced
+# a body the server rejected while the shell reported no error at all.
+RECOVER=$(curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+    -d '{"username":"recoverme","password":"first-password-1"}' "$BASE/api/v1/users")
+RCODE=$(echo "$RECOVER" | sed -n 's/.*"recovery_code":"\([A-Z0-9-]*\)".*/\1/p')
+if [ -n "$RCODE" ]; then
+    ok 'creating an account hands back a recovery code'
+else
+    bad 'creating an account hands back a recovery code' "$RECOVER"
+fi
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -d '{"username":"recoverme","recovery_code":"AAAA-BBBB-CCCC-DDDD","new_password":"nope-password-1"}' \
+    "$BASE/api/v1/user/password/reset")
+check 'a wrong recovery code is refused' "$code" '403'
+
+# Read off a screen and typed back in months later, so lower case and missing
+# dashes have to work. That is what normalize_code is for.
+SLOPPY=$(echo "$RCODE" | tr 'A-Z' 'a-z' | tr -d '-')
+printf '{"username":"recoverme","recovery_code":"%s","new_password":"second-password-1"}' "$SLOPPY" > "$WORK/reset.json"
+body=$(curl -s -X POST -H 'Content-Type: application/json' \
+    --data-binary @- < "$WORK/reset.json" "$BASE/api/v1/user/password/reset")
+echo "$body" | grep -q '"reset":true' \
+    && ok 'a recovery code typed loosely still resets' \
+    || bad 'a recovery code typed loosely still resets' "$body"
+
+NEWCODE=$(echo "$body" | sed -n 's/.*"recovery_code":"\([A-Z0-9-]*\)".*/\1/p')
+if [ -n "$NEWCODE" ] && [ "$NEWCODE" != "$RCODE" ]; then
+    ok 'a reset hands back a fresh code'
+else
+    bad 'a reset hands back a fresh code' "$body"
+fi
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -u recoverme:first-password-1 "$BASE/api/v1/repos")
+check 'the old password stops working' "$code" '401'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u recoverme:second-password-1 "$BASE/api/v1/repos")
+check 'the new password works' "$code" '200'
+
+# Spending a code must spend it. Enforced by replacing the stored hash, so a
+# replay has nothing left to match.
+printf '{"username":"recoverme","recovery_code":"%s","new_password":"third-password-1"}' "$RCODE" > "$WORK/replay.json"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    --data-binary @- < "$WORK/replay.json" "$BASE/api/v1/user/password/reset")
+check 'a spent recovery code cannot be replayed' "$code" '403'
+
+# A change proves the current password first, and revokes every token — which is
+# the half ../xpauth records that its own change cannot do.
+RTOK=$(curl -s -u recoverme:second-password-1 -X POST -H 'Content-Type: application/json' \
+    -d '{"label":"before the change"}' "$BASE/api/v1/user/tokens" \
+    | sed -n 's/.*"token":"\([0-9a-f]*\)".*/\1/p')
+code=$(curl -s -o /dev/null -w '%{http_code}' -u recoverme:second-password-1 -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"old_password":"not-the-one","new_password":"fourth-password-1"}' \
+    "$BASE/api/v1/user/password")
+check 'a change with the wrong current password is refused' "$code" '400'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u recoverme:second-password-1 -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"old_password":"second-password-1","new_password":"fourth-password-1"}' \
+    "$BASE/api/v1/user/password")
+check 'the password changes' "$code" '200'
+if [ -n "$RTOK" ]; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' -u "recoverme:$RTOK" "$BASE/api/v1/repos")
+    check 'a change revokes the tokens issued before it' "$code" '401'
+fi
 
 # == Bounds on free text and on token count =================================
 # None of these were bounded while accounts and the index were JSON files that

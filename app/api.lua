@@ -25,6 +25,8 @@
 --   POST   /api/v1/repos/:owner/:name/issues/:number/comments
 --   GET    /api/v1/users                  admin only
 --   POST   /api/v1/users                  admin only
+--   POST   /api/v1/user/password          change it, given the current one
+--   POST   /api/v1/user/password/reset    forgot it: spend a recovery code
 --   POST   /api/v1/user/tokens            issue an access token for the caller
 --
 --   GET    /api/v1/repos/:owner/:name/branches
@@ -477,7 +479,18 @@ local function h_user_create(req, _ctx)
                                      tostring(b.password or ''),
                                      { admin = b.admin, email = b.email })
     if not u then return http_response_error(400, cerr) end
-    return http_response_json(201, { username = u.username, admin = u.admin, email = u.email })
+
+    -- The recovery code is issued with the account and returned HERE, once.
+    -- Only its hash is stored, so this response is the single copy that will
+    -- ever exist — the same bargain the token endpoint makes, and the reason
+    -- the administrator creating the account has to pass it on.
+    local code = auth_recovery_ensure(u.username)
+    return http_response_json(201, {
+        username = u.username, admin = u.admin, email = u.email,
+        recovery_code = code,
+        note = code and 'give this recovery code to the account holder; ' ..
+                        'it cannot be shown again' or nil,
+    })
 end
 
 -- POST /api/v1/user/tokens  { label?, ttl_seconds? }
@@ -485,6 +498,74 @@ end
 -- `ttl_seconds` is optional and absent means what it always meant: a token that
 -- never expires, which is what a CI job wants. The browser passes one, because
 -- a credential it has to keep in sessionStorage should stop working on its own.
+-- POST /api/v1/user/password  { old_password, new_password }
+--
+-- Every token the account holds is revoked as part of the change, so a password
+-- that has been given away stops working everywhere rather than only at the
+-- next login.
+local function h_password_change(req, _ctx)
+    local user, resp = require_user(req)
+    if not user then return resp end
+
+    local b, berr = body_json(req)
+    if not b then return http_response_error(400, berr) end
+
+    local ok, err_or_code = auth_password_change(
+        user.username, b.old_password, b.new_password)
+    if not ok then return http_response_error(400, http_safe_error(err_or_code)) end
+
+    local out = { changed = true, tokens_revoked = true,
+                  note = 'every access token for this account was revoked' }
+    -- Only present when the account had no recovery code yet, which is the one
+    -- chance to hand one over: it is stored hashed and cannot be read back.
+    if err_or_code then
+        out.recovery_code = err_or_code
+        out.recovery_note = 'store this now; it is the only way back in if the password is lost'
+    end
+    return http_response_json(200, out)
+end
+
+-- POST /api/v1/user/password/reset  { username, recovery_code, new_password }
+--
+-- DELIBERATELY UNAUTHENTICATED: somebody who has forgotten their password
+-- cannot authenticate, which is the whole point. So the recovery code is the
+-- credential, and this goes behind the same failure lockout a login uses —
+-- every rejection here is a guess at a 16-character secret.
+--
+-- Answers with a fresh code, because spending one must never leave the account
+-- with no way back in.
+local function h_password_reset(req, ctx)
+    local b, berr = body_json(req)
+    if not b then return http_response_error(400, berr) end
+
+    local username = tostring(b.username or '')
+    local ip = ctx.ip or req.peer_ip
+
+    local allowed, retry = auth_ratelimit_check(ip, username)
+    if not allowed then return auth_too_many(retry) end
+
+    local code, err, kind = auth_password_reset(username, b.recovery_code, b.new_password)
+    if not code then
+        -- Only a rejection is a guess. A malformed request is the caller's own
+        -- mistake and a store failure is ours; counting either would let a
+        -- database outage lock out everyone who tried during it — the same
+        -- three-way split auth_identify makes, for the same reason.
+        if kind == 'rejected' then
+            auth_ratelimit_record_failure(ip, username)
+            return http_response_error(403, http_safe_error(err))
+        end
+        return http_response_error(kind == 'error' and 500 or 400, http_safe_error(err))
+    end
+
+    auth_ratelimit_record_success(ip, username)
+    return http_response_json(200, {
+        reset = true,
+        tokens_revoked = true,
+        recovery_code = code,
+        note = 'the previous recovery code is spent; store this replacement',
+    })
+end
+
 local function h_token_create(req, _ctx)
     local user, resp = require_user(req)
     if not user then return resp end
@@ -709,6 +790,9 @@ function g_exports.api_install()
 
     http_get('/api/v1/users', h_user_list)
     http_post('/api/v1/users', h_user_create)
+    http_post('/api/v1/user/password', h_password_change)
+    -- No credentials on this one, by design: see h_password_reset.
+    http_post('/api/v1/user/password/reset', h_password_reset)
     http_post('/api/v1/user/tokens', h_token_create)
     http_delete('/api/v1/user/tokens', h_token_revoke)
 
