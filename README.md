@@ -23,6 +23,9 @@ HTTP(S) work end to end, with accounts, access tokens, public/private
 repositories, a JSON management API and a same-origin repository browser. The
 browser covers the repository list, branches and tags, tree, raw files, images,
 commit history and bounded diffs, and can create, edit and delete repositories.
+A repository shows its README rendered, and source files are syntax-coloured;
+both parsers are ours rather than vendored, for the reason given at the top of
+`web/markdown.js`.
 Where you are is in the address bar, so a file, a directory, a tag, the commit
 log and an issue can each be bookmarked, shared, reloaded and gone Back from.
 Owners can also grant existing accounts read or write access to private
@@ -139,7 +142,10 @@ gitloom/
     smart.lua            the git smart-HTTP transport
     api.lua              the JSON management API
     web.lua              static files for the repository browser
-  web/                   same-origin browser (index.html, app.css, app.js)
+  web/                   same-origin browser
+    index.html           the page; app.css, app.js
+    markdown.js          Markdown to DOM -- never to an HTML string
+    highlight.js         a small tokeniser, same rule
   worker/                scripts that run on their own thread and Lua state
     kdf.lua              password hashing, kept off the event loop
   scripts/core/          modules copied from xnet2lua (share/ and server/)
@@ -149,6 +155,7 @@ gitloom/
   test/smoke.sh          end-to-end, against a real git client
   test/unit.lua          pure-Lua checks that need no server
   test/dbreset.lua       empties the test database, for the MySQL run
+  test/webjs.js          the two browser parsers, tested without a browser
 ```
 
 ## Module convention
@@ -250,10 +257,12 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 183/183 on Linux with streaming, and 172/172 on
+2.52). `test/smoke.sh` passes 190/190 on Linux with streaming, and 180/180 on
 Windows and under `GIT_STREAM=off` — the streamed-body cases are skipped there
-because they need the transport that platform does not have. `test/unit.lua` is 208 on
-Windows, 207 on Linux (one case is about Windows path spelling). Adding
+because they need the transport that platform does not have, and the browser
+parsers' own tests need node, which is a development convenience rather than a
+dependency and is skipped where it is absent. `test/unit.lua` is 216 on Windows,
+215 on Linux (one case is about Windows path spelling). Adding
 `DB_DRIVER=mysql` runs the same suite against MySQL instead of JSON files.
 
 What was checked in the runtime underneath, and is fine:

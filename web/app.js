@@ -22,6 +22,8 @@
     token: '',
     toastTimer: null,
     fileBlobUrl: '',   // released in releaseFileBlob; see loadFile
+    fileText: '',      // the open file's source, so the raw/rendered toggle is free
+    fileRaw: false,    // Markdown opens rendered; this is the toggle's state
     // Which view is showing and which file is open used to live only in the
     // DOM. The address bar has to be able to say both, so they live here now.
     view: 'code',
@@ -33,7 +35,7 @@
   // already left, and rendering it would show them the wrong tree — which is
   // not theoretical on a server where each listing forks a git process, so a
   // slow response really does arrive after a fast one issued later.
-  var seq = { repos: 0, view: 0, file: 0, diff: 0, commits: 0, access: 0, issues: 0, issue: 0 };
+  var seq = { repos: 0, view: 0, file: 0, diff: 0, commits: 0, access: 0, issues: 0, issue: 0, readme: 0 };
   var COMMIT_PAGE_SIZE = 25;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -46,6 +48,7 @@
     seq.commits += 1;
     seq.issues += 1;
     seq.issue += 1;
+    seq.readme += 1;
     return seq.view;
   }
 
@@ -699,6 +702,10 @@
     // to those bytes and nothing else would ever let go of it -- and this is
     // the path a token expiring takes, which is not a rare one.
     hideFile();
+    // Same argument for the README's own images, which hideFile does not reach.
+    releaseMarkdownBlobs($('readme-body'));
+    $('readme-body').textContent = '';
+    $('readme-panel').hidden = true;
     state.repo = null;
     state.collaborators = [];
     state.issues = [];
@@ -983,10 +990,15 @@
         return entries;
       }
       entries.forEach(function (entry) { renderTreeEntry(entry, list); });
+      // Whatever directory is on screen, its own README goes under it -- which
+      // is the whole point for the repository root, and costs nothing anywhere
+      // else. Not waited on: the listing should not sit blank behind it.
+      loadReadme(view, entries);
       return entries;
     }).catch(function (error) {
       if (!viewIsCurrent(view)) return [];
       $('tree-count').textContent = '';
+      $('readme-panel').hidden = true;
       setError(list, error.status === 404 ? '这个分支还没有可浏览的文件' : error.message);
       return [];
     });
@@ -1037,6 +1049,201 @@
     list.appendChild(row);
   }
 
+  // ---------------------------------------------------------------------------
+  // Markdown and code, rendered
+  //
+  // Both parsers live in their own files and both keep the same rule: they build
+  // DOM nodes and never HTML strings, so repository content cannot become markup
+  // on a page that is holding the reader's token. What is here is only the part
+  // that needs to know about this application -- what a relative link inside a
+  // README points at, and where an image in one comes from.
+  // ---------------------------------------------------------------------------
+
+  var MARKDOWN_FILE = /\.(md|markdown|mdown|mkd|mdwn)$/i;
+  var README_FILE = /^readme(\.(md|markdown|mdown|mkd|mdwn|txt))?$/i;
+
+  // The same guard highlight.js keeps, for the same reason and at the same
+  // scale: rendering is linear but it builds a DOM node per construct, and a
+  // generated file that happens to end in .md would build millions of them. A
+  // README this size is not a README, and the source is still right there.
+  var MAX_RENDER_BYTES = 512 * 1024;
+
+  function isMarkdown(path) { return MARKDOWN_FILE.test(path || ''); }
+
+  // Through window rather than the bare name, and checked rather than assumed:
+  // if markdown.js failed to deploy, the file view still has to show files.
+  // Rendering is a feature of this page; reading a repository is the point of
+  // it, and losing the second because the first is missing is the wrong trade.
+  function renderable(source) {
+    return !!window.glMarkdown && source.length <= MAX_RENDER_BYTES;
+  }
+  function highlightInto(code, language) {
+    if (window.glHighlight) window.glHighlight.paint(code, language);
+  }
+
+  // `docs/a.md` + `../img/x.png` -> `img/x.png`, the way git would read it.
+  function resolveRepoPath(dir, rel) {
+    var parts = rel.charAt(0) === '/' || !dir ? [] : dir.split('/');
+    rel.split('/').forEach(function (piece) {
+      if (piece === '' || piece === '.') return;
+      if (piece === '..') { parts.pop(); return; }
+      parts.push(piece);
+    });
+    return parts.join('/');
+  }
+
+  function repoRelative(dir, rel) {
+    // A fragment or query on a link into a repository means nothing here, and
+    // carrying it would only produce a path that does not exist. Split on the
+    // literal characters first: a `#` that is part of a FILE name is written
+    // `%23` precisely so it is not a fragment, and decoding before this would
+    // turn it back into one.
+    var clean = String(rel || '').split('#')[0].split('?')[0];
+    if (!clean) return '';
+    // A destination is a URL, not a path, so `my%20docs/a.md` names
+    // `my docs/a.md` -- and that is the ordinary way to write a link to a file
+    // with a space in it. Re-encoding it without decoding first yields
+    // `my%2520docs`, which cannot exist. decodeURIComponent throws on a stray
+    // `%`, which a hand-written README will have sooner or later, and the text
+    // as written is the better guess then.
+    try { clean = decodeURIComponent(clean); } catch (e) { /* as written */ }
+    return resolveRepoPath(dir, clean);
+  }
+
+  // A link in a README becomes a route into this same browser rather than a
+  // request the server would answer with a 404: /admin/site/docs/x.md is the git
+  // transport's path space, not ours.
+  function markdownLink(dir, rel) {
+    if (!state.repo) return null;
+    var target = repoRelative(dir, rel);
+    if (!target) return null;
+    // Nothing says whether a path is a file or a directory, and the URL has to
+    // pick one. A trailing slash or a name with no extension reads as a
+    // directory, which is right far more often than it is wrong.
+    var last = target.split('/').pop();
+    var kind = (rel.charAt(rel.length - 1) === '/' || last.indexOf('.') < 0) ? '/tree/' : '/blob/';
+    return '#/' + encodeURIComponent(state.repo.owner) + '/' + encodeURIComponent(state.repo.name) +
+           kind + encodeRef(state.branch) + '/' + encodePath(target);
+  }
+
+  // Same reason the file view fetches images as blobs: the raw endpoint needs an
+  // Authorization header, and an <img src> cannot send one, so a private
+  // repository's own logo would 401.
+  function markdownImage(dir, rel, img, bin) {
+    if (!state.repo) return;
+    var target = repoRelative(dir, rel);
+    if (!target) return;
+    var ticket = seq.view;
+    var suffix = '/raw/' + encodeRef(state.branch) + '/' + encodePath(target);
+    api(repoPath(suffix)).then(function (response) {
+      return response.blob();
+    }).then(function (blob) {
+      if (!viewIsCurrent(ticket)) return;
+      var url = URL.createObjectURL(blob);
+      bin.push(url);
+      img.src = url;
+    }).catch(function () {
+      // A README that names an image it did not commit is a flaw in the README.
+      // The alt text is already there; an error banner would be noise.
+    });
+  }
+
+  // Object URLs are held on the element that shows them rather than in one list
+  // on state: the README panel and an open Markdown file can each have images,
+  // and re-rendering one must not revoke the other's.
+  function releaseMarkdownBlobs(target) {
+    (target.mdBlobUrls || []).forEach(function (url) { URL.revokeObjectURL(url); });
+    target.mdBlobUrls = [];
+  }
+
+  function renderMarkdownInto(target, source, fromPath) {
+    var dir = fromPath ? fromPath.replace(/\/?[^\/]*$/, '') : (state.path || '');
+    releaseMarkdownBlobs(target);
+    var bin = target.mdBlobUrls;
+    target.textContent = '';
+    target.appendChild(window.glMarkdown.render(source, {
+      resolveLink: function (rel) { return markdownLink(dir, rel); },
+      resolveImage: function (rel, img) { markdownImage(dir, rel, img, bin); },
+      highlight: highlightInto,
+    }));
+  }
+
+  // The README under whatever directory is being browsed, the way a repository
+  // page is expected to read. It is not shown while a file is open: two
+  // documents on one screen is worse than either.
+  function loadReadme(view, entries) {
+    var panel = $('readme-panel');
+    var found = null;
+    (entries || []).forEach(function (entry) {
+      if (!found && entry.type === 'blob' && README_FILE.test(entry.name)) found = entry;
+    });
+    if (!found) {
+      releaseMarkdownBlobs($('readme-body'));
+      $('readme-body').textContent = '';
+      panel.hidden = true;
+      return Promise.resolve();
+    }
+
+    var ticket = (seq.readme += 1);
+    var suffix = '/raw/' + encodeRef(state.branch) + '/' + encodePath(found.path);
+    return api(repoPath(suffix)).then(function (response) {
+      return response.text();
+    }).then(function (body) {
+      if (ticket !== seq.readme || !viewIsCurrent(view)) return;
+      $('readme-name').textContent = found.name;
+      if (isMarkdown(found.name) && renderable(body)) {
+        renderMarkdownInto($('readme-body'), body, found.path);
+      } else {
+        // README with no extension, or README.txt: it is not Markdown and
+        // guessing that it is turns plain text into wrong headings.
+        var pre = document.createElement('pre');
+        pre.className = 'code-block';
+        pre.textContent = body;
+        $('readme-body').textContent = '';
+        $('readme-body').appendChild(pre);
+      }
+      panel.hidden = !$('file-panel').hidden;
+    }).catch(function () {
+      if (ticket !== seq.readme) return;
+      panel.hidden = true;
+    });
+  }
+
+  // Text is shown one of three ways: rendered Markdown, coloured source, or
+  // plain. The toggle only exists for the first, and flipping it costs nothing
+  // because the source is already in hand.
+  function showFileText(body, path) {
+    var pre = $('file-content');
+    var code = $('file-code');
+    var rendered = $('file-render');
+
+    state.fileText = body;
+
+    if (looksBinary(body)) {
+      $('toggle-render').hidden = true;
+      rendered.hidden = true;
+      pre.hidden = false;
+      code.textContent = '这是二进制文件，没法在这里显示。用上面的「下载」取回原始内容。';
+      return;
+    }
+
+    var markdown = isMarkdown(path) && renderable(body);
+    $('toggle-render').hidden = !markdown;
+    $('toggle-render').textContent = state.fileRaw ? '渲染显示' : '查看源码';
+
+    if (markdown && !state.fileRaw) {
+      renderMarkdownInto(rendered, body, path);
+      rendered.hidden = false;
+      pre.hidden = true;
+      return;
+    }
+
+    rendered.hidden = true;
+    pre.hidden = false;
+    code.textContent = body;
+    highlightInto(code, window.glHighlight && window.glHighlight.languageFor(path));
+  }
+
   // An object URL is a document-lifetime reference to the bytes behind it, so
   // one has to be released or every file opened in a session is still in memory
   // when the tab closes.
@@ -1081,12 +1288,16 @@
     var link = $('download-file');
 
     state.file = path;
+    state.fileRaw = false;         // a Markdown file opens rendered
     panel.hidden = false;
+    $('readme-panel').hidden = true;
     wrap.hidden = true;
     link.hidden = true;
     text.hidden = false;
+    $('file-render').hidden = true;
+    $('toggle-render').hidden = true;
     $('file-title').textContent = path;
-    text.textContent = '正在读取…';
+    $('file-code').textContent = '正在读取…';
 
     var suffix = '/raw/' + encodeRef(state.branch) + '/' + encodePath(path);
     api(repoPath(suffix)).then(function (response) {
@@ -1110,25 +1321,34 @@
       }
       return got.blob.text().then(function (body) {
         if (ticket !== seq.file) return;
-        text.textContent = looksBinary(body)
-          ? '这是二进制文件，没法在这里显示。用上面的「下载」取回原始内容。'
-          : body;
+        showFileText(body, path);
         panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
     }).catch(function (error) {
       if (ticket !== seq.file) return;
       text.hidden = false;
       wrap.hidden = true;
-      text.textContent = error.message;
+      $('file-render').hidden = true;
+      $('toggle-render').hidden = true;
+      $('file-code').textContent = error.message;
     });
   }
 
   function hideFile() {
     seq.file += 1;   // whatever is in flight no longer has a panel to land in
     state.file = '';
+    state.fileText = '';
+    state.fileRaw = false;
     releaseFileBlob();
     $('file-image').removeAttribute('src');
+    releaseMarkdownBlobs($('file-render'));
+    $('file-render').textContent = '';
+    $('file-render').hidden = true;
+    $('toggle-render').hidden = true;
     $('file-panel').hidden = true;
+    // The README goes back under the listing now that nothing covers it, but
+    // only if there was one: an empty card is worse than no card.
+    $('readme-panel').hidden = $('readme-body').childNodes.length === 0;
   }
 
   function updateCommitPagination() {
@@ -1607,6 +1827,15 @@
     loadTree(view);
   });
   $('close-file').addEventListener('click', function () { hideFile(); routeWrite(); });
+  // The source is already in hand, so this is a re-render rather than a fetch.
+  // Deliberately not in the URL: a link to a file should open the way the
+  // repository reads, and how one reader prefers to look at it is not state
+  // anybody wants to share.
+  $('toggle-render').addEventListener('click', function () {
+    if (!state.file) return;
+    state.fileRaw = !state.fileRaw;
+    showFileText(state.fileText, state.file);
+  });
   $('close-diff').addEventListener('click', function () {
     seq.diff += 1;
     $('diff-panel').hidden = true;

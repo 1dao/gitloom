@@ -740,6 +740,20 @@ do
     local stale = __web_serve('web', '/app.css', { v = 'not-the-digest' })
     eq('a wrong digest is not cached either', stale.headers['Cache-Control'], 'no-cache')
 
+    -- The two parsers are separate routes, and the page has to ask for them
+    -- under the same digest: a stale markdown.js against a fresh app.js is the
+    -- exact split the stamping exists to prevent.
+    for _, name in ipairs({ 'markdown.js', 'highlight.js' }) do
+        local asset = __web_serve('web', '/' .. name, { v = version })
+        eq(name .. ' is served', asset.status, 200)
+        eq(name .. ' streams from disk', asset.file, 'web/' .. name)
+        eq(name .. ' is stamped immutable', asset.headers['Cache-Control'],
+           'public, max-age=31536000, immutable')
+        check('the page loads ' .. name .. ' at the current digest',
+            index.body:find('/' .. name .. '?v=' .. version, 1, true) ~= nil,
+            'the page does not ask for ' .. name .. ' at ' .. tostring(version))
+    end
+
     eq('a missing web root answers 503 for the page',
        __web_serve('web/nope', '/').status, 503)
     eq('a missing web root answers 503 for an asset',

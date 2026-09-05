@@ -23,6 +23,14 @@ local FILES = {
     { route = '/',        name = INDEX,     type = 'text/html; charset=utf-8' },
     { route = '/app.css', name = 'app.css', type = 'text/css; charset=utf-8' },
     { route = '/app.js',  name = 'app.js',  type = 'application/javascript; charset=utf-8' },
+    -- Rendering a README and colouring a source file are each a parser over
+    -- untrusted repository content, so they are their own files rather than
+    -- more of app.js: what they may touch is auditable in one read, and the
+    -- rule they both keep -- build DOM nodes, never HTML strings -- is stated
+    -- at the top of each. Neither is a vendored bundle; see the note in
+    -- web/markdown.js for why not.
+    { route = '/markdown.js',  name = 'markdown.js',  type = 'application/javascript; charset=utf-8' },
+    { route = '/highlight.js', name = 'highlight.js', type = 'application/javascript; charset=utf-8' },
 }
 
 local STATIC_ROOT   = 'web'

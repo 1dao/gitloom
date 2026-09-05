@@ -279,3 +279,54 @@ h1, h2, h3, p { margin-top: 0; }
   .issue-row { gap: 8px; padding: 10px; }
   .issue-state-pill { display: none; }
 }
+
+/* Rendered Markdown and coloured source.
+   Every colour is a token that already exists: a README should read like part
+   of the page rather than like a document pasted into it. */
+
+.readme-panel { margin-top: 18px; }
+.readme-panel .md { padding: 20px 22px 24px; }
+
+.md { color: var(--text); font-size: 13.5px; line-height: 1.75; overflow-wrap: break-word; }
+.md > *:first-child { margin-top: 0; }
+.md > *:last-child { margin-bottom: 0; }
+
+.md-heading { margin: 26px 0 12px; line-height: 1.35; font-weight: 620; }
+.md h1.md-heading { font-size: 22px; padding-bottom: 8px; border-bottom: 1px solid var(--line-soft); }
+.md h2.md-heading { font-size: 18px; padding-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
+.md h3.md-heading { font-size: 15px; }
+.md h4.md-heading, .md h5.md-heading, .md h6.md-heading { font-size: 13.5px; color: var(--muted); }
+
+.md-paragraph { margin: 0 0 13px; }
+.md-rule { height: 1px; margin: 22px 0; border: 0; background: var(--line); }
+
+.md-link { color: var(--accent-2); text-decoration: none; border-bottom: 1px solid rgba(141, 168, 255, .3); cursor: pointer; }
+.md-link:hover { border-bottom-color: var(--accent-2); }
+
+.md-code { padding: 2px 6px; border-radius: 5px; background: rgba(88, 213, 201, .1); color: var(--accent); font: 12px/1.5 "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+.md-pre { margin: 0 0 14px; border-radius: 10px; }
+.md-pre .md-code, .md-pre code { padding: 0; background: none; color: inherit; font: inherit; }
+
+.md-quote { margin: 0 0 14px; padding: 2px 0 2px 15px; border-left: 3px solid var(--line); color: var(--muted); }
+.md-quote > *:last-child { margin-bottom: 0; }
+
+.md-list { margin: 0 0 13px; padding-left: 24px; }
+.md-list .md-list { margin-bottom: 0; }
+.md-item { margin: 3px 0; }
+.md-list-loose .md-item { margin: 9px 0; }
+.md-item-task { list-style: none; margin-left: -20px; }
+.md-task { margin-right: 8px; vertical-align: -1px; accent-color: var(--accent); }
+
+.md-table-scroll { margin: 0 0 15px; overflow-x: auto; }
+.md-table { border-collapse: collapse; font-size: 12.5px; }
+.md-table th, .md-table td { padding: 7px 13px; border: 1px solid var(--line-soft); text-align: left; }
+.md-table th { background: rgba(141, 168, 255, .06); font-weight: 600; }
+
+.md-image { max-width: 100%; border-radius: 8px; }
+.md-strike { color: var(--dim); }
+
+/* Four classes, which is what makes code scannable; the rest is decoration. */
+.tok-comment { color: #5f7688; font-style: italic; }
+.tok-string  { color: #9ad6a4; }
+.tok-number  { color: #e2b979; }
+.tok-keyword { color: #8da8ff; }

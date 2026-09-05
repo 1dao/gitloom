@@ -265,9 +265,9 @@ Verified against a real MySQL 8.4.9, on both platforms and both stores:
 
 | | JSON | MySQL |
 |---|---|---|
-| `test/unit.lua` (Windows / Linux) | 208 / 207 | — |
-| `test/smoke.sh` Windows | 172/172 | 172/172 |
-| `test/smoke.sh` Linux | 183/183 | 183/183 |
+| `test/unit.lua` (Windows / Linux) | 216 / 215 | — |
+| `test/smoke.sh` Windows | 180/180 | 180/180 |
+| `test/smoke.sh` Linux | 190/190 | 190/190 |
 
 `test/dbreset.lua` empties the database first, because the counts the suite
 asserts only mean something from empty. gitloom itself never creates a database:
@@ -601,9 +601,124 @@ URL behind an open file, which is a document-lifetime reference to those bytes
 that nothing else would ever drop — on the path a token expiring takes, which is
 not a rare one.
 
-Still missing for a single operator: rendering a repository's README on its
-page, renaming a repository, listing or revoking tokens other than the current
-one, and searching inside a repository.
+Still missing for a single operator: renaming a repository, listing or revoking
+tokens other than the current one, and searching inside a repository.
+
+### README rendering and syntax colouring, without vendoring anything
+
+A repository page that does not show its README is most of a git front end
+missing, and the obvious route to one is `marked` plus `DOMPurify` plus
+`highlight.js`. The content security policy forbids a CDN, so that route means
+committing three minified bundles.
+
+We did not, and the reason is not size. This repository has no package manager,
+no build step and no way to ship a patch on the day DOMPurify has a bypass — and
+the runtime underneath vendors luajit, mbedtls and picoquic **as readable
+source** precisely so that everything in the tree can be read. Three minified
+blobs would be the only unreviewable thing here, and they would be the part
+standing between a README and the reader's token.
+
+So `web/markdown.js` and `web/highlight.js` are ours, and they are safe by
+construction rather than by filtering: **neither ever builds an HTML string.**
+Every element comes from `createElement` and every piece of text goes in through
+`textContent`, so there is no markup for repository content to inject into and
+no sanitiser with a list of tags to get wrong. That reduces the entire untrusted
+surface to one function — `safeUrl` — which is the only place a README reaches
+an attribute. It decodes entities *before* it tests the scheme and strips
+control characters before that, because `&#106;avascript:` and `java<tab>script:`
+are precisely how a check in the other order gets walked past.
+
+The policy, stated once: raw HTML in Markdown is not rendered at all. GitHub
+allows a subset; "which tags are safe" is the question with no stable answer, and
+a git host for one operator does not need `<details>`. An external image is not
+loaded either — `img-src` would block it anyway, and widening that policy would
+let any README author log the address of every reader of a private instance — so
+it becomes a link. A relative image is fetched through the API as a blob, the
+same way the file view already handles a PNG, because the raw endpoint needs an
+Authorization header that an `<img src>` cannot send.
+
+Two smaller decisions worth their lines. A relative link becomes a route into
+this browser rather than a server path, because `/admin/site/docs/x.md` belongs
+to the git transport. And an in-page `#section` link gets **no href at all**,
+only a scroll handler: this page keeps its own state in `location.hash`, so a
+real fragment link would overwrite the route with a section name.
+
+Colouring is four token classes — comment, string, number, keyword — driven by
+one table per language, so a new language is data rather than code and an
+unknown one renders as plain text. Ordering inside a language table is
+load-bearing: Lua's `--[[` has to be tried before `--`, or every block comment
+reads as a line comment and the rest of the file turns back into code.
+
+`test/webjs.js` is what makes the safety claim worth anything. It stubs a DOM
+that keeps receipts — every element created, every URL assigned — and asserts
+against the record rather than against rendered markup, so an attempt to create
+a `<script>` fails there even though nothing would have executed. Removing the
+scheme test from `safeUrl` turns 10 of its 47 checks red, and the entity- and
+tab-encoded payloads are among them. It also pins an invariant the highlighter
+has to keep: the painted output's text must equal the input byte for byte.
+
+Node runs it, and node is a development convenience rather than a dependency —
+nothing in `bin/` or `app/` needs it — so `test/smoke.sh` skips it where it is
+absent, which is why the Linux column is one check shorter rather than one check
+luckier.
+
+**What the review of it found**, all four fixed:
+
+1. `safeUrl` stripped *all* whitespace, so `<my docs/a.md>` became `mydocs/a.md`
+   — a link to a directory that exists turned into one that does not, silently.
+   The rule now copies what a browser actually does: delete tab, newline and
+   carriage return anywhere (that is what makes `java<tab>script:` a working
+   address), trim leading and trailing spaces, and **leave an interior space
+   alone**, because the browser does and a space cannot hold a scheme together.
+2. A relative destination was not percent-decoded, so `[x](my%20docs/a.md)` —
+   the ordinary way to write a link to a file with a space — was re-encoded into
+   `my%2520docs`, a path no repository has. This hit the common case, not the
+   exotic one.
+3. Nothing capped Markdown rendering the way `MAX_BYTES` caps colouring, so a
+   generated file that happened to end in `.md` would build DOM nodes until the
+   tab stopped responding.
+4. A missing `markdown.js` took the whole file view down with it, because
+   `glMarkdown` was referenced as a bare name. Rendering is a feature of this
+   page; reading a repository is the point of it.
+
+The fifth finding was in the tests, and it is the one worth remembering. The
+hostile-URL cases asserted on rendered `href`s — and **passed with the URL
+normalisation removed entirely**. They could not fail, because the renderer's
+fallback for anything it cannot classify is the relative branch, and the
+application turns a relative path into a `#/owner/name/blob/...` route: an
+obfuscated `java<tab>script:` does not become a dangerous link here, it becomes
+a harmless one. That is a good property, and it meant the tests were measuring
+it instead of what they claimed. `safeUrl` is now tested directly, sixteen cases
+of it, and removing the normalisation turns five of them red.
+
+It also corrected the file's own comment, which had claimed the decode-then-check
+ordering was what stood between a README and a `javascript:` link. It is not —
+the allowlisted-scheme-or-else-it-is-a-path structure is. What the ordering buys
+is that the scheme test sees what the browser would see, so a dangerous address
+is *recognised and refused* rather than quietly reclassified as a file name.
+That distinction matters because the caller's `resolveLink` is then the thing
+deciding, so its contract is now written down where it is implemented.
+
+Verified in a browser against a live instance: a README with headings, setext
+headings, nested and task lists, a table with per-column alignment, blockquotes,
+two fenced blocks in different languages, a relative image and a relative link
+renders correctly and in the page's own palette; the 1×1 PNG really decodes
+(`naturalWidth` 1) through the blob path; the in-page jump scrolls without
+touching the route; opening a `.md` file renders it with a source toggle, and
+opening a `.lua` file colours it with the long comment as one comment. The
+hostile half of the same README — `<script>`, `onerror`, `javascript:` in six
+encodings, `data:text/html` — produced no dangerous element, no dangerous
+attribute, and no console or policy error: it is all visible as text. And after
+the fixes above, a README link written `[a doc](<我的 docs/读我 note%231.md>)`
+opens that exact file, with the space and the `#` each encoded once on the way
+into the address bar.
+
+Neither parser is fast in the sense of being optimised, but neither is a way to
+hang a tab: 10,000 unmatched brackets is 83 ms, 10,000 asterisks is 1 ms, a
+50,000-line README is 44 ms, and 280 KB of JavaScript colours in 56 ms. The
+regexes were checked for the nested-quantifier shape that backtracks
+exponentially; the two that have it (`RULE`, `TABLE_RULE`) only ever see a
+single line, and were measured rather than reasoned about.
 
 ### The address bar
 

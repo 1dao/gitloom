@@ -118,14 +118,23 @@
                   <h3 id="file-title">—</h3>
                 </div>
                 <div class="file-actions">
+                  <button class="button button-quiet" id="toggle-render" type="button" hidden>查看源码</button>
                   <a class="button button-quiet" id="download-file" download hidden>下载</a>
                   <button class="button button-quiet" id="close-file" type="button">关闭</button>
                 </div>
               </div>
-              <pre id="file-content" class="code-block"><code></code></pre>
+              <pre id="file-content" class="code-block"><code id="file-code"></code></pre>
+              <div id="file-render" class="md" hidden></div>
               <div id="file-image-wrap" class="file-image" hidden>
                 <img id="file-image" alt="">
               </div>
+            </div>
+            <div id="readme-panel" class="browser-card readme-panel" hidden>
+              <div class="card-caption">
+                <span id="readme-name">README</span>
+                <span class="muted">仓库说明</span>
+              </div>
+              <div id="readme-body" class="md"></div>
             </div>
           </div>
 
@@ -308,6 +317,9 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <!-- Order matters and defer preserves it: app.js calls into both. -->
+  <script src="/markdown.js?v=__ASSET_VERSION__" defer></script>
+  <script src="/highlight.js?v=__ASSET_VERSION__" defer></script>
   <script src="/app.js?v=__ASSET_VERSION__" defer></script>
 </body>
 </html>

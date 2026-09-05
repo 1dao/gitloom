@@ -35,6 +35,9 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); printf 'PASS %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf 'FAIL %s :: %s\n' "$1" "$2"; }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "got=$2 want=$3"; fi; }
+# Counts neither way: a check that did not run is not a check that passed, and
+# claiming it did is how a tool going missing turns into a green suite.
+skip() { printf 'SKIP %s\n' "$1"; }
 
 cleanup() {
     [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null
@@ -183,6 +186,46 @@ curl -s "$BASE/app.js" | grep -q "state.file ? '/blob/' : '/tree/'" \
 # to the repository root before the file had loaded.
 curl -s "$BASE/app.js" | grep -q 'if (!restoring) routeWrite();' \
     && ok 'restoring does not overwrite the link being restored' || bad 'restoring does not overwrite the link being restored' 'ordering guard missing'
+
+# A repository page that does not show its README is most of a git front end
+# missing. Both parsers are served as their own routes -- see web.lua for why --
+# so the page is only whole if all three arrive.
+for asset in markdown.js highlight.js; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/$asset")
+    [ "$code" = "200" ] && ok "$asset is served" || bad "$asset is served" "HTTP $code"
+done
+grep -q 'id="readme-panel"' "$WORK/web.index" \
+    && ok 'the page has somewhere to render a README' || bad 'the page has somewhere to render a README' 'panel missing'
+grep -q 'markdown.js?v=' "$WORK/web.index" && grep -q 'highlight.js?v=' "$WORK/web.index" \
+    && ok 'both parsers are stamped with the asset digest' || bad 'both parsers are stamped with the asset digest' 'unstamped'
+# The claim these two make is that they never build an HTML string, so a README
+# cannot become markup. innerHTML anywhere in either of them voids it.
+curl -s "$BASE/markdown.js" "$BASE/highlight.js" | grep -q 'innerHTML\|outerHTML\|insertAdjacentHTML\|document.write' \
+    && bad 'neither parser builds markup from repository content' 'innerHTML found' \
+    || ok 'neither parser builds markup from repository content'
+
+# A link destination is a URL, so `[x](my%20docs/a.md)` -- the ordinary way to
+# write a link to a file with a space -- names `my docs/a.md`. Encoding it again
+# without decoding first produces `my%2520docs`, a path no repository has.
+curl -s "$BASE/app.js" | grep -q 'decodeURIComponent(clean)' \
+    && ok 'a percent-encoded link destination is decoded once' || bad 'a percent-encoded link destination is decoded once' 'decode missing'
+# A README this size is a generated file, and rendering it would build a DOM
+# node per construct until the tab stopped responding.
+curl -s "$BASE/app.js" | grep -q 'MAX_RENDER_BYTES' \
+    && ok 'an oversized Markdown file is shown as source' || bad 'an oversized Markdown file is shown as source' 'guard missing'
+
+# The parsers' own tests. Node is a development convenience, not a dependency of
+# gitloom -- nothing in bin/ or app/ needs it -- so this skips where it is absent
+# rather than failing, the way the xproc pipe test does.
+if command -v node >/dev/null 2>&1; then
+    if node "$(dirname "$0")/webjs.js" > "$WORK/webjs.out" 2>&1; then
+        ok "browser parsers pass their own tests ($(sed -n 's/^\[webjs\] \([0-9]*\) passed.*/\1/p' "$WORK/webjs.out") checks)"
+    else
+        bad 'browser parsers pass their own tests' "$(head -c 600 "$WORK/webjs.out")"
+    fi
+else
+    skip 'browser parsers pass their own tests (node not installed)'
+fi
 curl -s "$BASE/app.js" | grep -q 'state.repo.owner === state.username' \
     && ok 'browser only offers owner deletion' || bad 'browser only offers owner deletion' 'owner guard missing'
 curl -s "$BASE/app.js" | grep -q 'requestToken && state.token === requestToken' \
