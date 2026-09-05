@@ -2,7 +2,7 @@
 --
 -- Exports: browse_path_ok, browse_decode_path, browse_resolve,
 --          browse_tree, browse_blob_info, browse_blob_file,
---          browse_log, browse_commit, browse_diff, browse_refs
+--          browse_log, browse_commit, browse_diff, browse_refs, browse_search
 --
 -- Everything here answers "what is IN this repository", as opposed to repo.lua,
 -- which answers "which repositories are there". All of it shells out; all of it
@@ -361,6 +361,74 @@ function g_exports.browse_diff(dir, oid, path)
 end
 
 -- Branches and tags, from one call each.
+-- Search the contents of one revision: `git grep`, bounded.
+--
+-- FIXED STRINGS, not a regular expression. `-F` is not a convenience here: the
+-- pattern is typed by whoever is looking and a regex engine given hostile input
+-- is a way to spend the server's CPU without limit, which for a search anyone
+-- with read access can run is the whole of the denial-of-service surface. The
+-- shape people actually want -- "where is this identifier" -- is a fixed string
+-- anyway.
+--
+-- Every other bound is there for the same reason. `--max-count` caps matches
+-- PER FILE so one generated file cannot fill the answer, `max_capture` caps the
+-- bytes git may hand back at all, and the total is cut at `limit` so the
+-- response stays a page rather than a repository. `-I` skips binary files,
+-- which is what makes the output text in the first place.
+--
+-- `oid` must come from browse_resolve, like every other function here: rule 1 at
+-- the top of this file is that caller-supplied ref text never reaches a git
+-- command line, and `git grep <ref>` would be exactly that.
+--
+-- Returns a list of { path, line, text } plus a flag saying the answer was cut.
+function g_exports.browse_search(dir, oid, query, limit)
+    local pattern = tostring(query or '')
+    if pattern == '' then return nil, 'a search string is required' end
+    if #pattern > 256 then return nil, 'search string is too long' end
+    limit = math.max(1, math.min(tonumber(limit) or 200, 500))
+
+    local r = git_exec({
+        'grep', '--no-color', '-I', '-n', '-F', '--max-count=20',
+        '--full-name', '-e', pattern,
+        '--end-of-options', oid,
+    }, { cwd = dir, max_capture = 2 * 1024 * 1024 })
+
+    -- git grep exits 1 for "found nothing", which is an answer and not a
+    -- failure, and 2 or more for an actual one. Branching on the EXIT CODE
+    -- rather than on whether any output came back is the difference between
+    -- those two, and getting it wrong is not a small thing: the first version
+    -- of this treated "no output" as "no matches", so an invalid option --
+    -- which is exactly what it shipped with -- reported every search as
+    -- finding nothing, in a repository where the word was on line 1.
+    if r.exit_code == 1 then
+        return { results = {}, count = 0, truncated = false }
+    end
+    if not r.ok then
+        cfg_log_warn('git grep failed (exit %s): %s', tostring(r.exit_code),
+            util_str_trim(tostring(r.stderr or '')))
+        return nil, 'search failed'
+    end
+
+    local out, truncated = {}, false
+    for line in tostring(r.stdout):gmatch('[^\r\n]+') do
+        -- <oid>:<path>:<lineno>:<text>. The object id is echoed back on every
+        -- row because the search was given one, and a path may itself contain a
+        -- colon, so this strips the known prefix rather than splitting on ':'.
+        local rest = line
+        if util_str_starts(rest, oid .. ':') then rest = rest:sub(#oid + 2) end
+        local path, no, text = rest:match('^(.-):(%d+):(.*)$')
+        if path and path ~= '' then
+            if #out >= limit then truncated = true; break end
+            -- One long line in a minified file would otherwise be the whole
+            -- response. The reader wants to see WHERE the match is; the file
+            -- view is one click away for the rest of it.
+            if #text > 400 then text = text:sub(1, 400) end
+            out[#out + 1] = { path = path, line = tonumber(no), text = text }
+        end
+    end
+    return { results = out, count = #out, truncated = truncated }
+end
+
 function g_exports.browse_refs(dir, kind)
     local prefix = (kind == 'tags') and 'refs/tags/' or 'refs/heads/'
     local r = git_exec({ 'for-each-ref', '--format=%(refname:short)\1%(objectname)\1%(creatordate:iso-strict)',

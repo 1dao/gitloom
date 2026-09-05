@@ -2,7 +2,7 @@
 --
 -- Exports: repo_root, repo_name_ok, repo_parse_url, repo_dir, repo_dir_of,
 --          repo_exists, repo_exists_of, repo_get, repo_list, repo_create,
---          repo_update, repo_collaborators, repo_collaborator_put,
+--          repo_update, repo_rename, repo_collaborators, repo_collaborator_put,
 --          repo_collaborator_delete, repo_delete, repo_sync_head,
 --          repo_index_load, repo_key
 --
@@ -329,6 +329,102 @@ function g_exports.repo_update(owner, name, opts)
     if not sok then
         rec.description, rec.private = old_description, old_private
         return nil, 'could not persist repository changes: ' .. tostring(serr), 500
+    end
+    return rec
+end
+
+-- One move of a repository directory -- which for a change of case alone has to
+-- be two.
+--
+-- `demo` -> `Demo` keeps the same index key and, on a case-insensitive
+-- filesystem, the same directory: the destination "already exists" because it IS
+-- the source, so a single rename either refuses or does nothing. Going via a
+-- third name is what actually changes the spelling on disk, and it is the same
+-- two steps on Linux, where the one-step version would have worked.
+local function move_repo_dir(from, to, case_only)
+    if not case_only then return util_path_rename(from, to) end
+    local via = from .. '.renaming'
+    local ok, err = util_path_rename(from, via)
+    if not ok then return nil, err end
+    ok, err = util_path_rename(via, to)
+    if not ok then
+        util_path_rename(via, from)      -- put it back under the name it had
+        return nil, err
+    end
+    return true
+end
+
+-- Rename a repository, directory and all.
+--
+-- Every clone of it breaks, which is not something this can soften: git records
+-- the URL, and the old one now 404s. That is the same deal every git host
+-- offers, and it is why the browser says so before it asks.
+--
+-- The order below is chosen for what a crash leaves behind. The directory moves
+-- FIRST, because it is the only step with no undo once the index has been
+-- rewritten to point at it -- and if it fails, nothing has changed at all. The
+-- index moves second, and if that fails the directory is moved back. Issues
+-- move last, because a repository whose issues did not follow is still a
+-- repository, while an index that points at a directory that is not there is
+-- not one.
+function g_exports.repo_rename(owner, name, new_name)
+    if not repo_name_ok(owner) or not repo_name_ok(name) then
+        return nil, 'bad repository name', 400
+    end
+    if not repo_name_ok(new_name) then
+        return nil, 'bad new repository name', 400
+    end
+    if not have_index() then return nil, 'the repository index is unavailable', 500 end
+
+    local old_key = repo_key(owner, name)
+    local rec = index[old_key]
+    if not rec or not repo_exists_of(rec) then return nil, 'no such repository', 404 end
+    if rec.name == new_name then return rec end          -- already there
+
+    -- A rename that only changes case keeps the same index key, so the
+    -- collision check has to skip the repository being renamed -- otherwise
+    -- `demo` -> `Demo` reports a clash with itself.
+    local new_key = repo_key(owner, new_name)
+    if new_key ~= old_key and index[new_key] then
+        return nil, 'a repository with that name already exists', 409
+    end
+
+    local case_only = new_key == old_key
+    local from = repo_dir_of(rec)
+    local to = repo_dir(owner, new_name)
+    local mok, merr = move_repo_dir(from, to, case_only)
+    if not mok then
+        -- The usual cause on Windows is a git process still holding the
+        -- directory: a clone or push in flight keeps a handle open and rename
+        -- fails outright rather than waiting.
+        return nil, 'could not rename the repository directory: ' .. tostring(merr), 409
+    end
+
+    local old_name = rec.name
+    index[old_key] = nil
+    rec.name = new_name
+    index[new_key] = rec
+
+    local sok, serr = store_repo_rename(owner, old_name, new_name)
+    if not sok then
+        index[new_key] = nil
+        rec.name = old_name
+        index[old_key] = rec
+        move_repo_dir(to, from, case_only)
+        return nil, 'could not persist the rename: ' .. tostring(serr), 500
+    end
+
+    -- Issues are keyed by repository, so they have to follow. A failure here
+    -- leaves them under the old name: the rename itself has already committed,
+    -- and undoing it to save the issue keys would be trading a working
+    -- repository for a tidy one.
+    if type(issue_repo_rename) == 'function' then
+        local iok, ierr = issue_repo_rename(owner, old_name, new_name)
+        if not iok then
+            cfg_log_error('repository %s/%s was renamed to %s but its issues did not follow: %s',
+                owner, old_name, new_name, tostring(ierr))
+            return nil, 'repository renamed, but its issues could not be moved: ' .. tostring(ierr), 500
+        end
     end
     return rec
 end

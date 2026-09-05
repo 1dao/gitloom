@@ -93,6 +93,18 @@
     ['the repository index is unavailable', '仓库索引暂时读不到，请稍后再试'],
     ['no such repository', '仓库不存在，可能已经被删除'],
     ['cannot create a repository under another account', '不能在别人的账号下建仓库'],
+    ['a repository with that name already exists', '这个名字已经被另一个仓库占用了'],
+    ['bad new repository name', '新仓库名不合法：首字符只能是字母、数字或下划线，其后可用字母、数字、点、下划线、连字符'],
+    // The usual cause on Windows is a clone or push still holding the
+    // directory open, and "try again in a moment" is the actionable half.
+    ['could not rename the repository directory', '仓库目录暂时无法移动（可能有克隆或推送正在进行），稍后再试'],
+    ['repository renamed, but its issues could not be moved', '仓库已改名，但 issue 没有跟着迁移，请检查服务端日志'],
+    ['name must be a string', '仓库名必须是文字'],
+    ['no such token', '这个令牌不存在，可能已经被吊销'],
+    ['a token id is required', '缺少令牌标识'],
+    ['a search string is required', '请输入要搜索的内容'],
+    ['search string is too long', '搜索内容太长了'],
+    ['search failed', '搜索没能完成，请检查服务端日志'],
   ];
 
   function detailMessage(error) {
@@ -259,6 +271,9 @@
   function updateAuthButton() {
     var button = $('auth-toggle');
     button.textContent = state.username ? state.username + ' · 退出' : '登录';
+    // Tokens belong to an account, so the control only means anything once
+    // there is one signed in.
+    $('manage-tokens').hidden = !state.username;
     syncWriteActions();
   }
 
@@ -381,10 +396,11 @@
   function openEdit() {
     if (!state.repo) return;
     $('edit-message').textContent = '';
+    $('edit-name').value = state.repo.name;
     $('edit-description').value = state.repo.description || '';
     $('edit-private').checked = !!state.repo.private;
     $('edit-dialog').showModal();
-    $('edit-description').focus();
+    $('edit-name').focus();
   }
 
   // `owner` is left to the server, which defaults it to whoever is signed in.
@@ -403,15 +419,16 @@
       encodeURIComponent(repo.name), { method: 'DELETE' });
   }
 
-  function updateRepo(repo, description, isPrivate) {
-    // The server owns the byte limit for descriptions. Keeping no duplicated
-    // maxlength here means a future config change cannot leave this form with
-    // a stale client-side ceiling.
+  function updateRepo(repo, changes) {
+    // The server owns the byte limit for descriptions and the rules a name has
+    // to satisfy. Keeping no duplicated maxlength or pattern here means a
+    // future config change cannot leave this form with a stale ceiling, and a
+    // name this page thought was fine still gets the server's reason.
     return api('/api/v1/repos/' + encodeURIComponent(repo.owner) + '/' +
       encodeURIComponent(repo.name), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description: description, private: isPrivate }),
+        body: JSON.stringify(changes),
       }).then(function (response) { return response.json(); });
   }
 
@@ -845,6 +862,7 @@
     renderRepoMeta(repo);
     setFirstPush(repo, false);
     syncWriteActions();
+    closeSearch();       // results belong to the repository being left
     hideFile();          // clears state.file; the file itself is fetched below
     // A blob URL names a file, and the listing behind it has to be the
     // directory that file sits in — that is what the click path leaves on
@@ -1047,6 +1065,78 @@
       routeWrite();
     });
     list.appendChild(row);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Search
+  //
+  // One revision, fixed-string, server-bounded. The endpoint resolves the ref to
+  // an object id and runs `git grep -F`, so what is typed here is never a
+  // pattern and never reaches a command line as one.
+  // ---------------------------------------------------------------------------
+
+  function renderSearchHit(hit, list) {
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'tree-row file search-hit';
+
+    var where = document.createElement('span');
+    where.className = 'tree-name';
+    var path = document.createElement('strong');
+    path.textContent = hit.path;
+    where.appendChild(path);
+    var at = document.createElement('span');
+    at.className = 'muted';
+    at.textContent = ' : ' + hit.line;
+    where.appendChild(at);
+    row.appendChild(where);
+
+    // textContent, like everything else that shows repository content: this is
+    // a line out of a file somebody pushed.
+    var text = document.createElement('code');
+    text.className = 'search-line';
+    text.textContent = hit.text;
+    row.appendChild(text);
+
+    row.addEventListener('click', function () {
+      loadFile(hit.path);
+      routeWrite();
+    });
+    list.appendChild(row);
+  }
+
+  function runSearch(query) {
+    if (!state.repo) return;
+    var view = beginView();
+    var panel = $('search-panel');
+    var list = $('search-results');
+    panel.hidden = false;
+    setLoading(list, '正在搜索…');
+    $('search-caption').textContent = '搜索 “' + query + '”';
+
+    var suffix = '/search?q=' + encodeURIComponent(query) +
+                 '&ref=' + encodeRef(state.branch);
+    json(repoPath(suffix)).then(function (data) {
+      if (!viewIsCurrent(view)) return;
+      var hits = Array.isArray(data.results) ? data.results : [];
+      list.textContent = '';
+      if (!hits.length) {
+        setError(list, '没有找到匹配的内容');
+        return;
+      }
+      hits.forEach(function (hit) { renderSearchHit(hit, list); });
+      $('search-caption').textContent = '搜索 “' + query + '” · ' + hits.length + ' 处' +
+        (data.truncated ? '（结果已截断）' : '');
+    }).catch(function (error) {
+      if (!viewIsCurrent(view)) return;
+      setError(list, detailMessage(error));
+    });
+  }
+
+  function closeSearch() {
+    $('search-panel').hidden = true;
+    $('search-results').textContent = '';
+    $('search-input').value = '';
   }
 
   // ---------------------------------------------------------------------------
@@ -1433,8 +1523,13 @@
 
   function formatDate(value) {
     if (!value) return '';
-    var date = new Date(value);
-    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+    // The API sends two shapes and they are not interchangeable: an ISO string
+    // for anything that came out of git, and a Unix time in SECONDS for
+    // anything this server stamped itself -- an issue, a token. new Date(n)
+    // reads MILLISECONDS, so a raw stamp landed in January 1970, which is what
+    // every issue in the list has been dated until now.
+    var date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
   }
 
   function loadDiff(commit) {
@@ -1663,18 +1758,38 @@
     event.preventDefault();
     var repo = state.repo;
     if (!repo) { $('edit-dialog').close(); return; }
+    var wanted = $('edit-name').value.trim();
+    var renaming = wanted !== '' && wanted !== repo.name;
+    var changes = {
+      description: $('edit-description').value.trim(),
+      private: $('edit-private').checked,
+    };
+    // Only sent when it actually changed. A PATCH that names the name it
+    // already has is a no-op the server would still have to move a directory
+    // for, and this page has no business asking for that.
+    if (renaming) changes.name = wanted;
+
     $('edit-submit').disabled = true;
-    updateRepo(repo, $('edit-description').value.trim(), $('edit-private').checked)
+    updateRepo(repo, changes)
       .then(function (updated) {
         $('edit-dialog').close();
+        var was = repo.full_name;
         state.repo = updated;
         state.repos = state.repos.map(function (item) {
-          return item.full_name === updated.full_name ? updated : item;
+          return item.full_name === was ? updated : item;
         });
         renderRepoMeta(updated);
         syncWriteActions();
         renderRepos();
-        showToast('仓库设置已保存');
+        if (renaming) {
+          // The address bar still says the old name, and a reload of it would
+          // now find nothing. Written with replace() so Back does not lead to a
+          // URL that has stopped existing.
+          routeWrite(true);
+          showToast('已改名为 ' + updated.full_name + '；旧的克隆地址已失效');
+        } else {
+          showToast('仓库设置已保存');
+        }
       })
       .catch(function (error) { $('edit-message').textContent = detailMessage(error); })
       .finally(function () { $('edit-submit').disabled = false; });
@@ -1757,6 +1872,99 @@
       .catch(function (error) { $('issue-detail-meta').textContent = issueError(error); })
       .finally(function () { submit.disabled = false; });
   });
+  $('search-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var query = $('search-input').value.trim();
+    if (!query) { closeSearch(); return; }
+    runSearch(query);
+  });
+  $('search-close').addEventListener('click', closeSearch);
+
+  // ---------------------------------------------------------------------------
+  // Access tokens
+  //
+  // The listing carries no token value and cannot: only the digest is stored,
+  // so there is nothing on the server that could answer with one.
+  // ---------------------------------------------------------------------------
+
+  function renderTokens(tokens) {
+    var list = $('tokens-list');
+    list.textContent = '';
+    if (!tokens.length) {
+      setError(list, '这个账号还没有令牌');
+      return;
+    }
+    tokens.forEach(function (token) {
+      var row = document.createElement('div');
+      row.className = 'access-row';
+
+      var who = document.createElement('div');
+      var label = document.createElement('strong');
+      label.textContent = token.label || 'token';
+      who.appendChild(label);
+      if (token.current) {
+        var badge = document.createElement('span');
+        badge.className = 'pill';
+        badge.textContent = '当前会话';
+        who.appendChild(document.createTextNode(' '));
+        who.appendChild(badge);
+      }
+      var when = document.createElement('div');
+      when.className = 'commit-meta';
+      when.textContent = '创建于 ' + formatDate(token.created_at) +
+        (token.expires_at ? ' · 到期 ' + formatDate(token.expires_at) : ' · 长期有效');
+      who.appendChild(when);
+      row.appendChild(who);
+
+      var revoke = document.createElement('button');
+      revoke.type = 'button';
+      revoke.className = 'button button-quiet';
+      revoke.textContent = token.current ? '吊销并退出' : '吊销';
+      revoke.addEventListener('click', function () {
+        revoke.disabled = true;
+        $('tokens-message').textContent = '';
+        api('/api/v1/user/tokens/' + encodeURIComponent(token.id), { method: 'DELETE' })
+          .then(function (response) { return response.json(); })
+          .then(function (result) {
+            // Revoking the credential this tab is holding is a logout, and the
+            // server has already made it so. Carrying on as if signed in would
+            // mean every later request 401s with no explanation.
+            if (result.was_current) {
+              $('tokens-dialog').close();
+              logout();
+              showToast('当前令牌已吊销，已退出登录');
+              return;
+            }
+            showToast('令牌已吊销');
+            return loadTokens();
+          })
+          .catch(function (error) {
+            revoke.disabled = false;
+            $('tokens-message').textContent = detailMessage(error);
+          });
+      });
+      row.appendChild(revoke);
+      list.appendChild(row);
+    });
+  }
+
+  function loadTokens() {
+    var list = $('tokens-list');
+    setLoading(list, '正在读取…');
+    return json('/api/v1/user/tokens').then(function (data) {
+      renderTokens(Array.isArray(data.tokens) ? data.tokens : []);
+    }).catch(function (error) {
+      setError(list, detailMessage(error));
+    });
+  }
+
+  $('manage-tokens').addEventListener('click', function () {
+    if (!state.username) { openAuth(); return; }
+    $('tokens-message').textContent = '';
+    $('tokens-dialog').showModal();
+    loadTokens();
+  });
+
   $('copy-clone').addEventListener('click', copyCloneUrl);
   $('copy-push').addEventListener('click', function () {
     copyText($('first-push-commands').textContent, '已复制推送命令');
@@ -1798,6 +2006,7 @@
     var view = beginView();
     state.branch = event.target.value;
     state.path = '';
+    closeSearch();       // the hits were line numbers in a different revision
     state.commitSkip = 0;
     state.commitHasMore = false;
     hideFile();

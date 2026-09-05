@@ -204,6 +204,18 @@ curl -s "$BASE/markdown.js" "$BASE/highlight.js" | grep -q 'innerHTML\|outerHTML
     && bad 'neither parser builds markup from repository content' 'innerHTML found' \
     || ok 'neither parser builds markup from repository content'
 
+grep -q 'id="edit-name"' "$WORK/web.index" && grep -q 'id="tokens-dialog"' "$WORK/web.index" \
+    && grep -q 'id="search-form"' "$WORK/web.index" \
+    && ok 'the browser has controls for rename, tokens and search' || bad 'the browser has controls for rename, tokens and search' 'a control is missing'
+# The API answers in English because git clients read it too, so a form-level
+# answer needs its own translation or the dialog shows English mid-sentence.
+curl -s "$BASE/app.js" | grep -q 'a repository with that name already exists' \
+    && ok 'a rename collision is explained in the interface language' || bad 'a rename collision is explained in the interface language' 'untranslated'
+# An issue and a token are stamped in Unix SECONDS; new Date(n) reads
+# milliseconds, so every one of them was dated January 1970 in the listing.
+curl -s "$BASE/app.js" | grep -q "typeof value === 'number' ? new Date(value \* 1000)" \
+    && ok 'a server timestamp is read as seconds, not milliseconds' || bad 'a server timestamp is read as seconds, not milliseconds' 'conversion missing'
+
 # A link destination is a URL, so `[x](my%20docs/a.md)` -- the ordinary way to
 # write a link to a file with a space -- names `my docs/a.md`. Encoding it again
 # without decoding first produces `my%2520docs`, a path no repository has.
@@ -1166,6 +1178,121 @@ code=$(curl -s -o /dev/null -w '%{http_code}' \
     -H 'X-Forwarded-For: 198.51.100.9, 198.51.100.7' \
     -u "spoofer:wrong-password" "$BASE/api/v1/users")
 check 'a forged left-hand entry does not escape the lockout' "$code" '429'
+
+# == Search ==================================================================
+#
+# git grep against a resolved object id, fixed-string. The literal case is the
+# one worth asserting: a pattern given to a regex engine is CPU anybody with
+# read access can spend, and `-F` is what makes that impossible rather than
+# merely bounded.
+S="$BASE/api/v1/repos/admin/demo/search"
+curl -s -u "admin:$ADMIN_PW" "$S?q=hello%20gitloom" | grep -q '"path":"README.md"' \
+    && ok 'search finds a line in a file' || bad 'search finds a line in a file' "$(curl -s -u "admin:$ADMIN_PW" "$S?q=hello%20gitloom")"
+# `.*` matches everything as a regex and nothing as a literal. This is the whole
+# difference, and the first version of the endpoint shipped with an invalid git
+# option that made EVERY search answer "nothing" -- including this one, which is
+# why the count is asserted against a query that must find something too.
+curl -s -u "admin:$ADMIN_PW" "$S?q=.%2A" | grep -q '"count":0' \
+    && ok 'a regex metacharacter is searched literally' || bad 'a regex metacharacter is searched literally' "$(curl -s -u "admin:$ADMIN_PW" "$S?q=.%2A")"
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" "$S?q=")
+check 'search with no query is refused' "$code" '400'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" "$S?q=x&ref=no-such-ref")
+check 'search on an unknown ref is a 404' "$code" '404'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 \
+    "$BASE/api/v1/repos/admin/secret/search?q=x")
+check 'search cannot reach a private repository' "$code" '404'
+
+# == Rename ==================================================================
+curl -s -u "admin:$ADMIN_PW" -H 'Content-Type: application/json' \
+    -d '{"title":"carry me"}' "$BASE/api/v1/repos/admin/demo/issues" > /dev/null
+curl -s -u "admin:$ADMIN_PW" -X PATCH -H 'Content-Type: application/json' \
+    -d '{"name":"renamed"}' "$BASE/api/v1/repos/admin/demo" | grep -q '"name":"renamed"' \
+    && ok 'owner can rename a repository' || bad 'owner can rename a repository' 'rename refused'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" "$BASE/api/v1/repos/admin/demo")
+check 'the old name is gone' "$code" '404'
+# Issues are keyed by repository, so a rename that did not carry them would not
+# lose them -- it would strand them under a name nothing looks up, and the
+# repository would come back looking like it never had any.
+curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/repos/admin/renamed/issues" | grep -q 'carry me' \
+    && ok 'issues follow the rename' || bad 'issues follow the rename' "$(curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/repos/admin/renamed/issues")"
+# The content has to still be there and still be clonable: this moved a
+# directory, and a rename that lost the objects would look fine in the API.
+rm -rf "$WORK/renamed"
+git clone -q "http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/renamed.git" "$WORK/renamed" 2>/dev/null \
+    && grep -q 'hello gitloom' "$WORK/renamed/README.md" \
+    && ok 'the renamed repository still clones with its content' \
+    || bad 'the renamed repository still clones with its content' 'clone failed or empty'
+# A change of case only. The index key does not move, but the directory must,
+# and on Windows and macOS a single rename onto a name that differs only in case
+# either refuses or silently does nothing.
+curl -s -u "admin:$ADMIN_PW" -X PATCH -H 'Content-Type: application/json' \
+    -d '{"name":"ReNamed"}' "$BASE/api/v1/repos/admin/renamed" | grep -q '"name":"ReNamed"' \
+    && ok 'a rename that only changes case is applied' || bad 'a rename that only changes case is applied' 'case rename refused'
+ls "$ROOT/admin" | grep -q '^ReNamed.git$' \
+    && ok 'and the directory on disk carries the new spelling' \
+    || bad 'and the directory on disk carries the new spelling' "$(ls "$ROOT/admin")"
+curl -s -u "admin:$ADMIN_PW" -H 'Content-Type: application/json' \
+    -d '{"name":"taken"}' "$BASE/api/v1/repos" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"name":"taken"}' "$BASE/api/v1/repos/admin/ReNamed")
+check 'renaming onto an existing name is refused' "$code" '409'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"name":"../escape"}' "$BASE/api/v1/repos/admin/ReNamed")
+check 'a rename cannot climb out of the repository root' "$code" '400'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X PATCH \
+    -H 'Content-Type: application/json' -d '{"name":"stolen"}' "$BASE/api/v1/repos/admin/ReNamed")
+check 'a stranger cannot rename' "$code" '403'
+# Put it back, so the delete cases below still name something that exists.
+curl -s -u "admin:$ADMIN_PW" -X PATCH -H 'Content-Type: application/json' \
+    -d '{"name":"demo"}' "$BASE/api/v1/repos/admin/ReNamed" > /dev/null
+
+# == Tokens ==================================================================
+#
+# The id is the account's own handle on a token. It is deliberately not derived
+# from the stored digest: that would have been free and stable, and would also
+# publish part of the verifier for a live credential in a listing.
+curl -s -u "admin:$ADMIN_PW" -H 'Content-Type: application/json' \
+    -d '{"label":"smoke-listed"}' "$BASE/api/v1/user/tokens" > /dev/null
+TOKENS=$(curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/user/tokens")
+echo "$TOKENS" | grep -q '"label":"smoke-listed"' \
+    && ok 'the account can list its own tokens' || bad 'the account can list its own tokens' "$TOKENS"
+echo "$TOKENS" | grep -q '"hash"' \
+    && bad 'a token listing never carries the stored digest' "$TOKENS" \
+    || ok 'a token listing never carries the stored digest'
+TID=$(echo "$TOKENS" | tr ',' '\n' | grep -o '"id":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X DELETE \
+    "$BASE/api/v1/user/tokens/$TID")
+check 'a token can be revoked by id' "$code" '200'
+curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/user/tokens" | grep -q "$TID" \
+    && bad 'the revoked token is gone from the listing' 'still listed' \
+    || ok 'the revoked token is gone from the listing'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X DELETE \
+    "$BASE/api/v1/user/tokens/ffffffffffffffff")
+check 'revoking a token that does not exist is a 404' "$code" '404'
+# The boundary that matters: the account is the authenticated caller, never a
+# value out of the request, so there is no shape of this that reaches somebody
+# else's token -- and an id belonging to another account is simply not found.
+# Its own account rather than bob's. bob is at AUTH_MAX_TOKENS by this point in
+# the suite -- which is the token-cap case doing its job -- so his token request
+# is refused, and reusing him here made all three of these fail for a reason
+# that had nothing to do with what they test.
+curl -s -u "admin:$ADMIN_PW" -H 'Content-Type: application/json' \
+    -d '{"username":"tokenowner","password":"tokenowner-password-1"}' "$BASE/api/v1/users" > /dev/null
+OTHER_TOKEN=$(curl -s -u tokenowner:tokenowner-password-1 -H 'Content-Type: application/json' \
+    -d '{"label":"theirs"}' "$BASE/api/v1/user/tokens" | tr ',' '\n' | grep -o '"token":"[0-9a-f]*"' | cut -d'"' -f4)
+OTHER_ID=$(curl -s -u "tokenowner:$OTHER_TOKEN" "$BASE/api/v1/user/tokens" | tr ',' '\n' | grep -o '"id":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X DELETE \
+    "$BASE/api/v1/user/tokens/$OTHER_ID")
+check 'one account cannot revoke another account token' "$code" '404'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "tokenowner:$OTHER_TOKEN" "$BASE/api/v1/user/tokens")
+check 'and that token still works afterwards' "$code" '200'
+# Revoking the credential in flight is a logout, and it has to take effect at
+# once -- the positive verification cache would otherwise keep answering 'ok'
+# for AUTH_CACHE_SEC with a token that no longer exists.
+curl -s -u "tokenowner:$OTHER_TOKEN" -X DELETE "$BASE/api/v1/user/tokens/$OTHER_ID" | grep -q '"was_current":true' \
+    && ok 'revoking the token in use says so' || bad 'revoking the token in use says so' 'not reported'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "tokenowner:$OTHER_TOKEN" "$BASE/api/v1/user/tokens")
+check 'and it stops working immediately' "$code" '401'
 
 # == Delete ==================================================================
 code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X DELETE \

@@ -13,7 +13,7 @@
 --   GET    /api/v1/repos                  repositories visible to the caller
 --   POST   /api/v1/repos                  create
 --   GET    /api/v1/repos/:owner/:name     detail, including refs
---   PATCH  /api/v1/repos/:owner/:name     update description/private
+--   PATCH  /api/v1/repos/:owner/:name     update description/private, or rename
 --   DELETE /api/v1/repos/:owner/:name
 --   GET    /api/v1/repos/:owner/:name/collaborators
 --   PUT    /api/v1/repos/:owner/:name/collaborators/:username
@@ -27,7 +27,10 @@
 --   POST   /api/v1/users                  admin only
 --   POST   /api/v1/user/password          change it, given the current one
 --   POST   /api/v1/user/password/reset    forgot it: spend a recovery code
+--   GET    /api/v1/user/tokens            the caller's own live tokens
 --   POST   /api/v1/user/tokens            issue an access token for the caller
+--   DELETE /api/v1/user/tokens            revoke the one in use (logout)
+--   DELETE /api/v1/user/tokens/:id        revoke one of the caller's own
 --
 --   GET    /api/v1/repos/:owner/:name/branches
 --   GET    /api/v1/repos/:owner/:name/tags
@@ -36,6 +39,7 @@
 --   GET    /api/v1/repos/:owner/:name/commits/:oid/diff  ?path=
 --   GET    /api/v1/repos/:owner/:name/tree/:ref/*path   directory listing
 --   GET    /api/v1/repos/:owner/:name/raw/:ref/*path    file contents
+--   GET    /api/v1/repos/:owner/:name/search           ?q= &ref= &limit=
 
 local codec = dofile('scripts/core/share/xhttp_codec.lua')
 
@@ -266,6 +270,35 @@ local function h_repo_update(req, ctx)
 
     local b, berr = body_json(req)
     if not b then return http_response_error(400, berr) end
+
+    -- A rename moves a directory and re-keys the index, so it is its own
+    -- operation rather than another field repo_update writes. It runs FIRST and
+    -- alone: if it fails there is nothing to undo, and if it succeeds the
+    -- description update that follows is against the record it returned, under
+    -- the new name.
+    local rec_now = rec
+    if b.name ~= nil then
+        if type(b.name) ~= 'string' then
+            return http_response_error(400, 'name must be a string')
+        end
+        local renamed, rerr, rstatus = repo_rename(owner, name, b.name)
+        if not renamed then
+            return http_response_error(rstatus or 400, http_safe_error(rerr))
+        end
+        rec_now = renamed
+        name = renamed.name
+    end
+
+    -- A PATCH carrying ONLY a name is a rename and nothing else, and it is
+    -- already done; repo_update refuses a change with no fields, and that
+    -- refusal would turn a successful rename into a 400 the caller would read
+    -- as "nothing happened". A PATCH carrying nothing at all still has to be
+    -- that 400 -- the short-circuit is for a rename that succeeded, not for an
+    -- empty body.
+    if b.name ~= nil and b.description == nil and b.private == nil then
+        return http_response_json(200, repo_public(rec_now, req, ctx))
+    end
+
     local updated, uerr, status = repo_update(owner, name, b)
     if not updated then return http_response_error(status or 400, http_safe_error(uerr)) end
     return http_response_json(200, repo_public(updated, req, ctx))
@@ -604,6 +637,42 @@ local function h_token_revoke(req, _ctx)
     return http_response_json(200, { revoked = true })
 end
 
+-- GET /api/v1/user/tokens
+--
+-- The caller's own tokens, never anybody else's: the account comes from the
+-- authenticated identity and there is no parameter that could name another. No
+-- token value appears here and none can — only the digest is stored.
+local function h_token_list(req, _ctx)
+    local user, resp = require_user(req)
+    if not user then return resp end
+
+    local list, err = auth_tokens_list(req, user.username)
+    if not list then return http_response_error(500, http_safe_error(err)) end
+    return http_response_json(200, { tokens = util_json_array(list), count = #list })
+end
+
+-- DELETE /api/v1/user/tokens/:id
+--
+-- Revokes one token by the id the listing gave. Same account boundary as the
+-- listing, so the id is only ever looked up among the caller's own; an id that
+-- belongs to somebody else is simply not found here, which is also the honest
+-- answer rather than a deliberate lie.
+local function h_token_revoke_id(req, ctx)
+    local user, resp = require_user(req)
+    if not user then return resp end
+
+    local gone, err = auth_token_revoke_id(req, user.username, ctx.params.id)
+    if not gone then
+        local status = tostring(err) == 'no such token' and 404 or 400
+        return http_response_error(status, http_safe_error(err))
+    end
+    return http_response_json(200, {
+        revoked = true, id = gone.id, label = gone.label,
+        -- The browser needs to know it has just logged itself out.
+        was_current = gone.current,
+    })
+end
+
 -- ---------------------------------------------------------------------------
 -- Browsing
 -- ---------------------------------------------------------------------------
@@ -705,6 +774,29 @@ local function h_tree(req, ctx)
     })
 end
 
+-- GET /api/v1/repos/:owner/:name/search?q=...&ref=...
+--
+-- Behind readable_repo, so searching a private repository needs the same access
+-- reading one does. That matters more here than elsewhere: a search that ran
+-- for anyone would be a way to ask whether a string exists in a repository the
+-- caller cannot open, one guess at a time.
+local function h_search(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+
+    local query = req.query and req.query.q or ''
+    local oid, refused = resolve_ref(dir, rec, req.query and req.query.ref)
+    if not oid then return refused end
+
+    local found, err = browse_search(dir, oid, query, req.query and req.query.limit)
+    if not found then return http_response_error(400, http_safe_error(err)) end
+    return http_response_json(200, {
+        ref = refused, oid = oid, query = tostring(query),
+        results = util_json_array(found.results),
+        count = found.count, truncated = found.truncated,
+    })
+end
+
 -- Types a browser may render inline. Everything else is octet-stream with an
 -- attachment disposition.
 --
@@ -793,8 +885,10 @@ function g_exports.api_install()
     http_post('/api/v1/user/password', h_password_change)
     -- No credentials on this one, by design: see h_password_reset.
     http_post('/api/v1/user/password/reset', h_password_reset)
+    http_get('/api/v1/user/tokens', h_token_list)
     http_post('/api/v1/user/tokens', h_token_create)
     http_delete('/api/v1/user/tokens', h_token_revoke)
+    http_delete('/api/v1/user/tokens/:id', h_token_revoke_id)
 
     -- Browsing. The tree and raw routes end in a wildcard because a file path
     -- inside a repository has no fixed segment count.
@@ -806,6 +900,7 @@ function g_exports.api_install()
     http_get('/api/v1/repos/:owner/:name/tree/:ref', h_tree)
     http_get('/api/v1/repos/:owner/:name/tree/:ref/*path', h_tree)
     http_get('/api/v1/repos/:owner/:name/raw/:ref/*path', h_raw)
+    http_get('/api/v1/repos/:owner/:name/search', h_search)
 
     cfg_log_info('management API installed')
 end

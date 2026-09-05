@@ -4,7 +4,7 @@
 --          util_str_trim, util_str_split, util_str_starts, util_str_ends,
 --          util_path_join, util_path_native, util_path_is_abs,
 --          util_file_read, util_file_write, util_file_write_atomic, util_file_size,
---          util_file_exists, util_file_remove,
+--          util_file_exists, util_file_remove, util_path_rename,
 --          util_dir_make, util_dir_walk,
 --          util_json_array, util_json_fix_arrays,
 --          util_rand_hex, util_now_ms
@@ -82,6 +82,24 @@ end
 
 function g_exports.util_file_write(path, data)
     return xfs.write_file(path, data)
+end
+
+-- Move a file or directory. Used for repository rename, where the thing being
+-- moved is a whole bare repository.
+--
+-- Deliberately NOT a copy-then-delete fallback. A rename is atomic on both
+-- platforms and either happens or does not; copying a repository and deleting
+-- the original is neither, and a failure half way through it would leave two
+-- partial repositories instead of one working one. When rename says no -- a
+-- target that exists, or on Windows a git process still holding the directory
+-- open -- the honest answer is to say so and change nothing.
+function g_exports.util_path_rename(from, to)
+    if util_file_exists(to) then
+        return nil, 'the destination already exists'
+    end
+    local ok, err = os.rename(from, to)
+    if not ok then return nil, tostring(err) end
+    return true
 end
 
 -- Replace a file's contents so that a crash can never leave it missing or

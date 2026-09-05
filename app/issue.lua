@@ -1,7 +1,8 @@
 -- app/issue.lua — a small repository issue tracker.
 --
 -- Exports: issue_index_load, issue_list, issue_get, issue_create,
---          issue_update, issue_comment_create, issue_repo_delete
+--          issue_update, issue_comment_create, issue_repo_delete,
+--          issue_repo_rename
 --
 -- Issues are deliberately separate from the repository index. The JSON backend
 -- keeps them in DATA_DIR/issues.json; MySQL stores one row per issue. That
@@ -236,6 +237,44 @@ end
 
 -- Called after a repository's git directory has been removed. Keeping issue
 -- rows out of the store avoids records that can never be reached again.
+-- Carry a repository's issues over to its new name.
+--
+-- Each issue records the owner and name it belongs to, so both the map key and
+-- every record has to move. Renaming into a name that already has issues cannot
+-- happen -- repo_rename refuses the collision before it gets here -- but if it
+-- somehow did, the numbers would collide, so this refuses rather than merge.
+function g_exports.issue_repo_rename(owner, name, new_name)
+    if not valid_repo(owner, name) or not valid_repo(owner, new_name) then
+        return nil, 'bad repository name', 400
+    end
+    if not have_issues() then return nil, 'the issue store is unavailable', 500 end
+
+    local from, to = key(owner, name), key(owner, new_name)
+    if from == to then
+        -- A change of case only. The key is the same, but the name recorded on
+        -- each issue still has to match the repository's new spelling.
+        for _, issue in pairs(issues[from] or {}) do issue.name = new_name end
+    else
+        if issues[to] then return nil, 'that repository already has issues', 409 end
+        local moving = issues[from]
+        if not moving then return true end          -- nothing to carry
+        for _, issue in pairs(moving) do issue.name = new_name end
+        issues[to] = moving
+        issues[from] = nil
+    end
+
+    local ok, err = store_issue_repo_rename(owner, name, new_name)
+    if not ok then
+        if from ~= to then
+            issues[from] = issues[to]
+            issues[to] = nil
+        end
+        for _, issue in pairs(issues[from] or {}) do issue.name = name end
+        return nil, err, 500
+    end
+    return true
+end
+
 function g_exports.issue_repo_delete(owner, name)
     if not valid_repo(owner, name) then return nil, 'bad repository name', 400 end
     if not have_issues() then return nil, 'the issue store is unavailable', 500 end

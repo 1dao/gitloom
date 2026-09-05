@@ -28,9 +28,10 @@ both parsers are ours rather than vendored, for the reason given at the top of
 `web/markdown.js`.
 Where you are is in the address bar, so a file, a directory, a tag, the commit
 log and an issue can each be bookmarked, shared, reloaded and gone Back from.
-Owners can also grant existing accounts read or write access to private
-repositories, so the solo loop and the first multi-user loop both stay in the
-browser. Issues have a tracker; pull requests are not implemented yet — see
+Repositories can be renamed, searched (fixed-string, one revision at a time),
+and the account's own access tokens listed and revoked one by one. Owners can
+also grant existing accounts read or write access to private repositories, so
+the solo loop and the first multi-user loop both stay in the browser. Issues have a tracker; pull requests are not implemented yet — see
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
@@ -257,7 +258,7 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 190/190 on Linux with streaming, and 180/180 on
+2.52). `test/smoke.sh` passes 216/216 on Linux with streaming, and 206/206 on
 Windows and under `GIT_STREAM=off` — the streamed-body cases are skipped there
 because they need the transport that platform does not have, and the browser
 parsers' own tests need node, which is a development convenience rather than a

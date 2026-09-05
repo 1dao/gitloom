@@ -266,8 +266,8 @@ Verified against a real MySQL 8.4.9, on both platforms and both stores:
 | | JSON | MySQL |
 |---|---|---|
 | `test/unit.lua` (Windows / Linux) | 216 / 215 | — |
-| `test/smoke.sh` Windows | 180/180 | 180/180 |
-| `test/smoke.sh` Linux | 190/190 | 190/190 |
+| `test/smoke.sh` Windows | 206/206 | 206/206 |
+| `test/smoke.sh` Linux | 216/216 | 216/216 |
 
 `test/dbreset.lua` empties the database first, because the counts the suite
 asserts only mean something from empty. gitloom itself never creates a database:
@@ -601,8 +601,61 @@ URL behind an open file, which is a document-lifetime reference to those bytes
 that nothing else would ever drop — on the path a token expiring takes, which is
 not a rare one.
 
-Still missing for a single operator: renaming a repository, listing or revoking
-tokens other than the current one, and searching inside a repository.
+### Rename, tokens, search — the last of the solo list
+
+**Rename** moves a directory and re-keys the index, so it is its own operation
+rather than another field `repo_update` writes, and PATCH runs it first and
+alone. The order inside it is chosen for what a crash leaves behind: the
+directory moves first, because that is the only step with no undo once the index
+points at it, and a failure there has changed nothing at all; the index moves
+second, and if that fails the directory is moved back; issues move last, because
+a repository whose issues did not follow is still a repository, while an index
+pointing at a directory that is not there is not one.
+
+Two things that are not obvious until they break. A rename that only changes
+case keeps the same index key, so the collision check has to skip the repository
+being renamed — otherwise `demo` → `Demo` reports a clash with itself — and on a
+case-insensitive filesystem the destination "already exists" because it IS the
+source, so the directory has to go via a third name or the spelling never
+changes on disk. And issues are keyed by repository rather than by an id of
+their own: a rename that did not carry them would not lose them, it would strand
+them under a name nothing looks up, which is worse, because the repository comes
+back looking like it never had any. Both stores got one statement for it —
+`UPDATE`, not delete-then-insert, since the rename moves a row across its own
+primary key and two statements leave a moment with no row at all.
+
+**Tokens** can now be listed and revoked individually. The id is deliberately
+not derived from the stored digest: a prefix of it would have been stable and
+free, and would also publish part of the verifier for a live credential in a
+listing. Tokens issued before ids existed get one on first listing, which is the
+only moment the account is already being read and written. Revoking the token in
+flight is a logout and says so, and it drops the verification cache wholesale —
+that cache is keyed by the secret, which is not stored, so the entry cannot be
+found by id, and the alternative is a credential that keeps working for
+`AUTH_CACHE_SEC` after it was revoked.
+
+**Search** is `git grep` against a resolved object id, fixed-string. `-F` is not
+a convenience: the pattern is typed by whoever is looking, and a regex engine
+given hostile input is server CPU spent without limit by anyone with read
+access. The ref is resolved to an oid first, like everything else in
+`browse.lua` — rule 1 of that file is that caller-supplied ref text never
+reaches a git command line, and `git grep <ref>` would have been exactly that.
+
+The bug worth recording is in how it first failed. It shipped with
+`--untracked=no`, which git rejects outright, and the error handler treated "no
+output" as "no matches" — so every search reported finding nothing, in a
+repository where the word was on line 1, and reported it as a perfectly normal
+empty result. `git grep` exits 1 for "found nothing" and 2 or more for a real
+failure; branching on the **exit code** rather than on whether any output came
+back is the difference, and the smoke case now asserts a query that must find
+something alongside the one that must not.
+
+Two smaller things fell out of building the interface for these. `PATCH` with
+only a name had to stop short-circuiting `repo_update`'s "no fields to update"
+refusal, which briefly turned an empty `PATCH {}` from a 400 into a 200. And
+`formatDate` was reading a Unix time in **seconds** as milliseconds, so every
+issue in the browser was dated 21 January 1970 — visible since the issue tracker
+shipped, and only noticed because a token listing put two more dates on screen.
 
 ### README rendering and syntax colouring, without vendoring anything
 

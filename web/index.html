@@ -20,6 +20,7 @@
       <div class="topbar-actions">
         <span class="connection-dot" id="connection-dot" aria-hidden="true"></span>
         <span class="connection-label" id="connection-label">正在连接</span>
+        <button class="button button-quiet" id="manage-tokens" type="button" hidden>令牌</button>
         <button class="button button-quiet" id="auth-toggle" type="button">登录</button>
       </div>
     </header>
@@ -92,7 +93,18 @@
               </label>
               <button class="button button-quiet" id="up-directory" type="button" hidden>↑ 返回上级</button>
               <div class="toolbar-spacer"></div>
+              <form id="search-form" class="search-form">
+                <input id="search-input" type="search" placeholder="在这个版本里查找" aria-label="在仓库中搜索" autocomplete="off">
+                <button class="button button-quiet" type="submit">查找</button>
+              </form>
               <span id="current-path" class="path-label">/</span>
+            </div>
+            <div id="search-panel" class="browser-card" hidden>
+              <div class="card-caption">
+                <span id="search-caption">搜索结果</span>
+                <button class="button button-quiet" id="search-close" type="button">关闭</button>
+              </div>
+              <div id="search-results" class="tree-list"></div>
             </div>
             <section id="first-push" class="first-push" hidden>
               <p class="eyebrow">FIRST PUSH</p>
@@ -263,7 +275,9 @@
         </div>
         <button class="icon-button" id="edit-close" data-dialog-close="edit-dialog" type="button" aria-label="关闭">×</button>
       </div>
-      <p class="dialog-copy">修改仓库说明或可见性。设为私有后，只有你、管理员和已授权协作者能看到仓库及其代码。</p>
+      <p class="dialog-copy">修改仓库名称、说明或可见性。设为私有后，只有你、管理员和已授权协作者能看到仓库及其代码。</p>
+      <label>仓库名称<input id="edit-name" type="text" autocomplete="off" spellcheck="false"></label>
+      <p class="dialog-note">改名后旧地址立即失效，已经克隆的本地仓库需要执行 <code>git remote set-url</code> 才能继续推送。</p>
       <label>描述（可选）<textarea id="edit-description" rows="3"></textarea></label>
       <label class="checkbox-label"><input id="edit-private" type="checkbox"> 私有仓库</label>
       <p id="edit-message" class="form-message" role="alert"></p>
@@ -272,6 +286,24 @@
         <button class="button button-primary" id="edit-submit" value="default" type="submit">保存</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="tokens-dialog" class="auth-dialog access-dialog">
+    <section class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">ACCESS TOKENS</p>
+          <h2>访问令牌</h2>
+        </div>
+        <button class="icon-button" id="tokens-close" data-dialog-close="tokens-dialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-copy">这个账号当前有效的令牌。令牌本身只在创建时显示一次，这里看不到，也没有任何接口能再取回。吊销后立即失效。</p>
+      <div id="tokens-list" class="access-list"></div>
+      <p id="tokens-message" class="form-message" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" data-dialog-close="tokens-dialog" type="button">关闭</button>
+      </div>
+    </section>
   </dialog>
 
   <dialog id="access-dialog" class="auth-dialog access-dialog">

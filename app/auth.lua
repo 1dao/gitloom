@@ -2,6 +2,7 @@
 --
 -- Exports: auth_load, auth_user_list, auth_user_exists, auth_user_create,
 --          auth_token_create, auth_token_revoke,
+--          auth_tokens_list, auth_token_revoke_id,
 --          auth_identify, auth_can_read, auth_can_write, auth_challenge,
 --          auth_bootstrap, auth_kdf_setup, auth_too_many,
 --          auth_recovery_ensure, auth_password_change, auth_password_reset
@@ -475,6 +476,9 @@ function g_exports.auth_token_create(username, label, ttl_sec)
     end
     local expires_at = ttl_sec and (os.time() + math.floor(ttl_sec)) or nil
     u.tokens[#u.tokens + 1] = {
+        -- An id of its own, so a listing can name a token without publishing
+        -- any part of the digest that verifies it. See auth_tokens_list.
+        id         = util_rand_hex(8),
         label      = label,
         hash       = xutils.sha256_hex(clear),
         created_at = os.time(),
@@ -483,6 +487,91 @@ function g_exports.auth_token_create(username, label, ttl_sec)
     local ok, err = auth_save(u)
     if not ok then return nil, err end
     return clear, expires_at
+end
+
+-- Every live token on an account, for the caller to look at and choose from.
+--
+-- The id is NOT derived from the hash. A prefix of the digest would have been
+-- stable and free, and it would also have published part of the verifier for a
+-- live credential in a listing anybody with a read token can fetch — a thing
+-- with no upside, since a fresh random label costs one line. Tokens issued
+-- before ids existed get one here, on first listing, which is the only moment
+-- the account is already being read and written.
+--
+-- `current` marks the token this very request is using, so the browser can warn
+-- that revoking it is logging out rather than tidying up.
+function g_exports.auth_tokens_list(req, username)
+    local u = auth_user_get(username)
+    if not u then return nil, 'no such user' end
+    prune_tokens(u)
+
+    local _, secret = basic_credentials(req)
+    local digest = secret and xutils.sha256_hex(secret) or nil
+
+    local out, backfilled = {}, false
+    for _, t in ipairs(u.tokens or {}) do
+        if not t.id then
+            t.id = util_rand_hex(8)
+            backfilled = true
+        end
+        out[#out + 1] = {
+            id         = t.id,
+            label      = t.label or 'token',
+            created_at = t.created_at or 0,
+            expires_at = t.expires_at,
+            current    = digest ~= nil and digest_equal(digest, t.hash) or false,
+        }
+    end
+    -- Pruning may have dropped expired entries even when nothing was
+    -- backfilled, and leaving those on disk means the next boot reads them
+    -- back and the count the cap works from is wrong again.
+    local ok, err = auth_save(u)
+    if not ok then return nil, err end
+    if backfilled then
+        cfg_log_info('account %s: assigned ids to tokens issued before they had one', username)
+    end
+    table.sort(out, function(a, b)
+        if a.created_at ~= b.created_at then return a.created_at > b.created_at end
+        return tostring(a.id) < tostring(b.id)
+    end)
+    return out
+end
+
+-- Revoke one named token of the caller's OWN account.
+--
+-- `username` is the authenticated caller, never a value out of the request
+-- body: that is what keeps this from reaching another account's tokens, and it
+-- is the same rule auth_token_revoke keeps by reading the credential out of the
+-- header. Revoking the token in use is allowed and is simply a logout.
+function g_exports.auth_token_revoke_id(req, username, id)
+    if type(id) ~= 'string' or id == '' then return nil, 'a token id is required' end
+    local u = auth_user_get(username)
+    if not u then return nil, 'no such user' end
+
+    local kept, found = {}, nil
+    for _, t in ipairs(u.tokens or {}) do
+        if not found and t.id == id then
+            found = t
+        elseif token_live(t) then
+            kept[#kept + 1] = t
+        end
+    end
+    if not found then return nil, 'no such token' end
+    u.tokens = kept
+
+    -- Same window auth_token_revoke closes: a positive verdict cached for this
+    -- credential would keep answering 'ok' for AUTH_CACHE_SEC after the token
+    -- it belongs to has gone. The cache is keyed by the secret, which is not
+    -- stored, so the entry cannot be found and removed by id -- it is dropped
+    -- wholesale instead. That costs every account one re-verification and is
+    -- the only correct option available.
+    local _, secret = basic_credentials(req)
+    local was_current = secret ~= nil and digest_equal(xutils.sha256_hex(secret), found.hash)
+    verify_cache = {}
+
+    local ok, err = auth_save(u)
+    if not ok then return nil, err end
+    return { id = id, label = found.label or 'token', current = was_current }
 end
 
 -- Revoke the token the caller is presenting — the browser's logout.

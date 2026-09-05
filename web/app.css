@@ -330,3 +330,25 @@ h1, h2, h3, p { margin-top: 0; }
 .tok-string  { color: #9ad6a4; }
 .tok-number  { color: #e2b979; }
 .tok-keyword { color: #8da8ff; }
+
+/* Rename, tokens and search. */
+
+.dialog-note { margin: -6px 0 14px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.dialog-note code { color: var(--accent); font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+
+.access-list { min-height: 52px; margin: 0 0 16px; border: 1px solid var(--line-soft); border-radius: 9px; overflow: hidden; }
+.access-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px 12px; border-bottom: 1px solid var(--line-soft); }
+.access-row:last-child { border-bottom: 0; }
+.access-row strong { font-size: 12.5px; }
+.pill { display: inline-block; padding: 1px 7px; border-radius: 999px; background: rgba(88, 213, 201, .13); color: var(--accent); font-size: 10px; vertical-align: 1px; }
+
+.search-form { display: flex; align-items: center; gap: 7px; }
+.search-form input { width: 190px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; color: var(--text); background: var(--bg); outline: 0; font-size: 12px; }
+.search-form input:focus { border-color: var(--accent-2); }
+.search-hit { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 4px; text-align: left; }
+.search-line { display: block; overflow: hidden; text-overflow: ellipsis; white-space: pre; color: var(--muted); font: 11.5px/1.5 "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+
+@media (max-width: 860px) {
+  .search-form { width: 100%; }
+  .search-form input { flex: 1; width: auto; }
+}

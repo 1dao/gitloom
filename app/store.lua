@@ -3,7 +3,9 @@
 -- Exports: store_backend, store_describe,
 --          store_users_load, store_user_put,
 --          store_repos_load, store_repo_put, store_repo_delete,
---          store_issues_load, store_issue_put, store_issue_repo_delete
+--          store_repo_rename,
+--          store_issues_load, store_issue_put, store_issue_repo_delete,
+--          store_issue_repo_rename
 --
 -- Two backends behind one interface. JSON files are the default and are what
 -- Phase 0 shipped: one process, one directory, nothing to install. MySQL is the
@@ -343,6 +345,20 @@ local function db_repo_delete(owner, name)
     return true
 end
 
+-- One UPDATE rather than the delete-then-insert the put/delete pair would give,
+-- because the primary key is (owner_key, name_key) and a rename moves the row
+-- ACROSS it. Done as two statements there is a moment with no row at all, and a
+-- crash inside it leaves a repository on disk that the index has forgotten.
+local function db_repo_rename(owner, name, new_name)
+    local ok, err = db_exec(string.format(
+        'UPDATE gl_repos SET name_key = %s, name = %s ' ..
+        'WHERE owner_key = %s AND name_key = %s',
+        db_quote(new_name:lower()), db_quote(new_name),
+        db_quote(tostring(owner):lower()), db_quote(tostring(name):lower())))
+    if not ok then return nil, 'could not rename the repository: ' .. tostring(err) end
+    return true
+end
+
 local function row_to_issue(row)
     return {
         owner      = db_text(row.owner, ''),
@@ -403,6 +419,21 @@ local function db_issue_repo_delete(owner, name)
     return true
 end
 
+-- Every issue of a renamed repository, in one statement. Issues are keyed by
+-- the repository rather than by an id of their own, so a rename that did not
+-- carry them would not lose them -- it would strand them under a name nothing
+-- looks up any more, which is worse, because the repository comes back looking
+-- like it never had any.
+local function db_issue_repo_rename(owner, name, new_name)
+    local ok, err = db_exec(string.format(
+        'UPDATE gl_issues SET name_key = %s, name = %s ' ..
+        'WHERE owner_key = %s AND name_key = %s',
+        db_quote(new_name:lower()), db_quote(new_name),
+        db_quote(tostring(owner):lower()), db_quote(tostring(name):lower())))
+    if not ok then return nil, 'could not move repository issues: ' .. tostring(err) end
+    return true
+end
+
 -- ---------------------------------------------------------------------------
 -- The interface
 -- ---------------------------------------------------------------------------
@@ -438,6 +469,14 @@ function g_exports.store_repo_delete(owner, name)
     return file_repos_save()
 end
 
+-- The caller has already re-keyed the record in the map it was handed, so the
+-- file backend has nothing to do beyond rewriting the lot -- the same thing it
+-- does for a put.
+function g_exports.store_repo_rename(owner, name, new_name)
+    if db_enabled() then return db_repo_rename(owner, name, new_name) end
+    return file_repos_save()
+end
+
 function g_exports.store_issues_load()
     local map, err
     if db_enabled() then map, err = db_issues_load() else map = file_issues_load() end
@@ -453,5 +492,10 @@ end
 
 function g_exports.store_issue_repo_delete(owner, name)
     if db_enabled() then return db_issue_repo_delete(owner, name) end
+    return file_issues_save()
+end
+
+function g_exports.store_issue_repo_rename(owner, name, new_name)
+    if db_enabled() then return db_issue_repo_rename(owner, name, new_name) end
     return file_issues_save()
 end
