@@ -118,7 +118,7 @@ curl -s "$BASE/api/v1/version" | grep -q '"name":"gitloom"' \
 # which is copy and will change without the server being wrong.
 code=$(curl -s -o "$WORK/web.index" -D "$WORK/web.headers" -w '%{http_code}' "$BASE/")
 check 'browser entry point is served' "$code" '200'
-grep -q 'id="repo-list"' "$WORK/web.index" \
+grep -q 'id="repo-grid"' "$WORK/web.index" \
     && ok 'browser entry point is the page' || bad 'browser entry point is the page' "$(head -c 160 "$WORK/web.index")"
 grep -qi '^content-security-policy:' "$WORK/web.headers" \
     && ok 'browser sends a content security policy' || bad 'browser sends a content security policy' 'header missing'

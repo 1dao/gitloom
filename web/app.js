@@ -286,7 +286,23 @@
     // Tokens belong to an account, so the control only means anything once
     // there is one signed in.
     $('manage-tokens').hidden = !state.username;
+    renderProfile();
     syncWriteActions();
+  }
+
+  // The head of the landing page. Signed out it still says something true --
+  // this is the instance, and what is on it is what anybody may read -- rather
+  // than going blank until somebody logs in.
+  function renderProfile() {
+    var name = state.username || 'gitloom';
+    $('profile-name').textContent = name;
+    $('profile-handle').textContent = state.username
+      ? '已登录'
+      : '未登录 · 只列出公开仓库';
+    // An account has no avatar to serve, so its initial stands in. Upper-cased
+    // for the Latin case and left alone for everything else, which is what
+    // toUpperCase already does for a CJK name.
+    $('profile-avatar').textContent = name.slice(0, 1).toUpperCase();
   }
 
   // The browser currently knows the signed-in username, but not an administrator
@@ -302,58 +318,88 @@
     $('delete-repo').hidden = !canManage;
   }
 
+  // The repository-shaped glyph the cards and the page header share. Inlined
+  // per call rather than cloned from one node: an SVG in the DOM is a node like
+  // any other, and two cards cannot hold the same one.
+  function repoIcon() {
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'repo-icon');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('aria-hidden', 'true');
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', 'M2.5 2.8A1.8 1.8 0 0 1 4.3 1H13.4v10.2H4.3a1.8 1.8 0 0 0 0 3.6h9.1v-3.6');
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', 'currentColor');
+    path.setAttribute('stroke-width', '1.4');
+    path.setAttribute('stroke-linejoin', 'round');
+    svg.appendChild(path);
+    return svg;
+  }
+
   function renderRepos() {
-    var list = $('repo-list');
+    var grid = $('repo-grid');
     var query = ($('repo-search').value || '').trim().toLowerCase();
-    list.textContent = '';
+    grid.textContent = '';
     var visible = state.repos.filter(function (repo) {
       var haystack = (repo.owner + '/' + repo.name + ' ' + (repo.description || '')).toLowerCase();
       return !query || haystack.indexOf(query) !== -1;
     });
-    $('repo-count').textContent = state.repos.length + ' 个仓库';
+    $('repo-count').textContent = String(state.repos.length);
+    $('owned-count').textContent = String(state.repos.filter(function (repo) {
+      return state.username && repo.owner === state.username;
+    }).length);
     if (!visible.length) {
-      setError(list, query ? '没有匹配的仓库' : '暂无可见仓库');
+      setError(grid, query ? '没有匹配的仓库' : '暂无可见仓库');
       return;
     }
     visible.forEach(function (repo) {
-      var item = document.createElement('button');
-      item.type = 'button';
-      item.className = 'repo-item' + (state.repo && state.repo.full_name === repo.full_name ? ' active' : '');
-      item.dataset.repo = repo.full_name;
+      var card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'repo-card';
+      card.dataset.repo = repo.full_name;
 
       var title = document.createElement('span');
-      title.className = 'repo-item-title';
-      var owner = document.createElement('span');
-      owner.className = 'repo-owner';
-      owner.textContent = repo.owner + '/';
+      title.className = 'repo-card-title';
+      title.appendChild(repoIcon());
       var name = document.createElement('span');
       name.className = 'repo-name';
-      name.textContent = repo.name;
-      title.appendChild(owner);
+      // owner/name, because one instance can hold the same name under two
+      // accounts and the card is the only place that disambiguates them.
+      name.textContent = repo.owner + '/' + repo.name;
       title.appendChild(name);
-      if (repo.private) {
-        var lock = document.createElement('span');
-        lock.className = 'repo-lock';
-        lock.textContent = '◆';
-        lock.title = '私有仓库';
-        title.appendChild(lock);
+      var badge = document.createElement('span');
+      badge.className = 'repo-badge' + (repo.private ? ' private' : '');
+      badge.textContent = repo.private ? '私有' : '公开';
+      title.appendChild(badge);
+      card.appendChild(title);
+
+      var description = document.createElement('p');
+      description.className = 'repo-card-desc';
+      description.textContent = repo.description || '';
+      card.appendChild(description);
+
+      var foot = document.createElement('span');
+      foot.className = 'repo-card-foot';
+      var branch = document.createElement('code');
+      branch.textContent = repo.default_branch || 'main';
+      foot.appendChild(branch);
+      if (repo.created_at) {
+        var created = document.createElement('span');
+        created.textContent = '建于 ' + relativeTime(repo.created_at);
+        created.title = formatDate(repo.created_at);
+        foot.appendChild(created);
       }
-      item.appendChild(title);
-      if (repo.description) {
-        var description = document.createElement('span');
-        description.className = 'repo-item-desc';
-        description.textContent = repo.description;
-        item.appendChild(description);
-      }
-      item.addEventListener('click', function () { selectRepo(repo); });
-      list.appendChild(item);
+      card.appendChild(foot);
+
+      card.addEventListener('click', function () { selectRepo(repo); });
+      grid.appendChild(card);
     });
   }
 
   function loadRepos() {
     var ticket = (seq.repos += 1);
     setConnection('', '正在读取');
-    setLoading($('repo-list'), '正在读取仓库…');
+    setLoading($('repo-grid'), '正在读取仓库…');
     return json('/api/v1/repos').then(function (data) {
       if (ticket !== seq.repos) return state.repos;
       state.repos = Array.isArray(data.repos) ? data.repos : [];
@@ -376,13 +422,14 @@
       if (ticket !== seq.repos) throw error;
       if (error.status === 401) {
         setConnection('', '需要登录');
-        setError($('repo-list'), '登录后查看仓库');
+        setError($('repo-grid'), '登录后查看仓库');
       } else {
         setConnection('error', '连接失败');
-        setError($('repo-list'), error.message);
+        setError($('repo-grid'), error.message);
       }
       state.repos = [];
-      $('repo-count').textContent = '0 个仓库';
+      $('repo-count').textContent = '0';
+      $('owned-count').textContent = '0';
       throw error;
     });
   }
@@ -771,40 +818,75 @@
     state.issue = null;
     setIssueBadge(0);
     if ($('access-dialog').open) $('access-dialog').close();
+    renderTopbarCrumbs(null);
     $('repo-view').hidden = true;
-    $('empty-state').hidden = false;
+    $('overview').hidden = false;
+    // The cards carry no selected state, but the counts and the search filter
+    // are rendered from state that closing may have changed.
+    renderRepos();
     syncWriteActions();
     routeWrite();
   }
 
-  // `<span>workspace</span> / owner / name`, built rather than assembled as
-  // markup: repository and account names are constrained server-side, but this
-  // is the one place that would turn a slip in that constraint into script.
-  function renderCrumbs(repo) {
-    var crumbs = $('repo-crumbs');
+  // `owner / name` in the top bar, with the owner a way back to the listing.
+  // Built rather than assembled as markup: repository and account names are
+  // constrained server-side, but this is the one place that would turn a slip in
+  // that constraint into script.
+  function renderTopbarCrumbs(repo) {
+    var crumbs = $('topbar-crumbs');
+    if (!crumbs) return;
     crumbs.textContent = '';
-    var workspace = document.createElement('span');
-    workspace.textContent = 'workspace';
-    crumbs.appendChild(workspace);
-    crumbs.appendChild(document.createTextNode(' / ' + repo.owner + ' / ' + repo.name));
+    if (!repo) {
+      crumbs.hidden = true;
+      return;
+    }
+    var owner = document.createElement('button');
+    owner.type = 'button';
+    owner.textContent = repo.owner;
+    owner.addEventListener('click', closeRepoView);
+    crumbs.appendChild(owner);
+    var separator = document.createElement('span');
+    separator.className = 'crumb-sep';
+    separator.textContent = '/';
+    crumbs.appendChild(separator);
+    var name = document.createElement('strong');
+    name.textContent = repo.name;
+    crumbs.appendChild(name);
+    crumbs.hidden = false;
   }
 
   function renderCloneUrl(repo) {
-    var row = $('clone-row');
+    var block = $('clone-block');
     var input = $('clone-url');
     input.value = repo.clone_url || '';
-    row.hidden = !input.value;
+    if (block) block.hidden = !input.value;
   }
 
   function renderRepoMeta(repo) {
-    $('repo-title').textContent = repo.full_name;
+    var title = $('repo-title');
+    title.textContent = '';
+    var owner = document.createElement('span');
+    owner.className = 'repo-owner';
+    owner.textContent = repo.owner;
+    var separator = document.createElement('span');
+    separator.className = 'repo-sep';
+    separator.textContent = ' / ';
+    var name = document.createElement('span');
+    name.textContent = repo.name;
+    title.appendChild(owner);
+    title.appendChild(separator);
+    title.appendChild(name);
+
     $('repo-description').textContent = repo.description || '暂无描述';
-    renderCrumbs(repo);
+    renderTopbarCrumbs(repo);
     renderCloneUrl(repo);
+    var label = repo.private ? '私有' : '公开';
     var visibility = $('repo-visibility');
-    visibility.textContent = repo.private ? '私有' : '公开';
+    visibility.textContent = label;
     visibility.className = 'visibility-pill' + (repo.private ? ' private' : '');
-    $('repo-default-branch').textContent = '默认分支 · ' + (repo.default_branch || 'main');
+    var note = $('repo-visibility-note');
+    if (note) note.textContent = label;
+    $('repo-default-branch').textContent = repo.default_branch || 'main';
   }
 
   function setFirstPush(repo, empty) {
@@ -900,7 +982,7 @@
     state.commitSkip = 0;
     state.commitHasMore = false;
     resetCommits();
-    $('empty-state').hidden = true;
+    $('overview').hidden = true;
     $('repo-view').hidden = false;
     renderRepoMeta(repo);
     setFirstPush(repo, false);
@@ -1050,7 +1132,7 @@
 
   // `<repo> / dir / subdir`, the last segment plain text because it is where
   // you already are. Built rather than assembled as markup for the same reason
-  // renderCrumbs is: these are path segments out of somebody's repository.
+  // renderTopbarCrumbs is: these are path segments out of somebody's repository.
   function renderPathCrumbs() {
     var nav = $('path-crumbs');
     if (!nav) return;
@@ -1886,6 +1968,13 @@
     $('code-view').hidden = view !== 'code';
     $('commits-view').hidden = view !== 'commits';
     $('issues-view').hidden = view !== 'issues';
+    var side = $('repo-side');
+    if (side) {
+      side.hidden = view !== 'code';
+      // The grid has to give the column back, not just empty it, or the log and
+      // the issue list stay squeezed into two thirds of the page.
+      side.parentNode.classList.toggle('no-side', view !== 'code');
+    }
     if (view === 'issues' && state.repo) loadIssues(seq.view);
   }
 
