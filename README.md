@@ -269,14 +269,14 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 249/249 on Windows and under `GIT_STREAM=off`
+2.52). `test/smoke.sh` passes 253/253 on Windows and under `GIT_STREAM=off`
 (measured 2026-09-06) — the streamed-body cases are skipped there because they
 need the transport that platform does not have, and the browser parsers' own
 tests need node, which is a development convenience rather than a dependency and
 is skipped where it is absent. The Linux figure was 216 when the Windows one was
-206; the forty-three cases added since — the file listing's last-commit column,
+206; the forty-seven cases added since — the file listing's last-commit column,
 the accounts panel, the compare endpoints and branch protection — need nothing
-this platform lacks, so a Linux run should now be 259, and it has not been
+this platform lacks, so a Linux run should now be 263, and it has not been
 re-run to say so. `test/unit.lua` is 216 on Windows, 215 on Linux (one case is about
 Windows path spelling). Adding `DB_DRIVER=mysql` runs the same suite against
 MySQL instead of JSON files.

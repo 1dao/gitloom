@@ -777,6 +777,39 @@ check 'last commits on an unknown ref is a 404' "$code" '404'
 code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/lastcommits/main/../../etc")
 check 'last commits refuses a traversing path' "$code" '400'
 
+# A file whose content was decided IN a merge -- a conflict resolved there, the
+# only way a change lands through a merge and nowhere else. Without `-c` on the
+# walk the merge commit prints no names at all and the file is credited to
+# whichever parent the walk reached next, which is a commit that does not
+# contain it: a wrong answer rather than a blank one. Its own repository,
+# because adding a merge to demo would move the counts the compare cases assert.
+curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+    -d '{"name":"merged"}' "$BASE/api/v1/repos" >/dev/null
+rm -rf "$WORK/wmerge"
+(
+    cd "$WORK" && git init -q -b main wmerge && cd wmerge &&
+    C="git -c user.email=smoke@test -c user.name=smoke" &&
+    printf 'base\n' > shared.txt && git add -A && $C commit -qm 'root' &&
+    git checkout -q -b feature &&
+    printf 'from feature\n' > shared.txt && git add -A && $C commit -qm 'feature side' &&
+    git checkout -q main &&
+    printf 'from main\n' > shared.txt && git add -A && $C commit -qm 'main side' &&
+    { git merge feature -q 2>/dev/null || true; } &&
+    printf 'resolved in the merge\n' > shared.txt && git add -A &&
+    $C commit -qm 'the merge that decided it' &&
+    $GIT push -q "http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/merged.git" main
+) >/dev/null 2>&1
+mrg=$(curl -s "$BASE/api/v1/repos/admin/merged/lastcommits/main")
+echo "$mrg" | grep -q '"subject":"the merge that decided it"' \
+    && ok 'a merge that resolved a file is credited with it' \
+    || bad 'a merge that resolved a file is credited with it' "$mrg"
+# The specific wrong answer this replaces, named so a regression is legible.
+if echo "$mrg" | grep -q '"subject":"main side"'; then
+    bad 'the file is not credited to a parent that lacks it' "$mrg"
+else
+    ok 'the file is not credited to a parent that lacks it'
+fi
+
 curl -s "$DEMO/raw/main/README.md" | grep -q 'hello gitloom' \
     && ok 'raw serves file contents' || bad 'raw serves file contents' "$(curl -s "$DEMO/raw/main/README.md" | head -c 60)"
 
@@ -939,6 +972,25 @@ check 'the protected branch did not move' "$after" "$before"
 ( cd "$WORK/wprot" && git commit -q --allow-empty -m 'p side' && git branch -f side HEAD &&
   $GIT push --force "$PROT" side ) >/dev/null 2>&1 \
     && ok 'another branch may still be force-pushed' || bad 'another branch may still be force-pushed' 'refused'
+
+# Deleting the branch a clone checks out is refused by gitloom's own `-c`, not
+# by whatever git's default happens to be and not by the repository's config --
+# which is why this sets that config to `ignore` first. `-c` outranks it.
+#
+# The assertion is on WHICH refusal comes back: git's own wording proves the
+# pinned setting did it. The hook would refuse this too (main is protected) and
+# its message says `gitloom:`, so the two are distinguishable and this case
+# cannot pass for the wrong reason.
+git --git-dir="$ROOT/admin/merged.git" config receive.denyDeleteCurrent ignore
+delout=$( cd "$WORK/wmerge" && $GIT push --delete \
+    "http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/merged.git" main 2>&1 )
+if [ $? -eq 0 ]; then
+    bad 'the default branch cannot be deleted' 'the deletion succeeded'
+else
+    ok 'the default branch cannot be deleted'
+fi
+echo "$delout" | grep -q 'current branch' \
+    && ok 'the pinned setting is what refuses it' || bad 'the pinned setting is what refuses it' "$delout"
 
 # Protection on with no hook to run it is the failure the whole design exists to
 # prevent: an instance that reports itself healthy while nothing is guarded. It

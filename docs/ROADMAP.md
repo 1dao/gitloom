@@ -1200,6 +1200,66 @@ once the instance is restarted with `PROTECT_DEFAULT_BRANCH=off`, so the hook is
 what refuses rather than something incidental. Booting with `HOOKS_DIR` pointed
 at a directory that does not exist ends the process instead of serving it.
 
+### What reading gitea's implementation was worth
+
+A pass over `../gitea` for the three problems above — branch protection, the
+compare view, and the listing's last-commit column — found mostly convergence,
+which is its own signal. Two places it is better came back as changes here.
+
+**Convergence, briefly, because agreeing is evidence.** `services/git/compare.go`
+resolves both ends to full commit ids, computes the merge base as its own step,
+documents `CompareBase` as "empty for no merge base", and carries the same
+warning this file records: `...` in `git log` is the symmetric difference and
+NOT what a pull request wants, so the commit list has to be `merge-base..head`.
+That is the same design, arrived at separately. `modules/git/log_name_status_nogogit.go`
+answers the listing column from ONE `git log --name-status -z --no-renames`
+walk, first appearance wins — the same insight, with `-z` and `--no-renames` for
+the same reasons.
+
+Two differences that are gitloom's to keep. gitea returns an EMPTY comparison
+when there is no merge base (`if CompareBase == "" { return }`), where gitloom
+falls back to base's tip and says `unrelated`. And gitea offers `..` alongside
+`...`, with a `FIXME` in its own source saying that interface is wrong.
+
+**`-c` on the last-commit walk — taken.** The gap this file recorded as "a
+change that only ever landed through a merge is not attributed either" was worse
+than recorded. A merge commit prints no names under `--name-only`, so the file
+was not left blank: it was credited to whichever parent's commit the walk
+reached next — a commit that does not contain that content. Measured on a
+conflict resolved in the merge, `shared.txt` came back attributed to `main side`
+rather than to the merge that decided it. `-c` prints the combined diff, which
+is exactly the set of files a merge decided for itself. Its `-z` framing differs
+— an extra NUL, and no newline before the first name — and the parser already
+read both, because it skips empty runs rather than counting fields.
+
+**The default branch's deletion is now stated rather than inherited — taken.**
+gitea refuses it in its own code (`hook_pre_receive.go`), before it looks up any
+protection rule, rather than leaving it to git's `receive.denyDeleteCurrent`
+default. gitloom now pins `-c receive.denyDeleteCurrent=refuse` on every
+receive-pack. It changes nothing today, which is the point: what it removes is
+the dependency on a default, and on the repository's own config, which `-c`
+outranks. Deliberately NOT gated on `PROTECT_DEFAULT_BRANCH` — a repository
+whose HEAD names nothing clones to an empty worktree and 404s on every browsing
+endpoint, so that is a broken repository rather than a policy someone turned off.
+
+Removing the pin is what proved the hook's deletion branch is not dead code.
+With the pin gone and the repository's own config set to `ignore`, git allowed
+the deletion through and the hook caught it — `gitloom: refs/heads/main is
+protected and cannot be deleted`. The section above called that branch defence
+in depth on the strength of reading; it is now defence in depth on the strength
+of having watched it fire. The two refusals also word themselves differently,
+which is what lets the smoke case assert that the PIN refused rather than the
+hook.
+
+**What was left.** gitea writes four hook scripts into every repository and
+ships `SyncRepositoryHooks` to rewrite them all, because those scripts hardcode
+the path of the gitea binary and its config; and its hook is a shim that POSTs
+to a private HTTP API on the running server, because the policy it has to
+evaluate is thirty-odd columns of whitelists, approval counts and file globs. A
+shared `core.hooksPath` and one environment variable are the right size for one
+rule. When protected refs stop being only the default branch, the callback is
+the design to come back to.
+
 ## Phase 3 — collaboration
 
 Organisations and teams, then issues (comments, labels, milestones), then pull

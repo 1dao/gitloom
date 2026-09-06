@@ -309,14 +309,20 @@ local MAX_LASTCOMMIT_SCAN = 400
 -- entry would be exact, but a directory of forty files is then forty forks
 -- through a process pool that is also serving every other request.
 --
--- Two things this deliberately does not do, both visible as a blank column
--- rather than a wrong one:
+-- The walk is capped, and that is the one thing this deliberately does not do:
+-- a file nobody has touched in MAX_LASTCOMMIT_SCAN commits comes back with a
+-- blank cell rather than making the listing wait for a full traversal of a long
+-- history. Blank is the honest answer for an entry the cap did not reach.
 --
---   * The walk is capped. A file nobody has touched in MAX_LASTCOMMIT_SCAN
---     commits comes back unattributed instead of making the listing wait for a
---     full traversal of a long history.
---   * --name-only prints nothing for a merge commit, so a change that only ever
---     landed through one is not attributed to a file either.
+-- `-c` is what makes a MERGE attributable. Without it a merge commit prints no
+-- names at all, so a file whose current content was decided in the merge — a
+-- conflict resolved there, which is the only way a change lands through a merge
+-- and nowhere else — was credited to whichever parent's commit the walk reached
+-- next. Not "unattributed": attributed to a commit that does not contain it.
+-- `-c` prints the combined diff, which is exactly the set of files the merge
+-- itself decided. Its `-z` framing differs — an extra NUL and no leading
+-- newline before the first name — and the loop below already reads both,
+-- because it skips empty runs rather than counting fields.
 --
 -- Returns an array of { name, commit }, and the newest commit touching the
 -- directory as a whole as the third value.
@@ -325,7 +331,7 @@ function g_exports.browse_last_commits(dir, oid, path)
     -- this file use: git substitutes these itself, so neither byte has to
     -- survive the trip out through a command line.
     local fmt = '%x02%H%x01%h%x01%cI%x01%an%x01%s'
-    local args = { 'log', '--format=' .. fmt, '--name-only', '-z',
+    local args = { 'log', '--format=' .. fmt, '--name-only', '-c', '-z',
                    '--no-renames', '--max-count=' .. MAX_LASTCOMMIT_SCAN,
                    '--end-of-options', oid }
     if path ~= '' then

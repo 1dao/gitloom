@@ -240,14 +240,29 @@ end
 --
 -- upload-pack is left alone: it runs none of these hooks, and naming a hooks
 -- directory for a read would be a claim this makes no use of.
+-- `receive.denyDeleteCurrent` is pinned rather than inherited, and deliberately
+-- NOT gated on PROTECT_DEFAULT_BRANCH. Deleting the branch a clone checks out is
+-- a different question from protecting its history: a repository whose HEAD
+-- names nothing clones to an empty worktree and answers 404 on every browsing
+-- endpoint, which is a broken repository rather than a policy decision. git
+-- refuses it by default, so this changes nothing today — what it removes is the
+-- dependency on that default, and on the repository's own config, which `-c`
+-- outranks. gitea states the same rule in its own code rather than inheriting
+-- it (routers/private/hook_pre_receive.go).
 local function rpc_argv(verb)
-    if verb == 'receive-pack' then
-        local hooks = protect_hooks_dir()
-        if hooks then
-            return { '-c', 'core.hooksPath=' .. hooks, verb, '--stateless-rpc', '.' }
-        end
+    if verb ~= 'receive-pack' then
+        return { verb, '--stateless-rpc', '.' }
     end
-    return { verb, '--stateless-rpc', '.' }
+    local argv = { '-c', 'receive.denyDeleteCurrent=refuse' }
+    local hooks = protect_hooks_dir()
+    if hooks then
+        argv[#argv + 1] = '-c'
+        argv[#argv + 1] = 'core.hooksPath=' .. hooks
+    end
+    argv[#argv + 1] = verb
+    argv[#argv + 1] = '--stateless-rpc'
+    argv[#argv + 1] = '.'
+    return argv
 end
 
 -- Write a streamed request body to its staging file as it arrives.
