@@ -43,6 +43,13 @@
   // still in flight can tell by identity that its rows are gone.
   var treeCells = Object.create(null);
 
+  // Assets are stamped with a content digest and served immutable, but the page
+  // itself is no-cache and a STALE digest still returns the CURRENT script. So a
+  // tab left open across a deploy can end up running new code against old
+  // markup, and an element added in that deploy is then null. Anything that
+  // reaches for a node this file did not always have checks for it: a control
+  // that has not shipped to that tab yet should cost its own feature, not the
+  // file listing it happens to be rendered next to.
   var $ = function (id) { return document.getElementById(id); };
   var $$ = function (selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); };
 
@@ -578,6 +585,7 @@
   // something the tab is asking you to look at.
   function setIssueBadge(count) {
     var badge = $('issue-count-badge');
+    if (!badge) return;
     var n = Number(count);
     if (!Number.isFinite(n) || n <= 0) {
       badge.hidden = true;
@@ -1045,6 +1053,7 @@
   // renderCrumbs is: these are path segments out of somebody's repository.
   function renderPathCrumbs() {
     var nav = $('path-crumbs');
+    if (!nav) return;
     nav.textContent = '';
     if (!state.repo) return;
     var segments = (state.path || '').split('/').filter(Boolean);
@@ -1079,7 +1088,7 @@
     // Cells belonging to the directory being left; the last-commit response for
     // it must not land in the rows of the one being entered.
     treeCells = Object.create(null);
-    $('tree-latest').hidden = true;
+    renderTreeLatest(null);
     return json(repoPath(suffix)).then(function (data) {
       if (!viewIsCurrent(view)) return [];
       var entries = Array.isArray(data.entries) ? data.entries : [];
@@ -1202,6 +1211,7 @@
 
   function renderTreeLatest(commit) {
     var strip = $('tree-latest');
+    if (!strip) return;
     if (!commit) {
       strip.hidden = true;
       return;
