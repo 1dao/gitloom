@@ -23,13 +23,15 @@ HTTP(S) work end to end, with accounts, access tokens, public/private
 repositories, a JSON management API and a same-origin repository browser. The
 browser is two pages — an account overview, and a repository page of its own —
 covering branches and tags, the file tree with what last changed each entry,
-raw files, images, commit history and bounded diffs, and it can create, edit and
-delete repositories.
+raw files, images, commit history and bounded diffs, and a three-dot comparison
+of any two refs — what one branch would add to another — and it can create, edit
+and delete repositories.
 A repository shows its README rendered, and source files are syntax-coloured;
 both parsers are ours rather than vendored, for the reason given at the top of
 `web/markdown.js`.
 Where you are is in the address bar, so a file, a directory, a tag, the commit
-log and an issue can each be bookmarked, shared, reloaded and gone Back from.
+log, a comparison and an issue can each be bookmarked, shared, reloaded and gone
+Back from.
 Repositories can be renamed, searched (fixed-string, one revision at a time),
 and the account's own access tokens listed and revoked one by one. Owners can
 also grant existing accounts read or write access to private repositories, and
@@ -262,14 +264,14 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 223/223 on Windows and under `GIT_STREAM=off`
+2.52). `test/smoke.sh` passes 237/237 on Windows and under `GIT_STREAM=off`
 (measured 2026-09-06) — the streamed-body cases are skipped there because they
 need the transport that platform does not have, and the browser parsers' own
 tests need node, which is a development convenience rather than a dependency and
 is skipped where it is absent. The Linux figure was 216 when the Windows one was
-206; the seventeen cases added since — the file listing's last-commit column and
-the accounts panel — need nothing this platform lacks, so a Linux run should now
-be 233, and it has not been re-run to say so. `test/unit.lua` is 216 on Windows, 215 on Linux (one case is about
+206; the thirty-one cases added since — the file listing's last-commit column,
+the accounts panel and the compare endpoints — need nothing this platform lacks,
+so a Linux run should now be 247, and it has not been re-run to say so. `test/unit.lua` is 216 on Windows, 215 on Linux (one case is about
 Windows path spelling). Adding `DB_DRIVER=mysql` runs the same suite against
 MySQL instead of JSON files.
 
@@ -357,6 +359,8 @@ Browsing a repository's contents:
 | `GET .../commits` | `?ref=` `&limit=` `&skip=` `&path=`; response includes `has_more` |
 | `GET .../commits/:ref` | one commit, with the files it touched |
 | `GET .../commits/:ref/diff` | `?path=`, bounded unified diff |
+| `GET .../compare/:base/:head` | `?limit=` `&skip=`; **three-dot** — the merge base, ahead/behind, and the commits and files `head` would add. `unrelated` when the two share no ancestor, where the answer falls back to base's tip |
+| `GET .../compare/:base/:head/diff` | `?path=`; the patch for that same comparison, bounded by `MAX_DIFF_MB` |
 | `GET .../tree/:ref` and `.../tree/:ref/<path>` | directory listing, directories first |
 | `GET .../lastcommits/:ref` and `.../lastcommits/:ref/<path>` | newest commit per entry, from one bounded history walk |
 | `GET .../raw/:ref/<path>` | file contents |

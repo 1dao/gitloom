@@ -782,6 +782,74 @@ local function h_commit_diff(req, ctx)
     })
 end
 
+-- Both ends of a comparison, each resolved on its own exactly as every other
+-- browsing endpoint resolves its one ref — so neither reaches a git command
+-- line as the text the client sent. They occupy their own URL segments rather
+-- than GitHub's `base...head`, because a branch name may contain a slash and
+-- already has to arrive percent-encoded in one segment; a separator inside that
+-- segment would be a second thing to escape and a second thing to get wrong.
+local function compare_ends(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return nil, dir end
+
+    local base, base_ref = resolve_ref(dir, rec, ctx.params.base)
+    if not base then return nil, base_ref end
+    local head, head_ref = resolve_ref(dir, rec, ctx.params.head)
+    if not head then return nil, head_ref end
+
+    return { dir = dir, base = base, head = head,
+             base_ref = base_ref, head_ref = head_ref }
+end
+
+local function h_compare(req, ctx)
+    local ends, refused = compare_ends(req, ctx)
+    if not ends then return refused end
+
+    local q = req.query or {}
+    local cmp, err = browse_compare(ends.dir, ends.base, ends.head,
+                                    { limit = q.limit, skip = q.skip })
+    if not cmp then return http_response_error(500, http_safe_error(err)) end
+
+    -- What the caller asked for, beside what it resolved to. A comparison is
+    -- the one browsing answer whose two ends are worth echoing back by name:
+    -- `main` moves, and a saved link to this response should say what it meant.
+    cmp.base_ref, cmp.head_ref = ends.base_ref, ends.head_ref
+    return http_response_json(200, cmp)
+end
+
+local function h_compare_diff(req, ctx)
+    local ends, refused = compare_ends(req, ctx)
+    if not ends then return refused end
+
+    local path, perr = browse_decode_path((req.query or {}).path)
+    if path == nil then return http_response_error(400, perr) end
+
+    -- The same starting point the file list used, computed the same way. An
+    -- unrelated pair has no merge base and falls back to the tip of base, which
+    -- is what browse_compare reports as `unrelated`.
+    local mb = browse_merge_base(ends.dir, ends.base, ends.head)
+    local from = mb or ends.base
+
+    local patch, err = browse_compare_diff(ends.dir, from, ends.head, path)
+    if not patch then
+        local message = http_safe_error(err)
+        if tostring(err):find('exceeds MAX_DIFF_MB', 1, true) then
+            return http_response_error(413, message)
+        end
+        return http_response_error(500, message)
+    end
+    return http_response_json(200, {
+        base_ref = ends.base_ref, head_ref = ends.head_ref,
+        base = ends.base, head = ends.head,
+        -- Not `from ~= base`: when head is a straight descendant the merge base
+        -- IS base, which is the most ordinary comparison there is and not an
+        -- unrelated one. Only a missing merge base means unrelated.
+        merge_base = mb,
+        unrelated = mb == nil,
+        path = path, diff = patch,
+    })
+end
+
 local function h_tree(req, ctx)
     local rec, dir = readable_repo(req, ctx)
     if not rec then return dir end
@@ -954,6 +1022,8 @@ function g_exports.api_install()
     http_get('/api/v1/repos/:owner/:name/lastcommits/:ref', h_last_commits)
     http_get('/api/v1/repos/:owner/:name/lastcommits/:ref/*path', h_last_commits)
     http_get('/api/v1/repos/:owner/:name/raw/:ref/*path', h_raw)
+    http_get('/api/v1/repos/:owner/:name/compare/:base/:head', h_compare)
+    http_get('/api/v1/repos/:owner/:name/compare/:base/:head/diff', h_compare_diff)
     http_get('/api/v1/repos/:owner/:name/search', h_search)
 
     cfg_log_info('management API installed')

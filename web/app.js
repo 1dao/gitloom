@@ -17,6 +17,11 @@
     issues: [],
     issue: null,
     issueState: 'open',
+    // The ref lists loadBranches already fetched, kept so the compare view can
+    // fill two more selects without asking for them a second time.
+    refNames: { branches: [], tags: [] },
+    compareBase: '',
+    compareHead: '',
     collaborators: [],
     username: '',
     token: '',
@@ -38,7 +43,8 @@
   // already left, and rendering it would show them the wrong tree — which is
   // not theoretical on a server where each listing forks a git process, so a
   // slow response really does arrive after a fast one issued later.
-  var seq = { repos: 0, view: 0, file: 0, diff: 0, commits: 0, access: 0, issues: 0, issue: 0, readme: 0 };
+  var seq = { repos: 0, view: 0, file: 0, diff: 0, commits: 0, access: 0, issues: 0, issue: 0, readme: 0,
+              compare: 0, comparediff: 0 };
   var COMMIT_PAGE_SIZE = 25;
 
   // The two cells of each file row that the last-commit walk fills in, by entry
@@ -1013,6 +1019,11 @@
     state.issueState = 'open';
     $('issue-state').value = 'open';
     state.branch = target.ref || repo.default_branch || 'main';
+    // Cleared rather than carried: these name refs in the repository being left.
+    // fillCompareSelects corrects both against the lists once they arrive.
+    state.refNames = { branches: [], tags: [] };
+    state.compareBase = target.compareBase || repo.default_branch || 'main';
+    state.compareHead = target.compareHead || state.branch;
     state.path = target.path || '';
     state.commitSkip = 0;
     state.commitHasMore = false;
@@ -1032,6 +1043,8 @@
       state.path = target.file.replace(/\/?[^\/]*$/, '');
     }
     $('diff-panel').hidden = true;
+    var comparePanel = $('compare-diff-panel');
+    if (comparePanel) comparePanel.hidden = true;
     renderRepos();
     setIssueBadge(0);
     showView(target.view || 'code');
@@ -1078,7 +1091,10 @@
     });
   }
 
-  function refGroup(select, label, names) {
+  // `selected` is a parameter rather than always state.branch, because the
+  // compare view has two selects and neither of them is the branch the tree is
+  // showing.
+  function refGroup(select, label, names, selected) {
     if (!names.length) return;
     var group = document.createElement('optgroup');
     group.label = label;
@@ -1086,7 +1102,7 @@
       var option = document.createElement('option');
       option.value = name;
       option.textContent = name;
-      option.selected = name === state.branch;
+      option.selected = name === selected;
       group.appendChild(option);
     });
     select.appendChild(group);
@@ -1138,9 +1154,14 @@
         if (names.indexOf(state.branch) === -1 && tagNames.indexOf(state.branch) === -1) {
           state.branch = names[0];
         }
-        refGroup(select, '分支', names);
-        refGroup(select, '标签', tagNames);
+        refGroup(select, '分支', names, state.branch);
+        refGroup(select, '标签', tagNames, state.branch);
         select.disabled = names.length + tagNames.length < 2;
+        state.refNames = { branches: names, tags: tagNames };
+        fillCompareSelects();
+        // The restore path: showView opened the comparison before there was
+        // anything to compare with, so this is where it actually starts.
+        if (state.view === 'compare') loadCompare(view);
       }
       return branches;
     }).catch(function () {
@@ -1801,7 +1822,10 @@
     });
   }
 
-  function renderCommit(commit, list) {
+  // `onClick` is a parameter because the same row appears in two places: in the
+  // commit log it opens that commit's patch in the log's own panel, and in a
+  // comparison it opens it in the comparison's.
+  function renderCommit(commit, list, onClick) {
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'commit-row';
@@ -1825,7 +1849,7 @@
     date.className = 'commit-date';
     date.textContent = formatDate(commit.author && commit.author.date);
     row.appendChild(date);
-    row.addEventListener('click', function () { loadDiff(commit); });
+    row.addEventListener('click', onClick || function () { loadDiff(commit); });
     list.appendChild(row);
   }
 
@@ -1876,7 +1900,7 @@
     var suffix = '/commits/' + encodeURIComponent(commit.oid) + '/diff';
     json(repoPath(suffix)).then(function (data) {
       if (ticket !== seq.diff) return;
-      renderDiff(String(data.diff || ''));
+      renderDiff(String(data.diff || ''), $('diff-content'));
       panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }).catch(function (error) {
       if (ticket !== seq.diff) return;
@@ -1884,8 +1908,9 @@
     });
   }
 
-  function renderDiff(text) {
-    var pre = $('diff-content');
+  // `pre` is a parameter because a comparison has a patch of its own, rendered
+  // into its own panel. The colouring is the same colouring.
+  function renderDiff(text, pre) {
     pre.textContent = '';
     var fragment = document.createDocumentFragment();
     text.split('\n').forEach(function (line, index, lines) {
@@ -1905,6 +1930,216 @@
     });
     pre.appendChild(fragment);
   }
+
+  // ---------------------------------------------------------------------------
+  // Comparing two revisions
+  //
+  // The reading half of a pull request, and useful before there is one: what
+  // has this branch got that the trunk has not. The server does the thinking —
+  // see the three-dot note at the top of app/browse.lua — and this view is two
+  // selects, a summary, and the two lists that answer follow from them.
+  //
+  // Listeners here go through on() rather than addEventListener directly. A
+  // node this file did not always have is null in a tab left open across the
+  // deploy that added it, and addEventListener on null throws at PARSE time,
+  // taking every listener registered after it down with it — which is a worse
+  // failure than the missing feature.
+  // ---------------------------------------------------------------------------
+
+  function on(id, event, handler) {
+    var node = $(id);
+    if (node) node.addEventListener(event, handler);
+  }
+
+  function comparePath(suffix) {
+    return repoPath('/compare/' + encodeRef(state.compareBase) + '/' +
+                    encodeRef(state.compareHead) + (suffix || ''));
+  }
+
+  function statusLabel(letter) {
+    return ({ A: '新增', M: '修改', D: '删除', R: '重命名', C: '复制', T: '类型变化' })[letter] ||
+           letter || '?';
+  }
+
+  // Both ends have to name something that exists, and they are asked for in a
+  // URL that may have outlived either. base falls back to the recorded default
+  // branch and head to whatever the tree is showing; comparing a ref with
+  // itself is a legal, empty answer, which is what the summary then says.
+  function fillCompareSelects() {
+    var baseSelect = $('compare-base');
+    var headSelect = $('compare-head');
+    if (!baseSelect || !headSelect) return;
+
+    var names = state.refNames.branches || [];
+    var tags = state.refNames.tags || [];
+    function pick(want, fallback) {
+      if (names.indexOf(want) !== -1 || tags.indexOf(want) !== -1) return want;
+      if (names.indexOf(fallback) !== -1) return fallback;
+      return names[0] || '';
+    }
+    state.compareBase = pick(state.compareBase, (state.repo && state.repo.default_branch) || '');
+    state.compareHead = pick(state.compareHead, state.branch);
+
+    [[baseSelect, state.compareBase], [headSelect, state.compareHead]].forEach(function (pair) {
+      pair[0].textContent = '';
+      refGroup(pair[0], '分支', names, pair[1]);
+      refGroup(pair[0], '标签', tags, pair[1]);
+      pair[0].disabled = names.length + tags.length < 2;
+    });
+  }
+
+  // One patch, into the compare panel. The path is built by the caller because
+  // the three things worth looking at here come from two different endpoints:
+  // the whole comparison, one file of it, and one commit inside it.
+  function loadComparePatch(title, meta, path) {
+    var ticket = (seq.comparediff += 1);
+    var panel = $('compare-diff-panel');
+    if (!panel) return;
+    panel.hidden = false;
+    $('compare-diff-title').textContent = title;
+    $('compare-diff-meta').textContent = meta;
+    $('compare-diff-content').textContent = '正在生成 diff…';
+    json(path).then(function (data) {
+      if (ticket !== seq.comparediff) return;
+      var patch = String(data.diff || '');
+      if (!patch) {
+        $('compare-diff-content').textContent = '没有文本改动可以显示。';
+        return;
+      }
+      renderDiff(patch, $('compare-diff-content'));
+      panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }).catch(function (error) {
+      if (ticket !== seq.comparediff) return;
+      // A comparison is a far easier way to ask for an enormous patch than any
+      // single commit is, so MAX_DIFF_MB is an ordinary outcome here rather
+      // than a fault — and the answer to it is on screen already, one file at
+      // a time.
+      $('compare-diff-content').textContent = error.status === 413
+        ? '这次比较的 diff 超过了服务器的 MAX_DIFF_MB 上限，请逐个文件查看。'
+        : error.message;
+    });
+  }
+
+  function renderCompare(data) {
+    var summary = $('compare-summary');
+    var fileList = $('compare-files');
+    var commitList = $('compare-commits');
+    var files = Array.isArray(data.files) ? data.files : [];
+    var commits = Array.isArray(data.commits) ? data.commits : [];
+    var ahead = Number(data.ahead) || 0;
+    var behind = Number(data.behind) || 0;
+
+    fileList.textContent = '';
+    commitList.textContent = '';
+    fileList.hidden = !files.length;
+    $('compare-full-diff').hidden = !files.length;
+
+    if (!ahead && !files.length) {
+      summary.textContent = state.compareBase === state.compareHead
+        ? '两端是同一个引用，没有可比较的内容。'
+        : '没有可以合并进 ' + state.compareBase + ' 的内容' +
+          (behind ? '，它落后 ' + behind + ' 个提交。' : '。');
+      setError(commitList, '没有提交');
+      return;
+    }
+
+    var parts = [];
+    // Not a footnote. Without a common ancestor the answer below is a different
+    // comparison from the one that was asked for, and saying so is the whole
+    // reason the server reports `unrelated` separately.
+    if (data.unrelated) {
+      parts.push('这两条历史没有共同祖先，下面直接对比 ' + state.compareBase + ' 的末端');
+    }
+    parts.push('领先 ' + ahead + ' 个提交');
+    parts.push('落后 ' + behind + ' 个提交');
+    parts.push(files.length + ' 个文件有变化');
+    summary.textContent = parts.join(' · ');
+
+    files.forEach(function (file) {
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'access-row compare-file';
+      var left = document.createElement('div');
+      var badge = document.createElement('span');
+      badge.className = 'pill status-pill status-' + (file.status || '');
+      badge.textContent = statusLabel(file.status);
+      left.appendChild(badge);
+      left.appendChild(document.createTextNode(' '));
+      var name = document.createElement('code');
+      name.textContent = file.from ? (file.from + ' → ' + file.path) : file.path;
+      left.appendChild(name);
+      row.appendChild(left);
+      var hint = document.createElement('span');
+      hint.className = 'commit-meta';
+      hint.textContent = '查看改动';
+      row.appendChild(hint);
+      row.addEventListener('click', function () {
+        loadComparePatch(file.path,
+          statusLabel(file.status) + ' · ' + state.compareBase + ' ← ' + state.compareHead,
+          comparePath('/diff?path=' + encodeURIComponent(file.path)));
+      });
+      fileList.appendChild(row);
+    });
+
+    if (!commits.length) {
+      setError(commitList, '没有提交');
+      return;
+    }
+    commits.forEach(function (commit) {
+      renderCommit(commit, commitList, function () {
+        loadComparePatch(commit.subject || commit.short || commit.oid,
+          (commit.author && commit.author.name ? commit.author.name : 'unknown') +
+            ' · ' + formatDate(commit.author && commit.author.date),
+          repoPath('/commits/' + encodeURIComponent(commit.oid) + '/diff'));
+      });
+    });
+    // The list is capped by the same page size the commit log uses, so a branch
+    // that is hundreds ahead says so rather than quietly showing a prefix.
+    if (data.has_more) {
+      var more = document.createElement('div');
+      more.className = 'empty-row';
+      more.textContent = '只列出了最近 ' + commits.length + ' 个提交，共 ' + ahead + ' 个。';
+      commitList.appendChild(more);
+    }
+  }
+
+  function loadCompare(view) {
+    var ticket = (seq.compare += 1);
+    // A patch still in flight belongs to the pair being left.
+    seq.comparediff += 1;
+    $('compare-diff-panel').hidden = true;
+    $('compare-summary').textContent = '正在比较…';
+    $('compare-files').textContent = '';
+    $('compare-files').hidden = true;
+    $('compare-full-diff').hidden = true;
+    setLoading($('compare-commits'), '正在读取…');
+    return json(comparePath('')).then(function (data) {
+      if (!viewIsCurrent(view) || ticket !== seq.compare) return;
+      renderCompare(data);
+    }).catch(function (error) {
+      if (!viewIsCurrent(view) || ticket !== seq.compare) return;
+      $('compare-summary').textContent = '';
+      $('compare-files').hidden = true;
+      setError($('compare-commits'), error.message);
+    });
+  }
+
+  function compareEndChanged(which, value) {
+    if (which === 'base') state.compareBase = value; else state.compareHead = value;
+    routeWrite();
+    loadCompare(seq.view);
+  }
+
+  on('compare-base', 'change', function (event) { compareEndChanged('base', event.target.value); });
+  on('compare-head', 'change', function (event) { compareEndChanged('head', event.target.value); });
+  on('compare-full-diff', 'click', function () {
+    loadComparePatch('完整改动', state.compareBase + ' ← ' + state.compareHead,
+                     comparePath('/diff'));
+  });
+  on('compare-diff-close', 'click', function () {
+    seq.comparediff += 1;
+    $('compare-diff-panel').hidden = true;
+  });
 
   // ── the address bar ────────────────────────────────────────────────────────
   //
@@ -1926,6 +2161,7 @@
   //   #/<owner>/<name>/tree/<ref>/<dir>      a directory at a ref
   //   #/<owner>/<name>/blob/<ref>/<file>     a file at a ref
   //   #/<owner>/<name>/commits/<ref>
+  //   #/<owner>/<name>/compare/<base>/<head>
   //   #/<owner>/<name>/issues[/<number>]
   //
   // tree vs blob because the URL cannot otherwise say which one a path is, and
@@ -1939,6 +2175,10 @@
     }
     if (state.view === 'commits') {
       return base + '/commits/' + encodeRef(state.branch);
+    }
+    if (state.view === 'compare') {
+      return base + '/compare/' + encodeRef(state.compareBase) + '/' +
+             encodeRef(state.compareHead);
     }
     var target = state.file || state.path;
     return base + (state.file ? '/blob/' : '/tree/') + encodeRef(state.branch) +
@@ -1989,6 +2229,10 @@
     } else if (kind === 'commits') {
       target.view = 'commits';
       target.ref = parts[3];
+    } else if (kind === 'compare') {
+      target.view = 'compare';
+      target.compareBase = parts[3];
+      target.compareHead = parts[4];
     } else if (kind === 'tree' || kind === 'blob') {
       target.ref = parts[3];
       var rest = parts.slice(4).join('/');
@@ -2002,6 +2246,8 @@
     $$('.view-tab').forEach(function (tab) { tab.classList.toggle('active', tab.dataset.view === view); });
     $('code-view').hidden = view !== 'code';
     $('commits-view').hidden = view !== 'commits';
+    var compare = $('compare-view');
+    if (compare) compare.hidden = view !== 'compare';
     $('issues-view').hidden = view !== 'issues';
     var side = $('repo-side');
     if (side) {
@@ -2011,6 +2257,14 @@
       side.parentNode.classList.toggle('no-side', view !== 'code');
     }
     if (view === 'issues' && state.repo) loadIssues(seq.view);
+    // Only once the ref lists are in. On a tab click they already are; on a
+    // restore from the address bar showView runs before loadBranches has
+    // answered, and loadBranches starts the comparison itself when it lands —
+    // otherwise this would ask the server to compare two empty refs.
+    if (view === 'compare' && state.repo && state.refNames.branches.length) {
+      fillCompareSelects();
+      loadCompare(seq.view);
+    }
   }
 
   function openAuth() {

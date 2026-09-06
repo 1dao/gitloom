@@ -995,6 +995,123 @@ account button and no `管理员`; and a reload restores the administrator's
 controls from the server rather than from anything the tab had stored. The only
 console error in the whole run was the deliberate duplicate.
 
+### Comparing two revisions
+
+The reading half of a pull request, built before the writing half because it is
+useful on its own — what has this branch got that the trunk has not — and
+because it settles the semantics the rest of a pull request is built on while
+nothing depends on them yet.
+
+**Three dots, not two, and that is the whole design.** A comparison starts where
+the two histories last agreed — the merge base — and not at the tip of base.
+Diffing the two tips reports everything that landed on base while the branch was
+away and attributes all of it to the branch. In the smoke repository `main` gains
+a line in README.md after `side` branches off, and a two-dot `git diff main side`
+answers:
+
+    M  README.md
+    D  c.txt
+    A  side.txt
+
+Two of those three are somebody else's work described backwards. The compare
+endpoint returns `side.txt` alone, and the case asserting README.md's ABSENCE is
+the only one in the block that a two-dot implementation would fail — every other
+check there passes either way, which is worth knowing about a test that looks
+like five.
+
+**The merge base is computed by us, in its own step.** `git diff base...head`
+would do it in one, and two things are lost that way. The merge base is worth
+reporting on its own — it is the answer to "what is this branch measured
+against" — and when two histories share no ancestor at all the three-dot form is
+not an empty answer but a fatal error:
+
+    $ git diff --name-status main...lonely
+    fatal: main...lonely: no merge base
+
+That is a real state — an orphan branch pushed into an existing repository — so
+`browse_merge_base` returns nil for it, the comparison falls back to the tip of
+base, and the response carries `unrelated: true`. Named rather than left to be
+inferred from a null merge base, because the answer below it is a different
+comparison from the one that was asked for and the caller should not have to
+work that out. The browser leads its summary with it for the same reason.
+
+`ahead`/`behind` come from `rev-list --left-right --count base...head`, whose
+symmetric difference is defined with or without a common ancestor and so needs
+no fallback of its own. The commit list is `browse_log` with a new `exclude`
+option — `^<oid>`, the thing that turns a walk over one history into the commits
+one revision has and another does not — so it inherits the paging and the cap
+that were already there.
+
+`GET .../compare/:base/:head` puts the two ends in their own URL segments rather
+than following GitHub's `base...head`. A branch name may contain a slash and
+already has to arrive percent-encoded inside one segment; a separator inside
+that segment would be a second thing to escape and a second thing to get wrong.
+
+Both ends go through `resolve_ref` like every other browsing endpoint, so
+neither reaches a command line as the text the client sent. These two oids are
+nonetheless the only values in `browse.lua` that get CONCATENATED into a
+revision expression rather than passed as their own argv entry, and
+`--end-of-options` does not protect the inside of a range — so the hex shape is
+checked again at the point of use.
+
+**Two things came out of the refactor rather than the feature.** The
+`--name-status -z` parser, whose stride depends on the status letter (a rename
+carries two paths), was about to exist twice; it is `parse_name_status` now, used
+by the per-commit file list and the compare alike. And `browse_diff`'s cap was
+inline, so a comparison — a far easier way to ask for an enormous patch than any
+single commit — would have been the one path that forgot `MAX_DIFF_MB`. Both go
+through `capture_patch`, which means both answer 413 the same way.
+
+**In the browser** it is a fourth tab: two ref selects, a summary, the changed
+files, and the commits. The patch is not fetched with the comparison, because a
+long-lived branch is a large one and the file list beside it costs nothing —
+a file row loads that file's patch, a commit row loads that commit's, and one
+button loads the whole thing. When the whole thing is over `MAX_DIFF_MB` the
+panel says so and points at the per-file rows, which is a normal outcome here
+rather than a fault.
+
+`#/<owner>/<name>/compare/<base>/<head>` is in the address bar, written on every
+selector change. A comparison nobody can paste to anybody is most of the point
+of one missing.
+
+**What building it found, in code that had nothing to do with it.**
+`.commit-subject` is a `<span>` inside a grid ITEM — the item is blockified, its
+children are not — so as an inline box every property in its rule was inert: no
+margin below it, no ellipsis, no `nowrap`, and no line break, which ran the
+subject straight into the author's name. Every commit in the log has read
+`base three after branchingt · 6f30246` since the commit log shipped, and it was
+only noticed because the comparison renders the same rows and they were being
+looked at closely. One `display: block`.
+
+The other is a hazard rather than a bug. `addEventListener` on a null node
+throws at PARSE time and takes every listener registered after it down with it,
+so a tab left open across the deploy that adds a panel loses the whole page
+rather than one feature — the same failure `44035f2` fixed for reads, still open
+for listeners. The compare view's own listeners go through an `on()` helper that
+checks; the ones that predate it do not, and retrofitting them is its own change.
+
+**And one in the suite itself, which is the one worth remembering.** The compare
+cases branch `side` off the root commit, so they had to ask where the root
+commit was — and the answer the suite already had was wrong. `root` was the LAST
+`"oid":` in the commit-listing response, and that response carries an `oid` of
+its own beside the array (the resolved ref), so which commit came out depended
+on Lua's key order, which is not promised. It had been landing on the tip. Both
+cases that used it passed anyway: README.md is one line long, so the tip's patch
+carries `hello gitloom` as context exactly as the root's does, and "the initial
+commit must list its files" is true of any commit that touched one. A fixture
+that is wrong half the time and two assertions that cannot tell the difference
+are the same bug twice. It comes from `git rev-list --max-parents=0` now, and
+the patch case asks for `src/app.lua`, which only the initial commit adds.
+
+Verified against a live instance, in a browser: `#/admin/cmp/compare/main/feature`
+restores from the address bar with both selects set; the summary reads 领先 2 ·
+落后 1 · 2 个文件; the file list holds `a.txt` and `f1.txt` and NOT the file main
+gained after the branch left; clicking a file opens that file's patch, coloured;
+switching the head to an orphan branch leads with 这两条历史没有共同祖先 and falls
+back rather than erroring; comparing `main` with itself says so instead of
+showing an empty table; the hash follows every change and Back walks the three
+comparisons in order. No console errors.
+
 ## Phase 3 — collaboration
 
 Organisations and teams, then issues (comments, labels, milestones), then pull
@@ -1003,8 +1120,12 @@ requests. Server-authored sideband messages land here too — the band-2
 pull request. The transport for them already works; what is missing is anything
 worth saying, which arrives with protected branches and review.
 
-PRs are the heavy part: merge-base computation, conflict detection, three merge
-strategies, and a review state machine.
+PRs are the heavy part. Their READING half is done and shipped as the compare
+view above — merge base, ahead/behind, the commits and the files one branch
+would add — so what is left is the writing half: conflict detection, three merge
+strategies, and a review state machine. A pull request on top of this is a
+record with a state, two refs and a discussion; the question "what would this
+merge" is already answered.
 
 Estimate: 6–10 weeks.
 

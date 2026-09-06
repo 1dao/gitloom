@@ -219,6 +219,13 @@ curl -s "$BASE/app.js" | grep -q "json('/api/v1/user')" \
 # still be sitting in the form when the next person looks at that screen.
 curl -s "$BASE/app.js" | grep -q "\$('user-form').reset()" \
     && ok 'the account form is cleared after it is sent' || bad 'the account form is cleared after it is sent' 'reset missing'
+# The compare view, and the route that makes one shareable. A comparison nobody
+# can paste to anybody is most of the point of it missing.
+grep -q 'id="compare-view"' "$WORK/web.index" && grep -q 'id="compare-base"' "$WORK/web.index" \
+    && grep -q 'id="compare-head"' "$WORK/web.index" \
+    && ok 'the browser has a compare panel' || bad 'the browser has a compare panel' 'panel missing'
+curl -s "$BASE/app.js" | grep -q "kind === 'compare'" \
+    && ok 'a comparison has its own address' || bad 'a comparison has its own address' 'route missing'
 # The API answers in English because git clients read it too, so a form-level
 # answer needs its own translation or the dialog shows English mid-sentence.
 curl -s "$BASE/app.js" | grep -q 'a repository with that name already exists' \
@@ -795,14 +802,24 @@ echo "$page2" | grep -q '"skip":1' && echo "$page2" | grep -q '"has_more":false'
 
 # The initial commit must list its files. diff-tree compares against the first
 # parent, and a root commit has none, so this is zero without --root.
-root=$(curl -s "$DEMO/commits?ref=main&limit=50" | grep -o '"oid":"[0-9a-f]*"' | tail -1 | cut -d'"' -f4)
+# From git, not from the JSON. The old derivation took the LAST `"oid":` in the
+# commits response, and that response carries one of its own beside the array --
+# the resolved ref -- so which commit came out depended on key order, which Lua
+# does not promise. It landed on the TIP as often as on the root, and neither
+# case below noticed: a one-line README means the tip's patch still carries
+# `hello gitloom` as context, so the assertion passed against either commit.
+root=$( cd "$WORK/w1" && git rev-list --max-parents=0 HEAD | head -1 )
 curl -s "$DEMO/commits/$root" | grep -q '"files":\[{' \
     && ok 'root commit lists its files' || bad 'root commit lists its files' "$(curl -s "$DEMO/commits/$root" | grep -o '"files":[^]]*.')"
 
 # The diff endpoint returns patch content for the same resolved commit. The
 # initial commit is important here: it exercises the --root path rather than a
 # normal parent-to-child diff.
-curl -s "$DEMO/commits/$root/diff" | grep -q '"diff":".*hello gitloom' \
+# `src/app.lua` rather than `hello gitloom`: README.md is one line long, so the
+# TIP's patch carries that string as context too and the old assertion could not
+# tell the two commits apart -- which is exactly how the broken `root` above
+# went unnoticed. Only the initial commit adds the subdirectory.
+curl -s "$DEMO/commits/$root/diff" | grep -q 'src/app.lua' \
     && ok 'commit diff returns patch content' || bad 'commit diff returns patch content' "$(curl -s "$DEMO/commits/$root/diff" | head -c 240)"
 
 # A path filter is decoded before it reaches git, and a traversal attempt is
@@ -811,6 +828,56 @@ curl -s "$DEMO/commits/$root/diff?path=README.md" | grep -q '"path":"README.md"'
     && ok 'commit diff honours a path filter' || bad 'commit diff honours a path filter' "$(curl -s "$DEMO/commits/$root/diff?path=README.md")"
 code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/commits/$root/diff?path=%2e%2e%2fgitloom.cfg")
 check 'commit diff rejects a traversal path' "$code" '400'
+
+# ── Comparing two revisions ─────────────────────────────────────────────────
+# THREE dots, not two: a comparison measures from where the histories last
+# agreed, not from the tip of base. `side` branches off the ROOT commit and adds
+# one file, while main has moved on with 'second' -- so main and side each have
+# one commit the other does not, and a TWO-dot diff would additionally report
+# README.md as changed, attributing the undoing of 'second' to side. That file's
+# absence below is the assertion that separates the two forms; every other check
+# here would pass either way.
+( cd "$WORK/w1" &&
+  git checkout -q -b side "$root" &&
+  printf 'only on side\n' > side.txt && git add -A &&
+  git -c user.email=smoke@test -c user.name=smoke commit -qm 'side commit' &&
+  $GIT push -q "$AUTH" side:refs/heads/side &&
+  git checkout -q main ) >/dev/null 2>&1
+CMP=$(curl -s "$DEMO/compare/main/side")
+echo "$CMP" | grep -q '"ahead":1' && echo "$CMP" | grep -q '"behind":1' \
+    && ok 'compare counts ahead and behind' || bad 'compare counts ahead and behind' "$CMP"
+echo "$CMP" | grep -q "\"merge_base\":\"$root\"" \
+    && ok 'compare measures from the merge base' || bad 'compare measures from the merge base' "$CMP"
+echo "$CMP" | grep -q '"subject":"side commit"' \
+    && ok 'compare lists the commits it would add' || bad 'compare lists the commits it would add' "$CMP"
+echo "$CMP" | grep -q '"path":"side.txt"' \
+    && ok 'compare lists the files it would change' || bad 'compare lists the files it would change' "$CMP"
+if echo "$CMP" | grep -q '"path":"README.md"'; then
+    bad 'compare does not attribute the other branch changes' "$CMP"
+else
+    ok 'compare does not attribute the other branch changes'
+fi
+# Both ends are resolved like every other ref, and both are hostile input.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$DEMO/compare/main/no-such-branch")
+check 'compare on an unknown head is a 404' "$code" '404'
+code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/compare/-a/main")
+check 'compare refuses an option-shaped base' "$code" '404'
+# The patch has to start where the file list starts, or the two halves of one
+# comparison describe different things.
+CMPD=$(curl -s "$DEMO/compare/main/side/diff")
+echo "$CMPD" | grep -q 'side.txt' \
+    && ok 'compare diff returns patch content' || bad 'compare diff returns patch content' "$(echo "$CMPD" | head -c 240)"
+if echo "$CMPD" | grep -q 'a/README.md'; then
+    bad 'compare diff starts at the merge base' "$(echo "$CMPD" | head -c 240)"
+else
+    ok 'compare diff starts at the merge base'
+fi
+code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/compare/main/side/diff?path=%2e%2e%2fgitloom.cfg")
+check 'compare diff rejects a traversal path' "$code" '400'
+# A ref against itself is empty rather than an error, which is what the browser
+# lands on when both selectors start on the default branch.
+curl -s "$DEMO/compare/main/main" | grep -q '"ahead":0' \
+    && ok 'comparing a ref with itself is empty' || bad 'comparing a ref with itself is empty' "$(curl -s "$DEMO/compare/main/main")"
 
 # An empty list stays an array, like refs.
 curl -s "$DEMO/tags" | grep -q '"tags":\[\]' \
@@ -835,7 +902,7 @@ for pth in '..%2f..%2fgitloom.cfg' '%2e%2e/%2e%2e/etc/passwd' '.git/config' '-rf
 done
 
 # Browsing obeys the same visibility rule as the transport.
-for ep in branches tags commits tree/main lastcommits/main; do
+for ep in branches tags commits tree/main lastcommits/main compare/main/main; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/repos/admin/secret/$ep")
     check "private repo hidden from browsing: $ep" "$code" '404'
 done

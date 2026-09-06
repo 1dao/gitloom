@@ -3,6 +3,7 @@
 -- Exports: browse_path_ok, browse_decode_path, browse_resolve,
 --          browse_tree, browse_blob_info, browse_blob_file,
 --          browse_log, browse_last_commits, browse_commit, browse_diff,
+--          browse_merge_base, browse_compare, browse_compare_diff,
 --          browse_refs, browse_search
 --
 -- Everything here answers "what is IN this repository", as opposed to repo.lua,
@@ -263,7 +264,7 @@ local function parse_log(text)
 end
 
 -- Commit list reachable from `oid`, newest first.
--- opts = { limit, skip, path, lookahead }
+-- opts = { limit, skip, path, lookahead, exclude }
 function g_exports.browse_log(dir, oid, opts)
     opts = opts or {}
     local limit = math.min(math.max(math.floor(tonumber(opts.limit) or 30), 1), MAX_LOG)
@@ -273,6 +274,13 @@ function g_exports.browse_log(dir, oid, opts)
     local args = { 'log', '--format=' .. LOG_FORMAT,
                    '--max-count=' .. fetch_limit, '--skip=' .. skip,
                    '--end-of-options', oid }
+    -- `^<oid>` drops everything reachable from it, which is what turns a walk
+    -- over one revision's history into the commits it has and another does not.
+    -- Only ever an object id, checked here as well as by its caller: this is a
+    -- revision expression on a command line.
+    if opts.exclude and tostring(opts.exclude):match('^%x+$') then
+        args[#args + 1] = '^' .. opts.exclude
+    end
     -- `--` separates revisions from paths. Without it a path that happens to
     -- look like a ref makes git guess, and it guesses differently depending on
     -- what exists in the repository.
@@ -366,6 +374,33 @@ function g_exports.browse_last_commits(dir, oid, path)
     return out, nil, latest
 end
 
+-- `--name-status -z` output: STATUS NUL PATH NUL, and for a rename or a copy a
+-- second path follows the first. That is why this walks pairs rather than
+-- splitting on a separator — the record length depends on the status letter.
+--
+-- Shared by the per-commit file list and by the compare, because `diff-tree`
+-- and `diff` print the same thing here. A second copy of a parser whose stride
+-- varies by record is a second place to get the stride wrong.
+local function parse_name_status(text)
+    local fields, files = {}, {}
+    for f in tostring(text or ''):gmatch('([^%z]*)%z') do fields[#fields + 1] = f end
+    local i = 1
+    while i <= #fields do
+        local status = fields[i]
+        if status == '' then break end
+        local letter = status:sub(1, 1)
+        if letter == 'R' or letter == 'C' then
+            files[#files + 1] = { status = letter,
+                                  from = fields[i + 1], path = fields[i + 2] }
+            i = i + 3
+        else
+            files[#files + 1] = { status = letter, path = fields[i + 1] }
+            i = i + 2
+        end
+    end
+    return files
+end
+
 -- One commit, with the list of files it touched.
 function g_exports.browse_commit(dir, oid)
     local r = git_exec({ 'show', '--no-patch', '--format=' .. LOG_FORMAT,
@@ -381,28 +416,7 @@ function g_exports.browse_commit(dir, oid)
     local diff = { 'diff-tree', '-z', '--root', '--no-commit-id',
                    '--name-status', '-r', '--end-of-options', oid }
     r = git_exec(diff, { cwd = dir, max_capture = 4 * 1024 * 1024 })
-    local files = {}
-    if r.ok then
-        -- -z output is STATUS NUL PATH NUL ... with renames adding a second
-        -- path, so this walks pairs rather than splitting on a separator.
-        local fields = {}
-        for f in tostring(r.stdout):gmatch('([^%z]*)%z') do fields[#fields + 1] = f end
-        local i = 1
-        while i <= #fields do
-            local status = fields[i]
-            if status == '' then break end
-            local letter = status:sub(1, 1)
-            if letter == 'R' or letter == 'C' then
-                files[#files + 1] = { status = letter,
-                                      from = fields[i + 1], path = fields[i + 2] }
-                i = i + 3
-            else
-                files[#files + 1] = { status = letter, path = fields[i + 1] }
-                i = i + 2
-            end
-        end
-    end
-    commit.files = util_json_array(files)
+    commit.files = util_json_array(r.ok and parse_name_status(r.stdout) or {})
     return commit
 end
 
@@ -414,14 +428,10 @@ end
 -- Keep the cap on the captured output rather than letting a large generated
 -- patch become an unbounded Lua string. Reading one byte past the configured
 -- limit lets us distinguish an exact-size patch from a truncated capture.
-function g_exports.browse_diff(dir, oid, path)
+local function capture_patch(dir, args, path)
     local max = cfg_int('MAX_DIFF_MB', 8) * 1024 * 1024
     if max <= 0 then return nil, 'diff output disabled' end
 
-    local args = {
-        'show', '--format=', '--patch', '--binary', '--full-index',
-        '--no-color', '--no-ext-diff', '--root', '--end-of-options', oid,
-    }
     if path and path ~= '' then
         args[#args + 1] = '--'
         args[#args + 1] = path
@@ -438,7 +448,128 @@ function g_exports.browse_diff(dir, oid, path)
     return patch
 end
 
--- Branches and tags, from one call each.
+function g_exports.browse_diff(dir, oid, path)
+    return capture_patch(dir, {
+        'show', '--format=', '--patch', '--binary', '--full-index',
+        '--no-color', '--no-ext-diff', '--root', '--end-of-options', oid,
+    }, path)
+end
+
+-- ---------------------------------------------------------------------------
+-- Comparing two revisions
+-- ---------------------------------------------------------------------------
+
+-- THREE DOTS, NOT TWO, and that is the whole design of this pair.
+--
+-- A comparison answers "what would this branch add", so it starts where the two
+-- histories last agreed — the MERGE BASE — and not at the tip of base. Diffing
+-- the two tips directly also reports everything that landed on base while this
+-- branch was away, and attributes all of it to the branch. That difference is
+-- what `base...head` means against `base..head`, and it is the whole of why a
+-- pull request shows what it shows.
+--
+-- The merge base is computed HERE rather than left to `git diff base...head`,
+-- for two reasons. It is worth reporting on its own — it is the answer to "what
+-- is this branch measured against". And when there is no common ancestor at all
+-- — two unrelated histories pushed into one repository, which happens — the
+-- three-dot form is a fatal error, while doing it in two steps leaves somewhere
+-- for that case to go.
+--
+-- Both oids must already have come from browse_resolve; the shape is checked
+-- again here because these two are the only values in this file that are
+-- CONCATENATED into a revision expression rather than passed as their own argv
+-- entry, and a range is not something --end-of-options can protect.
+--
+-- Returns { base, head, merge_base, unrelated, ahead, behind, commits, files,
+--           limit, skip, has_more }.
+--
+-- browse_merge_base is separate because the patch endpoint needs the same
+-- starting point and nothing else the compare computes; sharing the whole of
+-- browse_compare to get one object id would be four git processes for one
+-- answer. Returns nil when the histories are unrelated, which is a state and
+-- not a failure.
+function g_exports.browse_merge_base(dir, a, b)
+    if not tostring(a):match('^%x+$') or not tostring(b):match('^%x+$') then
+        return nil
+    end
+    local r = git_exec({ 'merge-base', '--end-of-options', a, b }, { cwd = dir })
+    local oid = util_str_trim(tostring(r.stdout or ''))
+    if not r.ok or not oid:match('^%x+$') then return nil end
+    return oid
+end
+
+function g_exports.browse_compare(dir, base_oid, head_oid, opts)
+    opts = opts or {}
+    if not tostring(base_oid):match('^%x+$') or
+       not tostring(head_oid):match('^%x+$') then
+        return nil, 'invalid revision'
+    end
+
+    local merge_base = browse_merge_base(dir, base_oid, head_oid)
+
+    -- Everything below measures from here: the merge base when there is one,
+    -- and the tip of base when there is not. Both the file list and the patch
+    -- take it from this one variable, so the two halves of a comparison cannot
+    -- disagree about where it starts.
+    local from = merge_base or base_oid
+
+    -- left is what base has and head does not (behind); right is the reverse
+    -- (ahead). The symmetric difference is defined with or without a common
+    -- ancestor, so this one needs no fallback.
+    local behind, ahead = 0, 0
+    local counts = git_exec({ 'rev-list', '--left-right', '--count',
+                              '--end-of-options',
+                              base_oid .. '...' .. head_oid }, { cwd = dir })
+    if counts.ok then
+        local l, r = tostring(counts.stdout or ''):match('(%d+)%s+(%d+)')
+        behind, ahead = tonumber(l) or 0, tonumber(r) or 0
+    end
+
+    local commits, cerr, page = browse_log(dir, head_oid, {
+        limit = opts.limit, skip = opts.skip, exclude = from, lookahead = true,
+    })
+    if not commits then return nil, cerr end
+    page = page or {}
+
+    local d = git_exec({ 'diff', '--name-status', '-z', '--find-renames',
+                         '--no-color', '--no-ext-diff',
+                         '--end-of-options', from, head_oid },
+                       { cwd = dir, max_capture = 4 * 1024 * 1024 })
+
+    return {
+        base = base_oid, head = head_oid,
+        merge_base = merge_base,
+        -- Named rather than inferred from a null merge_base: a caller that did
+        -- not think about this case should still be able to see that it is
+        -- being shown a different comparison from the one it asked for.
+        unrelated = merge_base == nil,
+        ahead = ahead, behind = behind,
+        commits = util_json_array(commits), count = #commits,
+        files = util_json_array(d.ok and parse_name_status(d.stdout) or {}),
+        limit = page.limit, skip = page.skip,
+        has_more = page.has_more and true or false,
+    }
+end
+
+-- The patch for a comparison. Same cap and the same 413 as browse_diff, because
+-- both go through capture_patch — a comparison is an easier way to ask for a
+-- very large diff than any single commit is, so it must not be the one path
+-- that forgets the ceiling.
+--
+-- `from` is the merge base browse_compare already computed, passed in rather
+-- than recomputed, so the patch and the file list beside it are the same
+-- comparison rather than two that agree by coincidence.
+function g_exports.browse_compare_diff(dir, from_oid, head_oid, path)
+    if not tostring(from_oid):match('^%x+$') or
+       not tostring(head_oid):match('^%x+$') then
+        return nil, 'invalid revision'
+    end
+    return capture_patch(dir, {
+        'diff', '--patch', '--binary', '--full-index', '--find-renames',
+        '--no-color', '--no-ext-diff', '--end-of-options', from_oid, head_oid,
+    }, path)
+end
+
 -- Search the contents of one revision: `git grep`, bounded.
 --
 -- FIXED STRINGS, not a regular expression. `-F` is not a convenience here: the
@@ -507,6 +638,7 @@ function g_exports.browse_search(dir, oid, query, limit)
     return { results = out, count = #out, truncated = truncated }
 end
 
+-- Branches and tags, from one call each.
 function g_exports.browse_refs(dir, kind)
     local prefix = (kind == 'tags') and 'refs/tags/' or 'refs/heads/'
     local r = git_exec({ 'for-each-ref', '--format=%(refname:short)\1%(objectname)\1%(creatordate:iso-strict)',

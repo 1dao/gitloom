@@ -75,6 +75,10 @@
               <svg class="tab-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M.9 8h4M11.1 8h4"/></svg>
               提交
             </button>
+            <button class="view-tab" type="button" data-view="compare">
+              <svg class="tab-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.4" r="1.6"/><circle cx="4" cy="12.6" r="1.6"/><circle cx="12" cy="12.6" r="1.6"/><path d="M4 5v6M12 11V6.6a2 2 0 0 0-2-2H6.6M8.4 2.6 6 5l2.4 2.4"/></svg>
+              比较
+            </button>
             <button class="view-tab" type="button" data-view="issues">
               <svg class="tab-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/></svg>
               Issues
@@ -176,6 +180,30 @@
               </div>
               <div id="diff-meta" class="diff-meta"></div>
               <pre id="diff-content" class="diff-block"></pre>
+            </div>
+          </div>
+
+          <div id="compare-view" class="view-panel" hidden>
+            <div class="toolbar">
+              <label class="branch-select"><span>基准</span><select id="compare-base"></select></label>
+              <span class="compare-arrow" aria-hidden="true">←</span>
+              <label class="branch-select"><span>对比</span><select id="compare-head"></select></label>
+              <div class="toolbar-spacer"></div>
+              <button class="button button-quiet" id="compare-full-diff" type="button" hidden>查看完整 diff</button>
+            </div>
+            <p id="compare-summary" class="compare-summary">正在比较…</p>
+            <div id="compare-files" class="access-list" hidden></div>
+            <div id="compare-commits" class="commit-list"></div>
+            <div id="compare-diff-panel" class="diff-panel" hidden>
+              <div class="file-head">
+                <div>
+                  <p class="eyebrow">COMPARE DIFF</p>
+                  <h3 id="compare-diff-title">—</h3>
+                </div>
+                <button class="button button-quiet" id="compare-diff-close" type="button">关闭</button>
+              </div>
+              <div id="compare-diff-meta" class="diff-meta"></div>
+              <pre id="compare-diff-content" class="diff-block"></pre>
             </div>
           </div>
 

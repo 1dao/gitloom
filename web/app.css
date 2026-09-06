@@ -280,7 +280,13 @@ h1, h2, h3, p { margin-top: 0; }
 .commit-row:last-child { border-bottom: 0; }
 .commit-row:hover { background: rgba(141, 168, 255, .055); }
 .commit-dot { width: 8px; height: 8px; margin-top: 5px; border: 2px solid var(--accent-2); border-radius: 50%; box-shadow: 0 0 0 3px rgba(141, 168, 255, .08); }
-.commit-subject { font-size: 13px; line-height: 1.4; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* display:block is load-bearing, not tidiness. This is a <span> inside a grid
+   ITEM -- the item is blockified, its children are not -- so as an inline box
+   every other property in this rule was inert: no margin below it, no ellipsis,
+   and no line break, which ran the subject straight into the author name
+   ("base three after branchingt · 6f30246"). It has read that way since the
+   commit log shipped, and the comparison renders the same rows. */
+.commit-subject { display: block; font-size: 13px; line-height: 1.4; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-meta { color: var(--muted); font-size: 10px; }
 .commit-meta code { color: var(--accent-2); font-family: var(--mono); }
 .commit-date { color: var(--dim); font-size: 10px; white-space: nowrap; }
@@ -484,4 +490,25 @@ h1, h2, h3, p { margin-top: 0; }
 
 @media (max-width: 620px) {
   .user-form { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Comparing two revisions. The file rows reuse .access-row for their shape and
+   have to undo the same platform button chrome .commit-row does -- a <button>
+   that is not told otherwise brings a grey face, an outset border and, under a
+   grid or flex parent, a shrink-to-fit width. */
+
+.compare-arrow { flex: 0 0 auto; color: var(--dim); font-size: 13px; }
+.compare-summary { margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line-soft); border-radius: 9px; color: var(--muted); background: var(--panel); font-size: 12px; line-height: 1.6; }
+.compare-file { appearance: none; width: 100%; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.compare-file:last-child { border-bottom: 0; }
+.compare-file:hover { background: rgba(141, 168, 255, .055); }
+.compare-file code { color: var(--text); font-family: var(--mono); font-size: 12px; }
+.status-pill { min-width: 46px; text-align: center; }
+.status-A { background: rgba(88, 213, 201, .13); color: var(--accent); }
+.status-D { background: rgba(233, 122, 122, .13); color: var(--danger); }
+.status-M { background: rgba(141, 168, 255, .13); color: #8da8ff; }
+.status-R, .status-C, .status-T { background: rgba(244, 195, 106, .13); color: var(--warning); }
+
+@media (max-width: 620px) {
+  .compare-file span.commit-meta { display: none; }
 }
