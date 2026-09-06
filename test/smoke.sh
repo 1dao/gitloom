@@ -879,6 +879,96 @@ check 'compare diff rejects a traversal path' "$code" '400'
 curl -s "$DEMO/compare/main/main" | grep -q '"ahead":0' \
     && ok 'comparing a ref with itself is empty' || bad 'comparing a ref with itself is empty' "$(curl -s "$DEMO/compare/main/main")"
 
+# ── Branch protection ───────────────────────────────────────────────────────
+# The hook's own decisions first, driven directly. Two of its four branches are
+# not reachable through a push against a DEFAULT branch: git refuses to delete
+# the branch HEAD names before any hook runs (receive.denyDeleteCurrent), and a
+# creation of a branch that already exists is not a thing a client can send. A
+# hook is not the place to leave a path nothing exercises.
+Z=0000000000000000000000000000000000000000
+A=1111111111111111111111111111111111111111
+HOOK="$(dirname "$0")/../hooks/update"
+GITLOOM_PROTECT_REFS='refs/heads/main' sh "$HOOK" refs/heads/other "$A" "$Z" 2>/dev/null
+check 'the hook ignores an unprotected ref' "$?" '0'
+GITLOOM_PROTECT_REFS='' sh "$HOOK" refs/heads/main "$A" "$Z" 2>/dev/null
+check 'the hook allows everything with no policy set' "$?" '0'
+# A ref that merely ends with a protected name is a different ref. The list is
+# matched with spaces on both sides for exactly this.
+GITLOOM_PROTECT_REFS='refs/heads/main' sh "$HOOK" refs/heads/notmain "$A" "$Z" 2>/dev/null
+check 'the hook matches whole ref names' "$?" '0'
+GITLOOM_PROTECT_REFS='refs/heads/main' sh "$HOOK" refs/heads/main "$Z" "$A" 2>/dev/null
+check 'the hook allows creating a protected ref' "$?" '0'
+hookout=$(GITLOOM_PROTECT_REFS='refs/heads/main' sh "$HOOK" refs/heads/main "$A" "$Z" 2>&1)
+hookrc=$?
+check 'the hook refuses deleting a protected ref' "$hookrc" '1'
+echo "$hookout" | grep -q 'cannot be deleted' \
+    && ok 'the refusal says why' || bad 'the refusal says why' "$hookout"
+
+# End to end, on a repository of its own so a refused force-push cannot disturb
+# the history every case above asserts against.
+curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+    -d '{"name":"prot"}' "$BASE/api/v1/repos" >/dev/null
+PROT="http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/prot.git"
+rm -rf "$WORK/wprot"
+(
+    cd "$WORK" && git init -q -b main wprot && cd wprot &&
+    printf 'one\n' > f.txt && git add -A &&
+    git -c user.email=smoke@test -c user.name=smoke commit -qm 'p one' &&
+    printf 'two\n' >> f.txt && git add -A &&
+    git -c user.email=smoke@test -c user.name=smoke commit -qm 'p two' &&
+    $GIT push -q "$PROT" main
+) >/dev/null 2>&1
+before=$(curl -s "$BASE/api/v1/repos/admin/prot/branches" | grep -o '"oid":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+( cd "$WORK/wprot" && git reset -q --hard HEAD~1 &&
+  printf 'rewritten\n' > f.txt && git add -A &&
+  git -c user.email=smoke@test -c user.name=smoke commit -qm 'p rewrite' ) >/dev/null 2>&1
+pushout=$( cd "$WORK/wprot" && $GIT push --force "$PROT" main 2>&1 )
+if [ $? -eq 0 ]; then
+    bad 'a force-push to the default branch is refused' "the push succeeded"
+else
+    ok 'a force-push to the default branch is refused'
+fi
+# The reason has to reach the person pushing, not just the log: that is the
+# whole of what the hook's stderr is for.
+echo "$pushout" | grep -q 'cannot be force-updated' \
+    && ok 'the pusher is told why' || bad 'the pusher is told why' "$pushout"
+after=$(curl -s "$BASE/api/v1/repos/admin/prot/branches" | grep -o '"oid":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+check 'the protected branch did not move' "$after" "$before"
+# Only the default branch. Everything else is somebody's own work in progress.
+( cd "$WORK/wprot" && git branch -f side HEAD && $GIT push -q "$PROT" side ) >/dev/null 2>&1
+( cd "$WORK/wprot" && git commit -q --allow-empty -m 'p side' && git branch -f side HEAD &&
+  $GIT push --force "$PROT" side ) >/dev/null 2>&1 \
+    && ok 'another branch may still be force-pushed' || bad 'another branch may still be force-pushed' 'refused'
+
+# Protection on with no hook to run it is the failure the whole design exists to
+# prevent: an instance that reports itself healthy while nothing is guarded. It
+# has to be a refusal to boot, so this asserts the process is gone rather than
+# listening.
+PORT4=$((PORT+3))
+LOG4="$WORK/gitloom4.log"
+mkdir -p "$WORK/repos4" "$WORK/data4" "$WORK/tmp4"
+"$XNET" main.lua \
+    LISTEN_PORT="$PORT4" REPO_ROOT="$WORK/repos4" DATA_DIR="$WORK/data4" \
+    TMP_DIR="$WORK/tmp4" USERS_FILE="$WORK/data4/users.json" \
+    ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" \
+    HOOKS_DIR="$WORK/no-such-hooks" \
+    > "$LOG4" 2>&1 &
+PID4=$!
+i=0
+while [ $i -lt 100 ]; do
+    kill -0 "$PID4" 2>/dev/null || break
+    curl -sf "http://127.0.0.1:$PORT4/api/v1/version" >/dev/null 2>&1 && break
+    i=$((i+1)); sleep 0.2
+done
+if kill -0 "$PID4" 2>/dev/null; then
+    bad 'a missing hook refuses the boot' 'the instance is still running'
+    kill "$PID4" 2>/dev/null
+else
+    ok 'a missing hook refuses the boot'
+fi
+grep -q 'cannot be armed' "$LOG4" \
+    && ok 'the boot failure names the reason' || bad 'the boot failure names the reason' "$(tail -3 "$LOG4")"
+
 # An empty list stays an array, like refs.
 curl -s "$DEMO/tags" | grep -q '"tags":\[\]' \
     && ok 'empty tag list is []' || bad 'empty tag list is []' "$(curl -s "$DEMO/tags")"

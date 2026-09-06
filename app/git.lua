@@ -226,6 +226,30 @@ end
 -- Smart HTTP: POST /<repo>/git-upload-pack | git-receive-pack
 -- ---------------------------------------------------------------------------
 
+-- argv for a stateless-RPC service, minus the binary.
+--
+-- receive-pack gets `-c core.hooksPath` so the branch-protection hook runs; see
+-- app/protect.lua and hooks/update. One shared directory rather than a script
+-- written into every repository, so there is no per-repository state to install
+-- at creation, repair on repositories that predate the feature, or drift.
+--
+-- Note that base_env() lists core.hooksPath among the settings it isolates a
+-- child FROM. That is the OPERATOR's dotfiles, which must not be able to change
+-- what a push does. This is gitloom's own decision, and it travels on the
+-- command line where nothing in the environment can reach it.
+--
+-- upload-pack is left alone: it runs none of these hooks, and naming a hooks
+-- directory for a read would be a claim this makes no use of.
+local function rpc_argv(verb)
+    if verb == 'receive-pack' then
+        local hooks = protect_hooks_dir()
+        if hooks then
+            return { '-c', 'core.hooksPath=' .. hooks, verb, '--stateless-rpc', '.' }
+        end
+    end
+    return { verb, '--stateless-rpc', '.' }
+end
+
 -- Write a streamed request body to its staging file as it arrives.
 --
 -- io.open rather than util_file_write: the point of a streamed body is that it
@@ -274,7 +298,7 @@ function g_exports.git_service(dir, service, body, env)
         return nil, 'staging the request body failed: ' .. tostring(werr)
     end
 
-    local r = git_exec({ verb, '--stateless-rpc', '.' }, {
+    local r = git_exec(rpc_argv(verb), {
         cwd         = dir,
         env         = env,
         stdin_file  = in_path,
@@ -391,7 +415,8 @@ end
 local function stream_rpc(dir, service, body, env, conn, headers)
     local verb = service:gsub('^git%-', '')
 
-    local argv = { git_bin(), verb, '--stateless-rpc', '.' }
+    local argv = { git_bin() }
+    for _, a in ipairs(rpc_argv(verb)) do argv[#argv + 1] = a end
     local h, serr = xproc_mod.spawn({ argv = argv, cwd = dir, env = env })
     if not h then return nil, 'spawn failed: ' .. tostring(serr) end
 

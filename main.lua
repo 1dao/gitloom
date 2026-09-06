@@ -51,6 +51,7 @@ boot.load_script('app/proc.lua')     -- proc_*
 boot.load_script('app/pkt.lua')      -- pkt_*
 boot.load_script('app/repo.lua')     -- repo_*
 boot.load_script('app/issue.lua')    -- issue_*
+boot.load_script('app/protect.lua')  -- protect_*   what a push may not do
 boot.load_script('app/git.lua')      -- git_*
 -- Before auth.lua, and not only by convention: namespace ownership is decided
 -- against the modules already loaded, so auth.lua could otherwise claim
@@ -127,6 +128,27 @@ local function boot_async()
     git_version_cache_set(version)
     cfg_log_system('git %s via %q', version, git_bin())
     git_stream_report()
+
+    -- Branch protection, and it refuses to boot rather than warning. The thing
+    -- being guarded against is an instance that reports itself healthy while
+    -- every protected branch is open to a force-push; an operator who wants to
+    -- run without it says so with PROTECT_DEFAULT_BRANCH=off, and that is a
+    -- decision rather than an accident. After git, because it is git that has
+    -- to run the hook.
+    if cfg_bool('PROTECT_DEFAULT_BRANCH', true) then
+        local pok, perr = protect_setup()
+        if not pok then
+            cfg_log_error('branch protection is on and cannot be armed: %s', tostring(perr))
+            cfg_log_error('point HOOKS_DIR at the directory holding `update`, ' ..
+                          'or set PROTECT_DEFAULT_BRANCH=off to run without it')
+            xthread.stop(1)
+            return
+        end
+        cfg_log_system('branch protection: default branches guarded, hooks at %q',
+            protect_hooks_dir())
+    else
+        cfg_log_warn('branch protection is OFF — a force-push may rewrite any branch')
+    end
     -- Says whether X-Forwarded-For is honoured, and from whom. Silent
     -- misconfiguration here makes every audit line and every rate-limit
     -- decision name the proxy instead of the client.

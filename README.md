@@ -36,7 +36,9 @@ Repositories can be renamed, searched (fixed-string, one revision at a time),
 and the account's own access tokens listed and revoked one by one. Owners can
 also grant existing accounts read or write access to private repositories, and
 an administrator can create those accounts from the same page — so the solo loop
-and the first multi-user loop both stay in the browser. Issues have a tracker; pull requests are not implemented yet — see
+and the first multi-user loop both stay in the browser. Each repository's
+default branch is protected: it cannot be deleted, and it cannot be force-pushed
+over (`PROTECT_DEFAULT_BRANCH`). Issues have a tracker; pull requests are not implemented yet — see
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
@@ -140,6 +142,7 @@ gitloom/
     pkt.lua              git's pkt-line framing
     repo.lua             repository naming, on-disk layout, the index
     issue.lua            numbered issues per repository, and their comments
+    protect.lua          which refs a push may not destroy
     git.lua              every invocation of the git binary
     auth.lua             accounts, HTTP Basic, access decisions
     auth_ratelimit.lua   credential-failure backoff
@@ -153,6 +156,8 @@ gitloom/
     index.html           the page; app.css, app.js
     markdown.js          Markdown to DOM -- never to an HTML string
     highlight.js         a small tokeniser, same rule
+  hooks/                 one shared git hook directory for every repository
+    update               refuses a push that would destroy a protected branch
   worker/                scripts that run on their own thread and Lua state
     kdf.lua              password hashing, kept off the event loop
   scripts/core/          modules copied from xnet2lua (share/ and server/)
@@ -264,14 +269,15 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 237/237 on Windows and under `GIT_STREAM=off`
+2.52). `test/smoke.sh` passes 249/249 on Windows and under `GIT_STREAM=off`
 (measured 2026-09-06) — the streamed-body cases are skipped there because they
 need the transport that platform does not have, and the browser parsers' own
 tests need node, which is a development convenience rather than a dependency and
 is skipped where it is absent. The Linux figure was 216 when the Windows one was
-206; the thirty-one cases added since — the file listing's last-commit column,
-the accounts panel and the compare endpoints — need nothing this platform lacks,
-so a Linux run should now be 247, and it has not been re-run to say so. `test/unit.lua` is 216 on Windows, 215 on Linux (one case is about
+206; the forty-three cases added since — the file listing's last-commit column,
+the accounts panel, the compare endpoints and branch protection — need nothing
+this platform lacks, so a Linux run should now be 259, and it has not been
+re-run to say so. `test/unit.lua` is 216 on Windows, 215 on Linux (one case is about
 Windows path spelling). Adding `DB_DRIVER=mysql` runs the same suite against
 MySQL instead of JSON files.
 
@@ -287,7 +293,7 @@ What was checked in the runtime underneath, and is fine:
 
 On Linux:
 
-1. `chmod +x bin/xnet start.sh test/smoke.sh` — only needed if the exec bit did
+1. `chmod +x bin/xnet start.sh test/smoke.sh hooks/update` — only needed if the exec bit did
    not survive the clone. `test/smoke.sh` chooses the binary by `uname`, not by
    which file is executable, so `bin/xnet.exe` sitting next to it is harmless.
 2. The streaming transport needs a runtime built with `WITH_XPROC=1`. A stock

@@ -1,0 +1,75 @@
+#!/bin/sh
+# gitloom — branch protection.
+#
+# ONE script for every repository. gitloom runs receive-pack with
+# `-c core.hooksPath=<this directory>`, so there is no hook file written into
+# each repository: nothing to install when a repository is created, nothing to
+# repair on repositories that predate this feature, and nothing that can drift
+# from the policy. See app/protect.lua.
+#
+# WHY A HOOK AT ALL, rather than inspecting the push before running git. The
+# ref-update commands do arrive at the front of the request body and gitloom
+# could read them there — but deciding whether an update is a fast-forward
+# needs the NEW objects, and at that point they are still in the packfile that
+# has not been unpacked. Inside a hook they are present (receive-pack has
+# already quarantined them), which is the whole reason this hook point exists.
+#
+# The other half of the bargain is the reply. Anything this script writes to
+# stderr reaches the person pushing as `remote:` lines, and a non-zero exit
+# makes git report `! [remote rejected]` for that ref — so gitloom never has to
+# author a receive-pack response of its own.
+#
+# `update` rather than `pre-receive`: this one runs once per ref and refuses
+# only the ref it is called for, so `git push --all` still lands every branch
+# that is allowed. pre-receive is all-or-nothing.
+#
+# Arguments, from git: <ref> <old-oid> <new-oid>.
+#
+# GITLOOM_PROTECT_REFS is set by gitloom for a push it wants guarded — a
+# space-separated list of full ref names for THAT repository. Unset means allow
+# everything, which is what a `git` run outside gitloom gets.
+
+ref="$1"
+old="$2"
+new="$3"
+
+[ -n "$GITLOOM_PROTECT_REFS" ] || exit 0
+
+# Word-boundary match with spaces on both sides, so `refs/heads/main` in the
+# list cannot be matched by a ref merely ending in it.
+case " $GITLOOM_PROTECT_REFS " in
+    *" $ref "*) ;;
+    *) exit 0 ;;
+esac
+
+# The all-zero oid is a creation (as old) or a deletion (as new). Tested by
+# "contains no non-zero character" rather than against 40 zeros, because a
+# SHA-256 repository spells it with 64.
+is_zero() {
+    case "$1" in
+        '') return 1 ;;
+        *[!0]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+if is_zero "$new"; then
+    echo "gitloom: $ref is protected and cannot be deleted." >&2
+    exit 1
+fi
+
+# A creation is allowed: the branch did not exist, so nothing can be lost.
+if is_zero "$old"; then
+    exit 0
+fi
+
+# The only remaining refusal is a history rewrite. `--is-ancestor` is exact and
+# costs nothing on the ordinary case, where old is the parent chain of new.
+if git merge-base --is-ancestor "$old" "$new"; then
+    exit 0
+fi
+
+echo "gitloom: $ref is protected and cannot be force-updated." >&2
+echo "gitloom: this push would drop commits that are already on it." >&2
+echo "gitloom: rebase onto $ref, or push to a branch of your own." >&2
+exit 1

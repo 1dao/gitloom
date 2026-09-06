@@ -1112,13 +1112,106 @@ back rather than erroring; comparing `main` with itself says so instead of
 showing an empty table; the hash follows every change and Back walks the three
 comparisons in order. No console errors.
 
+### Branch protection, and the sideband it finally gave something to say
+
+Adding a second person is one click now, and a write collaborator has always
+been able to `push --force` over `main` with nothing to stop it and nothing to
+explain it. On a single-operator instance that is theoretical. It stopped being
+theoretical the moment account provisioning moved into the browser.
+
+**The plan was wrong in both halves, and an experiment is what said so.** It was
+going to read the ref-update commands out of the front of the request body —
+`pkt_parse` exists and its comment already names that use — decide there, and
+author a receive-pack response to refuse with:
+
+- **A push cannot be judged before git runs it.** The commands do arrive first,
+  but deciding whether an update is a fast-forward means asking whether the old
+  tip is an ancestor of the new one, and at that point the new objects are still
+  inside a packfile nobody has unpacked. `git merge-base --is-ancestor` has
+  nothing to work with. That is precisely why receive-pack has a hook point
+  after quarantine and before the ref moves.
+- **Refusing needs no protocol code at all.** Anything a hook writes to stderr
+  reaches the person pushing as `remote:` lines, and a non-zero exit makes git
+  itself report `! [remote rejected]`. The expensive half — gitloom authoring
+  `unpack ok` and `ng <ref> <reason>` with sideband framing of its own — simply
+  does not exist.
+
+So it is a hook, and the band-2 channel this file has been holding open since
+Phase 1 turns out to have been free the whole time. It was never a transport
+problem. It was that nothing had anything to say.
+
+**One hook for every repository, and no per-repository state.** gitloom runs
+`git -c core.hooksPath=<gitloom>/hooks receive-pack`, so there is nothing to
+write into a repository at creation, nothing to repair on repositories that
+predate the feature, and nothing that can drift. gitea writes hooks into each
+repository and ships an admin button to resynchronise them, which is what the
+other choice costs.
+
+`base_env()` already listed `core.hooksPath` among the settings it isolates a
+child FROM — that is the operator's dotfiles, which must not be able to change
+what a push does. gitloom's own value travels on the command line, where nothing
+in the environment can reach it.
+
+`update` rather than `pre-receive`, because it runs once per ref and refuses
+only the ref it was called for: `git push --all` still lands every branch that
+is allowed. pre-receive is all-or-nothing.
+
+The policy reaches the hook as `GITLOOM_PROTECT_REFS`, a space-separated list of
+full ref names, because a hook is a separate process that knows its three
+arguments and its environment and nothing else. It is already per repository,
+since the default branch is a property of the record — `main` here and `trunk`
+next door — so a stored list of protected patterns would replace one function
+rather than the shape around it. Unset means allow everything, which is what a
+`git` run outside gitloom gets.
+
+**It refuses to boot** when protection is on and the hook cannot be found. The
+failure being guarded against is an instance that reports itself healthy while
+every protected branch is open; that is not allowed to happen quietly, and
+`PROTECT_DEFAULT_BRANCH=off` is how an operator says they meant it.
+
+Finding the hook needs an ABSOLUTE path, because git runs a hook with the
+repository as its working directory and a relative `core.hooksPath` would be
+looked for in there. Lua has no getcwd, so `protect_setup` asks the shell once —
+the same probe, for the same reason, that `xproc_worker.lua` already makes for
+its redirect paths. On Windows that answer comes back through a pipe in the OEM
+codepage, so an install path with non-ASCII in it arrives as mojibake. Nothing
+can repair that; what saves it is that the next step looks for the hook at the
+path it got and refuses to boot when it is not there, so the failure is loud and
+`HOOKS_DIR` takes an absolute path to skip the question entirely.
+
+**Two of the hook's four branches cannot be reached through a push**, which is
+why they are tested by running the script directly rather than only through a
+client. git refuses to delete the branch HEAD names before any hook runs
+(`receive.denyDeleteCurrent`), and the only protected ref today IS the default
+branch — so the deletion path is defence in depth that becomes load-bearing the
+moment protected refs stop being only the default branch. Creating a ref that
+already exists is not something a client can send either. A hook is not the
+place to leave a path nothing exercises.
+
+What this deliberately is not: there is no protection UI, no per-repository
+configuration, and no "require a review". Those belong with pull requests, and
+the enforcement point they would configure is now a single function.
+
+Verified against a live instance: an ordinary fast-forward push lands; the same
+push with `--force` over a rewritten `main` is refused with three `remote:`
+lines saying which ref, why and what to do instead, and the branch does not
+move; another branch force-pushes freely; and the identical force-push succeeds
+once the instance is restarted with `PROTECT_DEFAULT_BRANCH=off`, so the hook is
+what refuses rather than something incidental. Booting with `HOOKS_DIR` pointed
+at a directory that does not exist ends the process instead of serving it.
+
 ## Phase 3 — collaboration
 
 Organisations and teams, then issues (comments, labels, milestones), then pull
-requests. Server-authored sideband messages land here too — the band-2
-`remote:` lines that tell a pusher why a branch was refused, or where to open a
-pull request. The transport for them already works; what is missing is anything
-worth saying, which arrives with protected branches and review.
+requests.
+
+~~Server-authored sideband messages land here too — the band-2 `remote:` lines
+that tell a pusher why a branch was refused, or where to open a pull request.
+The transport for them already works; what is missing is anything worth saying,
+which arrives with protected branches and review.~~ Settled 2026-09-06, and
+cheaper than expected: a hook's stderr is already relayed as `remote:` lines, so
+branch protection above needed no sideband work of its own. What is left of this
+is the "open a pull request at ..." line, which arrives with pull requests.
 
 PRs are the heavy part. Their READING half is done and shipped as the compare
 view above — merge base, ahead/behind, the commits and the files one branch

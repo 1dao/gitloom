@@ -138,6 +138,12 @@ local function service_rpc(req, ctx, prefix, service)
     if not rec then return dir_or_resp end
 
     local env = git_env_for_request(req, user)
+    -- Which refs this push may not destroy. It reaches `hooks/update` through
+    -- the child's environment, which is the only channel a hook has: it is a
+    -- separate process that knows its three arguments and nothing else.
+    if spec.write then
+        env.GITLOOM_PROTECT_REFS = protect_refs_for(rec)
+    end
     local result_type = 'application/x-git-' .. spec.verb .. '-result'
 
     -- Either a string the codec buffered, or a reader the serve loop is filling
