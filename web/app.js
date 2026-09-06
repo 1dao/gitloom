@@ -20,6 +20,9 @@
     collaborators: [],
     username: '',
     token: '',
+    // Never read from storage and never inferred from the credential: the
+    // server answers it on every load. See loadSelf.
+    admin: false,
     toastTimer: null,
     fileBlobUrl: '',   // released in releaseFileBlob; see loadFile
     fileText: '',      // the open file's source, so the raw/rendered toggle is free
@@ -183,6 +186,7 @@
   function clearCredentials() {
     state.username = '';
     state.token = '';
+    state.admin = false;
     try {
       sessionStorage.removeItem('gitloom.username');
       sessionStorage.removeItem('gitloom.token');
@@ -266,6 +270,29 @@
     });
   }
 
+  // Who the server says we are. The administrator bit cannot come from the
+  // credential this page is holding: storing it beside the token would be
+  // repeating a claim nobody checked, and it would go on being true in this tab
+  // after the account lost the bit — which draws controls whose every request
+  // then 403s with no explanation. So it is asked for, on load and after a
+  // login, and dropped by clearCredentials.
+  //
+  // api() turns a 401 here into the ordinary "session expired" path, which
+  // makes this also the moment a stored token that has expired is found —
+  // rather than whichever panel happened to load first.
+  function loadSelf() {
+    if (!state.username || !state.token) {
+      state.admin = false;
+      updateAuthButton();
+      return Promise.resolve();
+    }
+    return json('/api/v1/user').then(function (me) {
+      state.admin = !!(me && me.admin);
+    }).catch(function () {
+      state.admin = false;
+    }).then(function () { updateAuthButton(); });
+  }
+
   function encodeRef(ref) {
     return encodeURIComponent(ref || 'main');
   }
@@ -286,6 +313,12 @@
     // Tokens belong to an account, so the control only means anything once
     // there is one signed in.
     $('manage-tokens').hidden = !state.username;
+    // Administrator-only, and the flag is the server's answer rather than
+    // anything this page stored — see loadSelf. Guarded because a tab left open
+    // across the deploy that added it is running this file against markup that
+    // has no such button.
+    var users = $('manage-users');
+    if (users) users.hidden = !state.admin;
     renderProfile();
     syncWriteActions();
   }
@@ -297,7 +330,7 @@
     var name = state.username || 'gitloom';
     $('profile-name').textContent = name;
     $('profile-handle').textContent = state.username
-      ? '已登录'
+      ? (state.admin ? '已登录 · 管理员' : '已登录')
       : '未登录 · 只列出公开仓库';
     // An account has no avatar to serve, so its initial stands in. Upper-cased
     // for the Latin case and left alone for everything else, which is what
@@ -305,14 +338,16 @@
     $('profile-avatar').textContent = name.slice(0, 1).toUpperCase();
   }
 
-  // The browser currently knows the signed-in username, but not an administrator
-  // capability. Show owner-only write actions; administrators can still use the
-  // API until a capability field is exposed to the browser.
+  // Owner-only actions, plus the administrator. The server has always allowed
+  // both — `rec.owner ~= user.username and not user.admin` guards update and
+  // delete alike — so hiding these from an administrator never protected
+  // anything; it only meant the button had to be a curl.
   function syncWriteActions() {
     var signedIn = !!state.username;
     $('new-repo').hidden = !signedIn;
     $('new-issue').hidden = !signedIn || !state.repo;
-    var canManage = signedIn && state.repo && state.repo.owner === state.username;
+    var canManage = signedIn && state.repo &&
+      (state.repo.owner === state.username || state.admin);
     $('edit-repo').hidden = !canManage;
     $('manage-access').hidden = !canManage;
     $('delete-repo').hidden = !canManage;
@@ -2186,6 +2221,159 @@
   $('search-close').addEventListener('click', closeSearch);
 
   // ---------------------------------------------------------------------------
+  // Accounts
+  //
+  // Creating an account is administrator-only and was API-only until now, which
+  // left the browser unable to do the one thing every other multi-account
+  // feature needs first. Collaborators, private repositories and issue
+  // authorship all assume a second account exists, and there was no way to make
+  // one without a terminal — the same gap the repository create button closed,
+  // one level up.
+  //
+  // Listing and creating, and deliberately not deleting: an account owns
+  // repositories and has signed its name to issues, and where those go has to
+  // be decided before a button can do it.
+  // ---------------------------------------------------------------------------
+
+  function userError(error) {
+    var detail = (error && error.detail) || '';
+    // The server owns the minimum length, so it is read back out of the message
+    // rather than duplicated here — a change to AUTH_MIN_PASSWORD cannot leave
+    // this form quoting a number nothing enforces.
+    var short = detail.match(/password must be at least (\d+)/);
+    if (short) return '密码至少需要 ' + short[1] + ' 个字符';
+    var known = [
+      ['user already exists', '这个用户名已经有人用了'],
+      ['username must match', '用户名要以字母、数字或下划线开头，之后可以有 . - _'],
+      ['email must be at most', '邮箱太长'],
+      ['the account store is unavailable', '账号存储暂时不可用'],
+      ['administrator', '只有管理员可以管理账号'],
+    ];
+    for (var i = 0; i < known.length; i += 1) {
+      if (detail.indexOf(known[i][0]) !== -1) return known[i][1];
+    }
+    return detailMessage(error);
+  }
+
+  function renderUsers(users) {
+    var list = $('users-list');
+    list.textContent = '';
+    if (!users.length) {
+      setError(list, '还没有任何账号');
+      return;
+    }
+    users.forEach(function (user) {
+      var row = document.createElement('div');
+      row.className = 'access-row';
+
+      var who = document.createElement('div');
+      var name = document.createElement('strong');
+      name.textContent = user.username;
+      who.appendChild(name);
+      if (user.admin) {
+        var badge = document.createElement('span');
+        badge.className = 'pill';
+        badge.textContent = '管理员';
+        who.appendChild(document.createTextNode(' '));
+        who.appendChild(badge);
+      }
+      if (user.username === state.username) {
+        var self = document.createElement('span');
+        self.className = 'pill';
+        self.textContent = '这是你';
+        who.appendChild(document.createTextNode(' '));
+        who.appendChild(self);
+      }
+
+      var meta = document.createElement('div');
+      meta.className = 'commit-meta';
+      var parts = [];
+      if (user.email) parts.push(user.email);
+      parts.push('创建于 ' + formatDate(user.created_at));
+      parts.push((user.token_count || 0) + ' 个有效令牌');
+      meta.textContent = parts.join(' · ');
+      who.appendChild(meta);
+
+      row.appendChild(who);
+      list.appendChild(row);
+    });
+  }
+
+  function loadUsers() {
+    var list = $('users-list');
+    setLoading(list, '正在读取…');
+    return json('/api/v1/users').then(function (data) {
+      renderUsers(Array.isArray(data.users) ? data.users : []);
+    }).catch(function (error) {
+      setError(list, detailMessage(error));
+    });
+  }
+
+  // The create response is the only copy of the recovery code that will ever
+  // exist — the server stores its hash and has no endpoint that could answer
+  // with it again. So it goes on screen and STAYS there while the listing
+  // reloads underneath it, which is why it is not part of #users-list.
+  function showRecovery(username, code) {
+    $('user-created-name').textContent = username;
+    $('user-created-code').textContent = code || '（服务器没有返回恢复码）';
+    $('user-created').hidden = false;
+  }
+
+  function hideRecovery() {
+    $('user-created').hidden = true;
+    $('user-created-code').textContent = '';
+  }
+
+  $('user-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var username = $('user-name').value.trim();
+    var password = $('user-password').value;
+    if (!username || !password) {
+      $('users-message').textContent = '请输入用户名和初始密码';
+      return;
+    }
+    var payload = { username: username, password: password, admin: $('user-admin').checked };
+    var email = $('user-email').value.trim();
+    if (email) payload.email = email;
+
+    $('user-submit').disabled = true;
+    $('users-message').textContent = '';
+    api('/api/v1/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(function (response) { return response.json(); })
+      .then(function (created) {
+        // Clear the form before anything else: the password field is the one
+        // thing here that must not sit in the DOM waiting for whoever looks at
+        // this screen next.
+        $('user-form').reset();
+        showRecovery(created.username || username, created.recovery_code);
+        showToast('账号 ' + (created.username || username) + ' 已创建');
+        return loadUsers();
+      })
+      .catch(function (error) {
+        $('users-message').textContent = userError(error);
+      })
+      .then(function () { $('user-submit').disabled = false; });
+  });
+
+  $('copy-recovery').addEventListener('click', function () {
+    copyText($('user-created-code').textContent, '已复制恢复码');
+  });
+  $('dismiss-recovery').addEventListener('click', hideRecovery);
+
+  $('manage-users').addEventListener('click', function () {
+    if (!state.admin) return;
+    $('users-message').textContent = '';
+    // Shown once means shown once. Reopening the panel is not that once, and a
+    // code left on screen from an earlier account would read as this one's.
+    hideRecovery();
+    $('users-dialog').showModal();
+    loadUsers();
+  });
+
+  // ---------------------------------------------------------------------------
   // Access tokens
   //
   // The listing carries no token value and cannot: only the digest is stored,
@@ -2299,6 +2487,11 @@
       $('auth-dialog').close();
       updateAuthButton();
       showToast('登录成功');
+      // Two requests, not one: the token says who signed in, and only the
+      // server can say what they may do. loadSelf calls updateAuthButton again
+      // when it lands, so the administrator controls appear a beat later rather
+      // than not at all.
+      loadSelf();
       return loadRepos().catch(function () {});
     }).catch(function (error) {
       clearCredentials();
@@ -2360,6 +2553,7 @@
 
   loadCredentials();
   updateAuthButton();
+  loadSelf();
   // The address bar can only be applied once the repository list is in: it names
   // a repository by owner/name, and the record behind it is what selectRepo
   // needs. A failed load leaves the page on the empty state, which is what it

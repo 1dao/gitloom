@@ -465,3 +465,23 @@ h1, h2, h3, p { margin-top: 0; }
   .search-form { width: 100%; }
   .search-form input { flex: 1; width: auto; }
 }
+
+/* Accounts. The listing reuses .access-row; what is new here is the create form
+   and the one-time recovery code the create response carries. */
+
+.user-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: end; gap: 9px; }
+.user-form label { margin-bottom: 0; }
+.user-form label.checkbox-label { grid-column: 1 / -1; margin-top: 3px; }
+.user-form button { grid-column: 1 / -1; margin-top: 5px; }
+
+/* Warning-coloured, not accent-coloured: this is the one thing on the screen
+   that cannot be fetched again. */
+.recovery-note { margin: 0 0 16px; padding: 16px; border: 1px solid rgba(244, 195, 106, .3); border-radius: 10px; background: rgba(244, 195, 106, .07); }
+.recovery-copy { margin: 0 0 11px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.recovery-copy strong { color: var(--text); }
+.recovery-code { display: block; margin: 0 0 12px; padding: 11px 12px; border-radius: 8px; background: #0c141d; color: var(--warning); font: 14px/1.45 var(--mono); letter-spacing: .09em; word-break: break-all; }
+.recovery-actions { display: flex; gap: 9px; flex-wrap: wrap; }
+
+@media (max-width: 620px) {
+  .user-form { grid-template-columns: minmax(0, 1fr); }
+}

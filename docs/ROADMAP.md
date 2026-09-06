@@ -406,10 +406,12 @@ JSON/MySQL-backed index used by create and delete. Smoke covers the pagination
 lookahead and visibility boundary, and static checks keep each new panel's
 markup and handler shipped together.
 
-Still to do in the front end: syntax highlighting. The CSP is
-`default-src 'self'`, so a highlighter has to be vendored into `web/`.
+~~Still to do in the front end: syntax highlighting. The CSP is
+`default-src 'self'`, so a highlighter has to be vendored into `web/`.~~
+Settled 2026-09-05, and the premise was wrong: nothing was vendored.
+`web/highlight.js` and `web/markdown.js` are ours, for the reason given below.
 
-Estimate for the remainder: 1–2 weeks.
+~~Estimate for the remainder: 1–2 weeks.~~ The last of it landed 2026-09-06.
 
 **Collaborator access: done (2026-09-04).** Owners and administrators can now
 list, grant, update and remove read/write access for existing accounts through
@@ -824,6 +826,174 @@ One thing this cost an hour: the page had cached `app.js` under the asset digest
 stamped at boot, so the first fix appeared to do nothing. The digest is computed
 once at startup by design, which is right for deployment and a trap in
 development — a server restart is part of testing a change to `web/`.
+
+### The file listing's other half
+
+A file listing answers two questions and the name only answers one. The second
+— who last touched this, and when — is a column beside it now, and it costs one
+history walk rather than one per entry.
+
+`browse_last_commits` runs a single `git log --format=… --name-only -z`. Walking
+newest first, the FIRST time a name appears is by definition the last commit
+that changed it, so one process answers for a whole directory. A `git log -1 --
+<entry>` per entry would be exact, and would turn a directory of forty files
+into forty forks through a pool that is also serving every other request.
+
+Two things it deliberately does not do, both visible as a blank cell rather than
+a wrong one: the walk stops after 400 commits, so a file nobody has touched in
+that long comes back unattributed instead of making the listing wait for a full
+traversal; and `--name-only` prints nothing for a merge commit, so a change that
+only ever landed through one is not attributed either. `-z` is not a nicety —
+an unquoted name may contain anything but a NUL, newlines included, so nothing
+else can be trusted to end one — and the format uses `%x01` and `%x02` rather
+than the literal control bytes the other formats in that file carry, since git
+substitutes those itself and neither byte then has to survive a trip out through
+a command line.
+
+`GET .../lastcommits/:ref/*path` is its own endpoint rather than more of the
+tree response, because it costs a history walk and a listing does not. The
+browser paints the names as soon as the tree lands and fills this in when it
+arrives, so a slow or failed walk leaves a column blank instead of a directory
+unreadable — which is the entire reason it is a second request.
+
+In the browser the cells are held in a map REPLACED wholesale by every listing
+rather than emptied, so a response still in flight can tell by identity that its
+rows are gone. Both tests are needed: the view ticket catches a directory that
+has been left, and the identity check catches a listing reloaded in place under
+the same ticket. The map has no prototype, because a directory can hold a file
+called `__proto__`. A breadcrumb replaced the "up one level" button, which could
+only ever undo the last step; and `relativeTime` rounds DOWN at every step,
+because "1 天前" for something 23 hours old reads as a day of staleness that has
+not happened yet — the exact time is on the `title` of every one of them.
+
+**One real bug in the CSS, and it had been there the whole time.** Every row in
+the file listing and the commit list is a `<button>`, and a button that is not
+told otherwise keeps the platform's own chrome: a grey face, a 1.6px outset
+border, and — under `display: flex` — a shrink-to-fit width. That is what made
+those rows a staircase of grey boxes rather than a list. `.repo-item` had reset
+all three since the sidebar existed; these two never did.
+
+**And one the deploy model makes inevitable.** Assets are content-digested and
+served immutable, but the page itself is `no-cache` — so a tab left open across
+a deploy runs the CURRENT script against OLD markup, and every element that
+deploy added is null. Three had just arrived (`issue-count-badge`,
+`path-crumbs`, `tree-latest`), and any one of them would have taken the file
+listing down with it. They are guarded now, and the `tree-latest` reset goes
+through `renderTreeLatest` rather than touching the node: a control that has not
+shipped to that tab should cost its own feature, not the listing it happens to
+be rendered next to.
+
+`test/smoke.sh` asserts the column against the two commits the suite already
+makes — `initial commit` touched README.md, src/app.lua and binary.dat, and
+`second` touched only README.md — so the two answers have to differ, and a walk
+that simply attributed the tip commit to everything would pass a weaker
+assertion. Plus a directory attributed by what happened inside it (`src` itself
+never appears in a commit, only `src/app.lua` does), the directory's own newest
+commit, scoping to a subdirectory and excluding its siblings, an unknown ref, a
+traversing path, and the private-repository visibility loop, which gained the
+new route. Nine cases: 206 to 215 on Windows.
+
+### Two pages, where there was one rail
+
+The browser was a single page with a permanent left rail — a repository list
+holding 286px whether or not anybody was choosing from it, and a "select a
+repository" empty state taking most of the rest. It is two pages now: the
+landing page is an account overview, and a repository is a page of its own, the
+way GitHub and gitea both arrange it. The list only earns screen space while
+somebody is choosing from it.
+
+Nothing on the server changed. This is `web/` and one line of the smoke suite.
+
+The overview is a profile column and a grid of cards. Cards rather than rows,
+because a description is what tells you which repository you want and a row
+truncates it to nothing; each card carries `owner/name` in full, since one
+instance can hold the same name under two accounts and the card is the only
+place that disambiguates them. Signed out it still says something true — this is
+the instance, and what is listed is what anybody may read — rather than going
+blank until somebody logs in. The search box moved into the listing's own
+header, where the thing it filters is.
+
+On the repository page the About column — description, default branch,
+visibility, clone URL — is Code-only, the way GitHub has it: on Issues or the
+commit log it would be describing something you are not looking at. Hiding it is
+not enough, because the grid has to give the column back or the log and the
+issue list stay squeezed into two thirds of the page. The owner in the
+breadcrumb is the way back to the listing now that there is no rail to click.
+
+`repoIcon()` builds its SVG per call rather than cloning one node: an SVG in the
+DOM is a node like any other, and two cards cannot hold the same one. Both pages
+collapse the same way at 980px — the side column stops being a column and
+becomes a block above what it describes (the profile) or below it (About) — and
+at 620px the code toolbar wraps, rather than squeezing the breadcrumb until the
+directory you are standing in is unreadable.
+
+### Provisioning an account, without leaving the browser
+
+Collaborators shipped on 2026-09-04 and the panel that grants access has always
+needed an account that already exists. There was no way to make one.
+`GET` and `POST /api/v1/users` were there from the start and had no control
+anywhere in `web/`, so adding the second person to a two-person instance meant a
+terminal and a curl — the same shape as the repository create button before it,
+one level up: the action every other multi-account feature depends on was the
+one the page could not do.
+
+**The bit the page could not know.** `syncWriteActions` carried a comment saying
+so — the browser knew the signed-in username and had no administrator
+capability, so it showed owner-only controls and left an administrator to the
+API. The obvious fix is to put the flag in the login response and keep it beside
+the token, and it is wrong: the page would be repeating a claim nobody checked,
+and it would go on being true in that tab after the account lost the bit,
+drawing controls whose every request then 403s with no explanation.
+
+So `GET /api/v1/user` answers who the caller is — username, admin, email,
+created_at, and nothing that is or verifies a credential. `loadSelf` asks it on
+load and after a login, and `clearCredentials` drops the answer. One request per
+load, and only when there is a credential to ask with; an anonymous visitor
+still makes none. It also turns out to be where a stored token that has expired
+is found, since `api()` already routes a 401 into the "session expired" path —
+previously that discovery happened on whichever panel loaded first.
+
+With the flag real, the owner-only controls include the administrator, which is
+what the server has always enforced: `rec.owner ~= user.username and not
+user.admin` guards update and delete alike, so hiding them from an administrator
+never protected anything.
+
+**The recovery code is why this needs a panel rather than a link to the docs.**
+`POST /api/v1/users` returns one with the account, and the server keeps only its
+hash — so that response is the single copy that will ever exist, and an
+administrator who closes the tab has taken the new account's only way back from
+a forgotten password with them. It gets its own block, warning-coloured rather
+than accent-coloured because it is the one thing on that screen that cannot be
+fetched again, and it stays on screen while the listing reloads underneath it —
+which is why it is not part of the list. Reopening the panel clears it: shown
+once means shown once, and a code left over from an earlier account would read
+as this one's.
+
+The form clears itself the moment the request succeeds. An administrator types
+an initial password for somebody else here, and it is the one field on the page
+that must not still be in the DOM when the next person looks at that screen.
+
+**What it deliberately does not do is delete.** An account owns repositories and
+has signed its name to issues, and where those go is a decision, not a button —
+gitea refuses to delete an account that still holds repositories, which is one
+answer among several. Listing and creating is the whole of it, and the panel
+says so rather than leaving the gap to be discovered.
+
+Five smoke cases for the endpoint — no credentials is 401, an administrator is
+told so, an ordinary account is told so, a token answers the same question as
+the password behind it, and the response carries no token list, `pwhash` or
+recovery material — plus three static checks pairing the panel's markup with its
+handler, the way each panel before it is covered. 215 to 223 on Windows.
+
+Verified in a browser against a live instance: signed out there is no account
+control and no `/api/v1/user` request at all; an administrator gets the button
+and `已登录 · 管理员`; the panel lists `admin` with its badges, creates `nina`,
+shows the recovery code and keeps it while the listing refreshes beneath it;
+the form comes back empty, password included; a second `nina` is refused with
+`这个用户名已经有人用了` rather than a bare 400; signing in as `nina` there is no
+account button and no `管理员`; and a reload restores the administrator's
+controls from the server rather than from anything the tab had stored. The only
+console error in the whole run was the deliberate duplicate.
 
 ## Phase 3 — collaboration
 

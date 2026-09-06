@@ -496,6 +496,31 @@ local function h_repo_delete(req, ctx)
     return http_response_json(200, { deleted = owner .. '/' .. name })
 end
 
+-- Who the caller is, as the SERVER sees them.
+--
+-- The browser needs the administrator bit and cannot get it from the credential
+-- it is holding. A page that stored the flag beside its token would be
+-- repeating a claim nobody checked, and would go on drawing administrator
+-- controls after the account lost the bit — controls whose every request then
+-- 403s with no explanation. Asking costs one request per load and is the only
+-- answer that can be trusted.
+--
+-- It is also where a stored token that has expired is discovered, rather than
+-- on whichever panel happened to load first.
+--
+-- No password material and no token list: this answers "who am I", and the
+-- listing that answers "what credentials do I hold" is already its own endpoint.
+local function h_user_self(req, _ctx)
+    local user, resp = require_user(req)
+    if not user then return resp end
+    return http_response_json(200, {
+        username   = user.username,
+        admin      = user.admin and true or false,
+        email      = user.email,
+        created_at = user.created_at,
+    })
+end
+
 local function h_user_list(req, _ctx)
     local _, resp = require_admin(req)
     if resp then return resp end
@@ -906,6 +931,7 @@ function g_exports.api_install()
     http_patch('/api/v1/repos/:owner/:name/issues/:number', h_issue_update)
     http_post('/api/v1/repos/:owner/:name/issues/:number/comments', h_issue_comment_create)
 
+    http_get('/api/v1/user', h_user_self)
     http_get('/api/v1/users', h_user_list)
     http_post('/api/v1/users', h_user_create)
     http_post('/api/v1/user/password', h_password_change)

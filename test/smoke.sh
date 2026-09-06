@@ -207,6 +207,18 @@ curl -s "$BASE/markdown.js" "$BASE/highlight.js" | grep -q 'innerHTML\|outerHTML
 grep -q 'id="edit-name"' "$WORK/web.index" && grep -q 'id="tokens-dialog"' "$WORK/web.index" \
     && grep -q 'id="search-form"' "$WORK/web.index" \
     && ok 'the browser has controls for rename, tokens and search' || bad 'the browser has controls for rename, tokens and search' 'a control is missing'
+# Provisioning an account was API-only, which left collaborators -- a feature
+# that needs a second account to mean anything -- reachable only after a curl.
+grep -q 'id="users-dialog"' "$WORK/web.index" && grep -q 'id="manage-users"' "$WORK/web.index" \
+    && ok 'the browser has an accounts panel' || bad 'the browser has an accounts panel' 'panel missing'
+# The panel is administrator-only and the bit is the SERVER's answer. A page
+# that stored it beside its token would be repeating a claim nobody checked.
+curl -s "$BASE/app.js" | grep -q "json('/api/v1/user')" \
+    && ok 'the administrator bit is asked for, not assumed' || bad 'the administrator bit is asked for, not assumed' 'loadSelf missing'
+# The initial password for a new account is typed into this page. It must not
+# still be sitting in the form when the next person looks at that screen.
+curl -s "$BASE/app.js" | grep -q "\$('user-form').reset()" \
+    && ok 'the account form is cleared after it is sent' || bad 'the account form is cleared after it is sent' 'reset missing'
 # The API answers in English because git clients read it too, so a form-level
 # answer needs its own translation or the dialog shows English mid-sentence.
 curl -s "$BASE/app.js" | grep -q 'a repository with that name already exists' \
@@ -528,6 +540,31 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X POST \
     -H 'Content-Type: application/json' -d '{"ttl_seconds":"soon"}' \
     "$BASE/api/v1/user/tokens")
 check 'a non-numeric ttl is refused' "$code" '400'
+
+# ── Who the caller is ───────────────────────────────────────────────────────
+# The browser cannot infer the administrator bit from the credential it holds,
+# so it asks. Anything else would be the page repeating a claim nobody checked.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/user")
+check 'the caller identity needs credentials' "$code" '401'
+body=$(curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/user")
+echo "$body" | grep -q '"username":"admin"' && echo "$body" | grep -q '"admin":true' \
+    && ok 'an administrator is told so' || bad 'an administrator is told so' "$body"
+body=$(curl -s -u bob:bob-password-1 "$BASE/api/v1/user")
+echo "$body" | grep -q '"username":"bob"' && echo "$body" | grep -q '"admin":false' \
+    && ok 'an ordinary account is told so' || bad 'an ordinary account is told so' "$body"
+# The browser signs in with a token, not a password, so that is the credential
+# this endpoint actually sees.
+if [ -n "$TOKEN" ]; then
+    curl -s -u "admin:$TOKEN" "$BASE/api/v1/user" | grep -q '"admin":true' \
+        && ok 'a token answers the same question' || bad 'a token answers the same question' 'no'
+else
+    bad 'a token answers the same question' 'no token to try'
+fi
+# It answers who, not what is held: the token listing is its own endpoint and
+# its own permission, and nothing here should hand back credential material.
+curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/user" | grep -q '"tokens"\|"pwhash"\|"recovery"' \
+    && bad 'the identity carries no credential material' "$(curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/user")" \
+    || ok 'the identity carries no credential material'
 # == Passwords and recovery codes ===========================================
 # The one thing a solo operator cannot talk their way out of: auth_bootstrap
 # only runs when NO account exists, so before recovery codes a forgotten

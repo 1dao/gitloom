@@ -18,6 +18,7 @@
       <div class="topbar-actions">
         <span class="connection-dot" id="connection-dot" aria-hidden="true"></span>
         <span class="connection-label" id="connection-label">正在连接</span>
+        <button class="button button-quiet" id="manage-users" type="button" hidden>账号</button>
         <button class="button button-quiet" id="manage-tokens" type="button" hidden>令牌</button>
         <button class="button button-quiet" id="auth-toggle" type="button">登录</button>
       </div>
@@ -325,6 +326,40 @@
       <p id="tokens-message" class="form-message" role="alert"></p>
       <div class="dialog-actions">
         <button class="button button-quiet" data-dialog-close="tokens-dialog" type="button">关闭</button>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog id="users-dialog" class="auth-dialog access-dialog">
+    <section class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">ACCOUNTS</p>
+          <h2>账号管理</h2>
+        </div>
+        <button class="icon-button" id="users-close" data-dialog-close="users-dialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-copy">这个实例上的全部账号。新建时服务器会返回一个恢复码，只显示这一次，请当场交给账号本人。删除账号还没有提供——一个账号名下的仓库和它在 Issue 里的署名要先有个去处。</p>
+      <div id="users-list" class="access-list"></div>
+      <div id="user-created" class="recovery-note" hidden>
+        <p class="eyebrow">RECOVERY CODE</p>
+        <p class="recovery-copy">账号 <strong id="user-created-name"></strong> 已创建。下面这串恢复码只出现这一次：服务器只保存它的哈希，没有任何接口能再取回它。忘记密码时，这是唯一的回路。</p>
+        <code class="recovery-code" id="user-created-code"></code>
+        <div class="recovery-actions">
+          <button class="button button-quiet" id="copy-recovery" type="button">复制恢复码</button>
+          <button class="button button-quiet" id="dismiss-recovery" type="button">我已保存</button>
+        </div>
+      </div>
+      <form id="user-form" class="user-form">
+        <label>用户名<input id="user-name" type="text" autocomplete="off" required placeholder="username"></label>
+        <label>初始密码<input id="user-password" type="password" autocomplete="new-password" required></label>
+        <label>邮箱（可选）<input id="user-email" type="email" autocomplete="off" placeholder="name@example.com"></label>
+        <label class="checkbox-label"><input id="user-admin" type="checkbox"> 管理员</label>
+        <button class="button button-primary" id="user-submit" type="submit">创建账号</button>
+      </form>
+      <p id="users-message" class="form-message" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" data-dialog-close="users-dialog" type="button">完成</button>
       </div>
     </section>
   </dialog>

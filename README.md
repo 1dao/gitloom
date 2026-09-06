@@ -21,8 +21,10 @@ where they already work.
 **Status: Phase 3 (collaboration foundation).** Clone, fetch and push over
 HTTP(S) work end to end, with accounts, access tokens, public/private
 repositories, a JSON management API and a same-origin repository browser. The
-browser covers the repository list, branches and tags, tree, raw files, images,
-commit history and bounded diffs, and can create, edit and delete repositories.
+browser is two pages — an account overview, and a repository page of its own —
+covering branches and tags, the file tree with what last changed each entry,
+raw files, images, commit history and bounded diffs, and it can create, edit and
+delete repositories.
 A repository shows its README rendered, and source files are syntax-coloured;
 both parsers are ours rather than vendored, for the reason given at the top of
 `web/markdown.js`.
@@ -30,8 +32,9 @@ Where you are is in the address bar, so a file, a directory, a tag, the commit
 log and an issue can each be bookmarked, shared, reloaded and gone Back from.
 Repositories can be renamed, searched (fixed-string, one revision at a time),
 and the account's own access tokens listed and revoked one by one. Owners can
-also grant existing accounts read or write access to private repositories, so
-the solo loop and the first multi-user loop both stay in the browser. Issues have a tracker; pull requests are not implemented yet — see
+also grant existing accounts read or write access to private repositories, and
+an administrator can create those accounts from the same page — so the solo loop
+and the first multi-user loop both stay in the browser. Issues have a tracker; pull requests are not implemented yet — see
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
@@ -134,6 +137,7 @@ gitloom/
     proc.lua             the process pool and the scratch directory
     pkt.lua              git's pkt-line framing
     repo.lua             repository naming, on-disk layout, the index
+    issue.lua            numbered issues per repository, and their comments
     git.lua              every invocation of the git binary
     auth.lua             accounts, HTTP Basic, access decisions
     auth_ratelimit.lua   credential-failure backoff
@@ -239,7 +243,7 @@ staging once that is reached. The main thread never blocks either way: a request
 coroutine yields on the RPC (or on the child's stdout) and the event loop keeps
 serving.
 
-## Known limits (Phase 0)
+## Known limits
 
 | Limit | Detail |
 |---|---|
@@ -258,13 +262,16 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 216/216 on Linux with streaming, and 206/206 on
-Windows and under `GIT_STREAM=off` — the streamed-body cases are skipped there
-because they need the transport that platform does not have, and the browser
-parsers' own tests need node, which is a development convenience rather than a
-dependency and is skipped where it is absent. `test/unit.lua` is 216 on Windows,
-215 on Linux (one case is about Windows path spelling). Adding
-`DB_DRIVER=mysql` runs the same suite against MySQL instead of JSON files.
+2.52). `test/smoke.sh` passes 223/223 on Windows and under `GIT_STREAM=off`
+(measured 2026-09-06) — the streamed-body cases are skipped there because they
+need the transport that platform does not have, and the browser parsers' own
+tests need node, which is a development convenience rather than a dependency and
+is skipped where it is absent. The Linux figure was 216 when the Windows one was
+206; the seventeen cases added since — the file listing's last-commit column and
+the accounts panel — need nothing this platform lacks, so a Linux run should now
+be 233, and it has not been re-run to say so. `test/unit.lua` is 216 on Windows, 215 on Linux (one case is about
+Windows path spelling). Adding `DB_DRIVER=mysql` runs the same suite against
+MySQL instead of JSON files.
 
 What was checked in the runtime underneath, and is fine:
 
@@ -321,15 +328,25 @@ missing `/bin/sh`.
 | `GET /api/v1/repos` | repositories visible to the caller |
 | `POST /api/v1/repos` | `{name, description?, private?, owner?, default_branch?}` |
 | `GET /api/v1/repos/:owner/:name` | detail, including refs and `empty` |
-| `PATCH /api/v1/repos/:owner/:name` | `{description?, private?}`; owner or administrator |
+| `PATCH /api/v1/repos/:owner/:name` | `{name?, description?, private?}`; owner or administrator. A rename moves a directory and re-keys the index, so it runs first and alone |
 | `DELETE /api/v1/repos/:owner/:name` | |
 | `GET /api/v1/repos/:owner/:name/collaborators` | owner or administrator; lists `{username, permission}` |
 | `PUT /api/v1/repos/:owner/:name/collaborators/:username` | `{permission: read\|write}`; owner or administrator |
 | `DELETE /api/v1/repos/:owner/:name/collaborators/:username` | owner or administrator |
+| `GET /api/v1/repos/:owner/:name/issues` | `?state=open\|closed\|all`, default `open` |
+| `POST /api/v1/repos/:owner/:name/issues` | `{title, body?}`; write access |
+| `GET /api/v1/repos/:owner/:name/issues/:number` | one issue, with its comments |
+| `PATCH /api/v1/repos/:owner/:name/issues/:number` | `{title?, body?, state?}`; the author, a write collaborator, or an administrator |
+| `POST /api/v1/repos/:owner/:name/issues/:number/comments` | `{body}` |
+| `GET /api/v1/user` | the caller's own record: `{username, admin, email, created_at}`. What the browser asks so it does not have to infer the administrator bit from the credential it holds |
 | `GET /api/v1/users` | administrator only |
 | `POST /api/v1/users` | administrator only |
+| `POST /api/v1/user/password` | `{old_password, new_password}`; revokes every token the account holds |
+| `POST /api/v1/user/password/reset` | `{username, recovery_code, new_password}`; takes no credentials, so it sits behind the login lockout |
+| `GET /api/v1/user/tokens` | the account's own tokens — id, label, expiry, never the secret |
 | `POST /api/v1/user/tokens` | `{label?, ttl_seconds?}`; the token is shown once |
 | `DELETE /api/v1/user/tokens` | revoke the token this request presents |
+| `DELETE /api/v1/user/tokens/:id` | revoke one by id; `was_current` says whether that was also a logout |
 
 Browsing a repository's contents:
 
@@ -343,6 +360,7 @@ Browsing a repository's contents:
 | `GET .../tree/:ref` and `.../tree/:ref/<path>` | directory listing, directories first |
 | `GET .../lastcommits/:ref` and `.../lastcommits/:ref/<path>` | newest commit per entry, from one bounded history walk |
 | `GET .../raw/:ref/<path>` | file contents |
+| `GET .../search` | `?q=` `&ref=` `&limit=`; fixed-string `git grep` at one resolved revision |
 
 Authentication is HTTP Basic, with either a password or an access token as the
 password field. A token without `ttl_seconds` never expires, which is what a CI
