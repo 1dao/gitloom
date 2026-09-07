@@ -11,7 +11,8 @@
 -- Every HTTP request is served on its own coroutine (see http.lua), so any
 -- handler may call it; boot-time code may not, unless it wraps itself.
 
-local xproc = dofile('scripts/core/server/xproc.lua')
+local xproc  = dofile('scripts/core/server/xproc.lua')
+local xutils = require('xutils')
 
 local swept_at = 0
 
@@ -90,22 +91,27 @@ end
 -- Empty the scratch directory at boot. Nothing is in flight yet, so anything
 -- left there is debris from a previous run — a crash mid-clone leaves a
 -- half-written packfile that nothing will ever come back for.
--- Coroutine-only (it shells out).
+--
+-- This used to shell out, and needed a different command per platform with a
+-- different quirk in each: `del /q "dir\*.*"` wants the shell for its own
+-- globbing and exits non-zero on an empty directory, while `find -delete` was
+-- chosen over `rm -f dir/*` because a glob needs a shell and a shell would also
+-- expand `$` and backticks inside TMP_DIR. `xutils.list_dir` is one call with
+-- neither quirk, and no longer coroutine-only.
 function g_exports.proc_tmp_purge()
     local dir = cfg_get('TMP_DIR', 'tmp')
-    local r
-    if util_is_windows then
-        -- del needs the shell for its own globbing, and exits non-zero on an
-        -- empty directory, which is not a failure.
-        r = proc_exec({ cmd = string.format('del /q "%s\\*.*" >nul 2>nul', util_path_native(dir)) })
-    else
-        -- argv rather than `rm -f "$dir"/*`: a glob needs the shell, and a
-        -- shell would also expand $ and backticks in TMP_DIR. find takes the
-        -- directory as a plain argument, so xproc's quoting covers it, and it
-        -- exits 0 on an empty directory.
-        r = proc_exec({ argv = { 'find', dir, '-maxdepth', '1', '-type', 'f', '-delete' } })
+    local entries = xutils.list_dir(dir)
+    if not entries then return end          -- no scratch directory yet
+
+    local failed = 0
+    for _, e in ipairs(entries) do
+        -- Files only. Nothing here creates a subdirectory, and a recursive
+        -- delete aimed at a configured path is not what a sweeper should be.
+        if not e.dir and not util_file_remove(util_path_join(dir, e.name)) then
+            failed = failed + 1
+        end
     end
-    if r and r.exit_code and r.exit_code > 1 then
-        cfg_log_warn('scratch purge returned %d', r.exit_code)
+    if failed > 0 then
+        cfg_log_warn('scratch purge could not remove %d file(s)', failed)
     end
 end

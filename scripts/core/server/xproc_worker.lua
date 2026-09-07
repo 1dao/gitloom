@@ -135,16 +135,16 @@ end
 local proc_cwd = nil
 local function process_cwd()
     if proc_cwd then return proc_cwd end
-    -- TMPDIR is frequently unset on Linux and TEMP is a Windows convention, so
-    -- POSIX falls back to /tmp rather than to '.': dropping a probe file into
-    -- the process directory works but litters the install, and fails outright
-    -- when that directory is read-only.
-    local tmp = os.getenv('TEMP') or os.getenv('TMPDIR') or (IS_WIN and '.' or '/tmp')
-    local probe = string.format('%s%sxproc_cwd_%d.txt', tmp, SEP, math.floor(os.time()))
-    os.execute(string.format('%s > "%s"', IS_WIN and 'cd' or 'pwd', probe))
-    local s = read_binary(probe, 4096)
-    remove_quietly(probe)
-    proc_cwd = (s and s ~= '') and (s:gsub('%s+$', '')) or '.'
+    -- xutils.cwd() is a C binding; see xlua/lua_xutils.c.
+    --
+    -- This used to shell out: `pwd` (or `cd`) redirected into a probe file in
+    -- the temp directory, read back and unlinked. A process, a file, a read and
+    -- an unlink for a value the OS hands over for free — and on Windows the
+    -- answer arrived in whatever console code page the process had inherited,
+    -- so a non-ASCII install path could come back mangled and every redirect
+    -- resolved against it would then name a path that does not exist.
+    local xutils = require('xutils')
+    proc_cwd = xutils.cwd() or '.'
     return proc_cwd
 end
 

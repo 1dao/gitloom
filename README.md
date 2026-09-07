@@ -320,8 +320,13 @@ diverges the two silently, so a fix in one has to be copied to the other and
 both test suites re-run (`sh test/smoke.sh` here, `bin/xnet tests/lua/xproc_test.lua`
 there).
 
-`bin/xnet` and `bin/xnet.exe` are builds of that runtime, committed here so a
-clone runs with no toolchain. Replace them wholesale when the runtime moves.
+`bin/xnet` and `bin/xnet.exe` are builds of that runtime and are **not** in the
+repository — `.gitignore` excludes `bin/`. Copy the one for your platform from
+xnet2lua before the first start, and replace it wholesale when the runtime moves.
+
+That last part is not always optional. gitloom calls `xutils.cwd()`, which is a
+C binding added to xnet2lua for it, so an old runtime paired with current
+`app/` fails at boot rather than degrading — new scripts need the new binary.
 
 `.gitattributes` pins the whole tree to LF. That is load-bearing, not
 housekeeping: a CRLF shebang makes Linux report `bad interpreter: No such file

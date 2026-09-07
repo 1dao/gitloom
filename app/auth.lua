@@ -73,36 +73,25 @@ function g_exports.auth_kdf_setup()
     return true
 end
 
--- Hoisted out of the module environment. A bare name inside an app module costs
--- two metamethod hops (see app/boot.lua), and one for the stdlib is the slower
--- of the two because both hops miss before the root `_G` answers. Measured at
--- ~59 ns each, and the XOR below runs 32 times per round: at the default 10000
--- rounds that was ~330k lookups, ~19 ms of pure name resolution stacked on top
--- of the HMACs, every time this path hashes a password.
-local string_char, table_concat = string.char, table.concat
-
 -- Bitwise XOR on both backends. `a ~ b` is Lua 5.3+ syntax that LuaJIT (5.1)
 -- cannot even parse, so this asks the PARSER whether the operator exists rather
 -- than asking for a library name: a module environment raises on an undefined
 -- bare name, which makes the usual `if bit then` probe throw on 5.5 instead of
 -- evaluating to nil. `load` and `require` are present on both.
 --
--- Measured at +2 ms per 10000-round hash against the operator written inline —
--- not worth carrying two spellings of the loop to avoid.
+-- All that is left needing it is the constant-time compare below — the PBKDF2
+-- loop that used to run this 32 times a round is in C now. The stdlib hoists
+-- that stood beside it went with it.
 local native_xor = load('return function(a, b) return a ~ b end')
 local bxor = native_xor and native_xor() or require('bit').bxor
 
--- Same computation as the worker's, for the boot path only.
+-- The same computation as the worker's — literally, now: both call the one C
+-- binding rather than each carrying a copy of the loop that had to agree with
+-- the other byte for byte forever.
 local function pbkdf2_inline(password, salt, iterations)
-    local u = xutils.hmac_sha256(password, salt .. '\0\0\0\1')
-    local out = u
-    for _ = 2, iterations do
-        u = xutils.hmac_sha256(password, u)
-        local acc = {}
-        for i = 1, 32 do acc[i] = string_char(bxor(out:byte(i), u:byte(i))) end
-        out = table_concat(acc)
-    end
-    return xutils.hex_encode(out)
+    local dk = xutils.pbkdf2_sha256(password, salt, iterations)
+    if not dk then return nil end
+    return xutils.hex_encode(dk)
 end
 
 local function pbkdf2_hex(password, salt, iterations)

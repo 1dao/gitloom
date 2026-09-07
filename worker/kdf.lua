@@ -22,34 +22,19 @@ local router = dofile('scripts/core/share/xrouter.lua')
 local xutils = require('xutils')
 router.set_log_prefix('GITLOOM-KDF')
 
--- Bitwise XOR on both backends. `a ~ b` is Lua 5.3+ syntax that LuaJIT (5.1)
--- cannot parse, so the probe compiles the operator instead of naming a library.
--- Kept identical to the copy in app/auth.lua: this thread and that fallback have
--- to derive the same digest from the same password, so they may not drift.
-local native_xor = load('return function(a, b) return a ~ b end')
-local bxor = native_xor and native_xor() or require('bit').bxor
-
--- PBKDF2-HMAC-SHA256, RFC 8018. dkLen is fixed at one block (32 bytes), which
--- is why there is no block loop: for SHA-256 the derived key we want is exactly
--- the hash output size.
-local function pbkdf2_sha256(password, salt, iterations)
-    local u = xutils.hmac_sha256(password, salt .. '\0\0\0\1')
-    local out = u
-    for _ = 2, iterations do
-        u = xutils.hmac_sha256(password, u)
-        -- XOR accumulate. Lua has no bitwise operator over strings, so this
-        -- walks the 32 bytes; the HMAC either side of it is C and dominates.
-        local acc = {}
-        for i = 1, 32 do
-            acc[i] = string.char(bxor(out:byte(i), u:byte(i)))
-        end
-        out = table.concat(acc)
-    end
-    return out
-end
-
--- Derive and return the hex digest. The caller formats and compares; this
--- thread holds no state and makes no decisions.
+-- PBKDF2-HMAC-SHA256 (RFC 8018) is `xutils.pbkdf2_sha256`, a C binding.
+--
+-- It used to be written here: a loop of C HMAC calls with the 32-byte XOR done
+-- in interpreted Lua, plus a probe that compiled `a ~ b` to find out whether
+-- this backend was 5.3+ or LuaJIT, because the two spell bitwise XOR
+-- differently. The same loop existed a second time in app/auth.lua for the boot
+-- path, with a comment on each saying they must not drift — two copies of a
+-- password-hashing primitive that had to agree byte for byte forever.
+--
+-- Measured at AUTH_PBKDF2_ITER=10000 on the development machine: 44 ms in Lua
+-- against 6 ms in C, identical output. The thread still earns its place — 6 ms
+-- of deliberate CPU per verification is still 6 ms the event loop would not be
+-- serving anyone — but the algorithm is now in one place and not ours.
 router.register('kdf_pbkdf2', function(password, salt, iterations)
     iterations = tonumber(iterations) or 10000
     -- A caller-supplied iteration count reaches a CPU loop, so bound it. The
@@ -59,7 +44,9 @@ router.register('kdf_pbkdf2', function(password, salt, iterations)
     if iterations > 1000000 then
         error('kdf: iteration count ' .. iterations .. ' is out of range', 0)
     end
-    return xutils.hex_encode(pbkdf2_sha256(tostring(password), tostring(salt), iterations))
+    local dk = xutils.pbkdf2_sha256(tostring(password), tostring(salt), iterations)
+    if not dk then error('kdf: pbkdf2 refused the parameters', 0) end
+    return xutils.hex_encode(dk)
 end)
 
 router.register('kdf_ping', function() return 'pong' end)

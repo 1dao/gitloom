@@ -1260,6 +1260,112 @@ shared `core.hooksPath` and one environment variable are the right size for one
 rule. When protected refs stop being only the default branch, the callback is
 the design to come back to.
 
+### The working directory came from a shell; now it comes from the runtime
+
+`protect_setup` needed gitloom's own directory as an absolute path, Lua has no
+getcwd, and the first answer was a shell probe through the process pool — `pwd`,
+or `cd` on Windows. That was the wrong instinct, and the house rule it violates
+is worth writing down: **when pure Lua cannot do something, the fix belongs in
+C.** The runtime is ours; "xnet2lua does not expose it" is a task, not a
+constraint.
+
+`xutils.cwd()` now exists in `xlua/lua_xutils.c` — `GetCurrentDirectoryA` on
+Windows, a growing `getcwd` on POSIX. The ANSI call is deliberate on Windows:
+the manifest in `xlua/xnet.rc` already makes every ANSI API in the process speak
+UTF-8, so there is no wide-char conversion to do.
+
+**What the shell probe actually cost.** A process spawn for a value the OS hands
+over for free, and an answer whose correctness depended on who started the
+service. Measured on the development machine: ACP and OEMCP are both 936, while
+an interactive shell had already switched its console to 65001 — so the probe
+round-tripped a CJK install path when run by hand and would not have under
+systemd or a service. That is worse than being wrong: it is being right in
+testing. The claim first went into a comment as an observed mojibake, which it
+was not; it was checked, it did not reproduce, and the reason it did not is the
+interesting part.
+
+The same probe was one layer down in `scripts/core/server/xproc_worker.lua`,
+where it was worse — `pwd` redirected into a probe file in the temp directory,
+read back and unlinked, to resolve redirect paths against. That is a process, a
+file, a read and an unlink, once per worker. It uses `xutils.cwd()` now too, in
+xnet2lua and in the copy here; the runtime's own `tests/lua/xproc_test.lua`
+covers the redirect resolution it feeds and passes.
+
+`bin/xnet.exe` is rebuilt from that tree (MinGW, the Makefile's defaults:
+`WITH_HTTP=1 WITH_HTTPS=1 WITH_XPROC=0`). Anyone syncing this needs the new
+binary as well as the new scripts — `xutils.cwd` is a C symbol, and an old
+runtime with the new `protect.lua` fails at boot rather than falling back.
+
+### An audit for the rest of it: four more bindings, and what they deleted
+
+The working-directory fix above was one instance of a pattern, so the rest of
+the tree got the same question: where is Lua doing something awkwardly because
+the runtime does not expose it? Four answers, all of them shell-outs or
+hand-rolled crypto.
+
+**Every non-git process spawn in the application is gone.** Before this pass,
+`app/` shelled out in four places that had nothing to do with git:
+
+| was | is |
+|---|---|
+| `mkdir -p` / `cmd /c if not exist … mkdir` | `xutils.mkdir_p` |
+| `rm -rf` / `cmd /c rmdir /s /q` (twice) | `xutils.rmtree` |
+| `find -delete` / `del /q "dir\*.*"` | `xutils.list_dir` + `os.remove` |
+| PBKDF2 written twice in Lua | `xutils.pbkdf2_sha256` |
+
+**`util_dir_make` was the clearest case.** It could not simply call a mkdir, so
+it chose between two kinds of process by context: inside a coroutine it went
+through the worker pool and yielded, because `xfs.mkdirp` runs `os.execute` on
+the calling thread and two callers (`repo_create`, `auth_save`) run on a request
+coroutine where forking a shell stalls every connection; on the main state it
+called `xfs.mkdirp` directly, because yielding there is impossible.
+`coroutine.isyieldable()` picked. Twenty lines and a process, replaced by one
+call that is correct from any thread — the branch existed only because the
+primitive did not.
+
+**`repo_delete` was the one with teeth.** It built `rm -rf <path>` from an owner
+and a name the caller chose. `repo_name_ok` vets both, and that check was the
+only thing standing between a validation gap and a recursive delete on a command
+line. `xutils.rmtree` takes the path as a value, follows no symlink, and clears
+the read-only bit git leaves on loose objects — which `rmdir /s /q` had been
+doing for us on Windows, unremarked. Verified against a real bare repository:
+read-only objects and all, gone.
+
+It is synchronous where the pooled command yielded, and the comment there says
+so: deletion is an unlink per object, so a very large loose object store would
+hold the event loop. Accepted because deleting a repository is rare, deliberate
+and administrative; the fix, if it ever stops being acceptable, is a worker that
+can run a Lua task, not a return to the shell.
+
+**PBKDF2 was written out by hand, twice.** `worker/kdf.lua` had the loop, and
+`app/auth.lua` had a second copy for the boot path, each with a comment saying
+the two must never drift — two copies of a password-hashing primitive required
+to agree byte for byte forever. Both are one call now.
+
+The binding is built on the SHA-256 already in `lua_xutils.c` rather than on
+`mbedtls_pkcs5_pbkdf2_hmac`, deliberately: `pkcs5.c` and `md.c` are only
+compiled into an HTTPS build, and a password hash that exists or not depending
+on `WITH_HTTPS` is not something a caller can reason about. Measured at the
+default 10000 iterations: **44 ms in Lua, 6 ms in C, byte-identical output** —
+tested against the Lua implementation across six parameter shapes including
+embedded NULs, and against the published multi-block vector, which the Lua
+version could not have produced at all since its dkLen was fixed at one block.
+
+The KDF thread stays. 6 ms of deliberate CPU per verification is still 6 ms the
+event loop would not be serving anyone; what changed is that the algorithm is no
+longer ours.
+
+**Two things fell out.** `app/auth.lua`'s stdlib hoists (`string_char`,
+`table_concat`) existed for the XOR loop and went with it. And
+`util_path_native` had no callers left — every splice of a path into a cmd.exe
+command line is a C call taking a value now — so it is deleted rather than left
+as a shape for something that does not exist.
+
+`xutils.list_dir` also fills a gap the tree had been working around: `scan_dir`
+recurses with no depth limit, which is why `util_dir_walk` carries a warning
+never to point it at `repos/` — one bare repository is one file per loose
+object. `list_dir` is the "what is directly in here" call that was missing.
+
 ## Phase 3 — collaboration
 
 Organisations and teams, then issues (comments, labels, milestones), then pull

@@ -14,6 +14,8 @@
 -- channel there is — the hook is a separate process that knows nothing but its
 -- three arguments and its environment.
 
+local xutils = require('xutils')
+
 local hooks_abs = nil     -- resolved once by protect_setup
 
 -- gitloom's own install directory, as an ABSOLUTE path.
@@ -23,26 +25,28 @@ local hooks_abs = nil     -- resolved once by protect_setup
 -- the repository and quietly found to be missing — and a protection feature
 -- that silently does nothing is worse than one that is off.
 --
--- Lua has no getcwd, so this asks the shell once, exactly as
--- scripts/core/server/xproc_worker.lua does for its redirect paths and for the
--- same reason. Coroutine-only: it goes through the process pool.
+-- Lua has no getcwd, so the runtime grew one: `xutils.cwd()`, in xnet2lua's
+-- xlua/lua_xutils.c.
 --
--- `cmd` rather than `argv`, because on Windows `cd` is a cmd.exe builtin with no
--- executable to name, and what is wanted is the shell's own idea of where it is.
+-- This was a shell probe first — `pwd`, or `cd` on Windows, through the process
+-- pool, which is what xproc_worker.lua does for its own redirect paths. Two
+-- things were wrong with it. It spawns a process for a value the OS hands over
+-- for free. And on Windows its correctness depended on something nobody should
+-- have to reason about: this process's own ANSI calls speak UTF-8 because of the
+-- manifest in xnet.rc, but a CHILD writes its output in the console code page it
+-- inherits, which is the system OEM page unless something changed it. Measured
+-- on the development machine, ACP and OEMCP are both 936 while an interactive
+-- shell had already switched its console to 65001 — so the probe round-tripped a
+-- CJK install path there and would not have under the service. An answer that
+-- depends on who started you is worse than one that is simply wrong.
 --
--- ONE CAVEAT, and the caller is what handles it: a Windows pipe hands text back
--- in the OEM codepage, so an install path containing non-ASCII comes back
--- mojibake. Nothing here can repair that — the bytes are already lossy. What
--- saves it is that protect_setup then looks for the hook at the path it got and
--- refuses to boot when it is not there, so a mangled answer is a loud failure
--- with an obvious remedy: set HOOKS_DIR to an absolute path and skip the probe.
+-- A C call has neither problem, and needs no coroutine.
 local function process_cwd()
-    local r = proc_exec({ cmd = util_is_windows and 'cd' or 'pwd',
-                          capture_stdout = true })
-    if not r or not r.ok then return nil, 'could not read the working directory' end
-    local out = util_str_trim(tostring(r.stdout or ''))
-    if out == '' then return nil, 'the working directory came back empty' end
-    return out
+    local out, err = xutils.cwd()
+    if not out or out == '' then
+        return nil, 'could not read the working directory: ' .. tostring(err or 'empty')
+    end
+    return util_str_trim(out)
 end
 
 -- Called from boot_async. Resolves the hook directory and refuses to continue

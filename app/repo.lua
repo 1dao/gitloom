@@ -34,6 +34,8 @@
 --                       be interpreted by the shell xproc runs through
 --   * no '-' leading  → a name starting with '-' would be read by git as an
 --                       option rather than a path
+local xutils = require('xutils')
+
 local NAME_PATTERN = '^[A-Za-z0-9_][A-Za-z0-9._-]*$'
 local MAX_NAME     = 100
 
@@ -281,11 +283,9 @@ function g_exports.repo_create(owner, name, opts)
         -- concerned. Roll the directory back and fail, rather than returning
         -- 201 for something that will have vanished by the next restart.
         index[repo_key(owner, name)] = nil
-        local dok = proc_exec(util_is_windows
-            and { argv = { 'cmd', '/c', 'rmdir', '/s', '/q', util_path_native(dir) } }
-            or  { argv = { 'rm', '-rf', dir } })
+        local dok = xutils.rmtree(dir)
         cfg_log_error('index save failed for %s/%s (%s); rolled the directory back (%s)',
-            owner, name, tostring(serr), dok.ok and 'ok' or 'FAILED — orphan left on disk')
+            owner, name, tostring(serr), dok and 'ok' or 'FAILED — orphan left on disk')
         return nil, 'could not persist the repository index: ' .. tostring(serr)
     end
     cfg_log_system('created repository %s/%s at %s', owner, name, dir)
@@ -571,14 +571,24 @@ function g_exports.repo_delete(owner, name)
     end
 
     local dir = repo_dir(owner, name)
-    local r
-    if util_is_windows then
-        r = proc_exec({ argv = { 'cmd', '/c', 'rmdir', '/s', '/q', util_path_native(dir) } })
-    else
-        r = proc_exec({ argv = { 'rm', '-rf', dir } })
-    end
-    if not r.ok then
-        return nil, 'delete failed: ' .. tostring(r.err) .. ' ' .. util_str_trim(r.stderr or '')
+    -- `xutils.rmtree` rather than `rm -rf` / `rmdir /s /q` through the process
+    -- pool. This path builds its argument from an owner and a name the caller
+    -- chose — repo_name_ok has already vetted both, but a recursive delete
+    -- assembled into a command line is the one string in this program where a
+    -- gap in that check becomes catastrophic rather than merely wrong. The C
+    -- call takes the path as a value, follows no symlink, and clears the
+    -- read-only bit git leaves on loose objects, which is the thing `rmdir /s`
+    -- was quietly doing for us on Windows.
+    --
+    -- It is SYNCHRONOUS, where the pooled command yielded. Deleting a
+    -- repository is an unlink per object, so a repository with a very large
+    -- loose object store would hold the event loop for the duration. That is
+    -- accepted here because deletion is rare, deliberate and administrative;
+    -- if it ever stops being acceptable the fix is a worker that can run a Lua
+    -- task, not a return to the shell.
+    local ok, rerr = xutils.rmtree(dir)
+    if not ok then
+        return nil, 'delete failed: ' .. tostring(rerr)
     end
 
     index[repo_key(owner, name)] = nil

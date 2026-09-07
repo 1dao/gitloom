@@ -2,7 +2,7 @@
 --
 -- Exports: util_path_separator, util_is_windows,
 --          util_str_trim, util_str_split, util_str_starts, util_str_ends,
---          util_path_join, util_path_native, util_path_is_abs,
+--          util_path_join, util_path_is_abs,
 --          util_file_read, util_file_write, util_file_write_atomic, util_file_size,
 --          util_file_exists, util_file_remove, util_path_rename,
 --          util_dir_make, util_dir_walk,
@@ -45,9 +45,13 @@ end
 -- Paths
 --
 -- Internally every path uses '/' — including on Windows, where the CRT accepts
--- it everywhere. util_path_native() converts at the one boundary that does not:
--- cmd.exe's `cd /d`. (xproc already does that conversion for spec.cwd; this is
--- here for messages and for anything else that has to look native.)
+-- it everywhere, and where xproc converts for spec.cwd on its own.
+--
+-- There was a util_path_native() here to convert at the one boundary that did
+-- not accept a forward slash: a path spliced into a cmd.exe command line. Every
+-- one of those splices is now a C call taking the path as a value, so nothing
+-- called it, and an exported helper with no caller is a shape for something
+-- that does not exist.
 -- ---------------------------------------------------------------------------
 
 function g_exports.util_path_join(...)
@@ -59,10 +63,6 @@ function g_exports.util_path_join(...)
     return (table.concat(parts, '/'):gsub('//+', '/'))
 end
 
-function g_exports.util_path_native(p)
-    if util_is_windows then return (tostring(p):gsub('/', '\\')) end
-    return tostring(p)
-end
 
 function g_exports.util_path_is_abs(p)
     p = tostring(p or '')
@@ -176,29 +176,19 @@ end
 
 -- Create a directory and any missing parents.
 --
--- There is no mkdir binding, so this costs a process either way. Which one
--- matters: xfs.mkdirp runs os.execute on the CALLING thread, and two of the
--- callers here (repo_create, auth_save) run on a request coroutine on the event
--- loop — forking a shell there stalls every other connection for the duration,
--- which is precisely what the worker pool exists to avoid.
+-- This used to cost a PROCESS, and had to pick which kind by context. There was
+-- no mkdir binding: `xfs.mkdirp` runs os.execute on the CALLING thread, and two
+-- of the callers here (repo_create, auth_save) run on a request coroutine on
+-- the event loop, where forking a shell stalls every other connection for the
+-- duration — precisely what the worker pool exists to avoid. So inside a
+-- coroutine it went through the pool and yielded, on the main state it called
+-- xfs.mkdirp, and `coroutine.isyieldable()` chose.
 --
--- So: inside a coroutine, go through the pool and yield; on the main state at
--- boot, where yielding is impossible and nothing is being served yet, call
--- xfs.mkdirp directly. coroutine.isyieldable() is the exact test for that,
--- and it keeps this one function correct in both contexts.
+-- `xutils.mkdir_p` is the syscall. No branch, no process, no yield, and correct
+-- from any thread — which is the whole of why the branch existed.
 function g_exports.util_dir_make(path)
-    if coroutine.isyieldable() then
-        local argv = util_is_windows
-            and { 'cmd', '/c', 'if', 'not', 'exist', util_path_native(path),
-                  'mkdir', util_path_native(path) }
-            or  { 'mkdir', '-p', path }
-        local r = proc_exec({ argv = argv, capture_stderr = true })
-        if not r.ok then
-            return nil, 'mkdir failed: ' .. util_str_trim(r.stderr or tostring(r.err))
-        end
-        return true
-    end
-    xfs.mkdirp(util_path_native(path))
+    local ok, err = xutils.mkdir_p(path)
+    if not ok then return nil, 'mkdir failed: ' .. tostring(err) end
     return true
 end
 
