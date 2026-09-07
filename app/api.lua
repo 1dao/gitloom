@@ -25,6 +25,7 @@
 --   POST   /api/v1/repos/:owner/:name/issues/:number/comments
 --   GET    /api/v1/users                  admin only
 --   POST   /api/v1/users                  admin only
+--   POST   /api/v1/user/register          opt-in public registration
 --   POST   /api/v1/user/password          change it, given the current one
 --   POST   /api/v1/user/password/reset    forgot it: spend a recovery code
 --   GET    /api/v1/user/tokens            the caller's own live tokens
@@ -527,6 +528,35 @@ local function h_user_list(req, _ctx)
     return http_response_json(200, { users = auth_user_list() })
 end
 
+local function h_user_register(req, ctx)
+    if not cfg_bool('AUTH_ALLOW_REGISTRATION', false) then
+        return http_response_error(403, 'account registration is disabled')
+    end
+    local allowed, retry = auth_ratelimit_registration(ctx.ip or req.peer_ip)
+    if not allowed then return auth_too_many(retry) end
+
+    local b, err = body_json(req)
+    if not b then return http_response_error(400, err) end
+    if type(b.username) ~= 'string' or type(b.password) ~= 'string' or
+       (b.email ~= nil and type(b.email) ~= 'string') then
+        return http_response_error(400, 'username, password and optional email must be strings')
+    end
+    -- Never pass client-controlled privileges into account creation.
+    local u, cerr = auth_user_create(b.username, b.password, { email = b.email })
+    if not u then
+        return http_response_error(cerr == 'user already exists' and 409 or 400,
+                                   http_safe_error(cerr))
+    end
+    local code = auth_recovery_ensure(u.username)
+    local response = http_response_json(201, {
+        username = u.username, admin = false, email = u.email,
+        recovery_code = code,
+        note = code and 'store this recovery code now; it cannot be shown again' or nil,
+    })
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+end
+
 local function h_user_create(req, _ctx)
     local _, resp = require_admin(req)
     if resp then return resp end
@@ -1002,6 +1032,7 @@ function g_exports.api_install()
     http_get('/api/v1/user', h_user_self)
     http_get('/api/v1/users', h_user_list)
     http_post('/api/v1/users', h_user_create)
+    http_post('/api/v1/user/register', h_user_register)
     http_post('/api/v1/user/password', h_password_change)
     -- No credentials on this one, by design: see h_password_reset.
     http_post('/api/v1/user/password/reset', h_password_reset)

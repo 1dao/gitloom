@@ -32,6 +32,7 @@
 local xutils = require('xutils')
 
 local users = nil          -- username -> record
+local creating = {}        -- names currently being hashed; closes concurrent races
 -- Verification cache. The VALUE carries the verdict, not just an expiry:
 -- 'ok' for a credential that verified, 'bad' for one that did not. Storing an
 -- expiry alone and treating any live entry as success — which is what a plain
@@ -417,9 +418,14 @@ function g_exports.auth_user_create(username, password, opts)
         return nil, string.format('email must be at most %d bytes', MAX_EMAIL)
     end
 
+    if creating[username] then return nil, 'user already exists' end
+    creating[username] = true
+    local pwhash = password_hash(password)
+    creating[username] = nil
+    if users[username] then return nil, 'user already exists' end
     users[username] = {
         username   = username,
-        pwhash     = password_hash(password),
+        pwhash     = pwhash,
         email      = email,
         admin      = opts.admin and true or false,
         tokens     = {},

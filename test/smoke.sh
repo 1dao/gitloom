@@ -42,6 +42,7 @@ skip() { printf 'SKIP %s\n' "$1"; }
 cleanup() {
     [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null
     [ -n "${PID2:-}" ] && kill "$PID2" 2>/dev/null
+    [ -n "${PID_REG:-}" ] && kill "$PID_REG" 2>/dev/null
     # A failed run is worth reading; a clean one is not.
     if [ "$fail" -ne 0 ]; then
         printf '\n--- server log (%s) ---\n' "$LOG"; tail -40 "$LOG"
@@ -83,6 +84,7 @@ fi
     LISTEN_PORT="$PORT" REPO_ROOT="$ROOT" DATA_DIR="$DATA" TMP_DIR="$SCRATCH" \
     USERS_FILE="$DATA/users.json" ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" \
     GIT_STREAM="${GIT_STREAM:-auto}" \
+    AUTH_ALLOW_REGISTRATION=0 \
     TRUSTED_PROXIES=127.0.0.1 \
     $DB_ARGS \
     > "$LOG" 2>&1 &
@@ -1575,6 +1577,73 @@ curl -s -u "tokenowner:$OTHER_TOKEN" -X DELETE "$BASE/api/v1/user/tokens/$OTHER_
     && ok 'revoking the token in use says so' || bad 'revoking the token in use says so' 'not reported'
 code=$(curl -s -o /dev/null -w '%{http_code}' -u "tokenowner:$OTHER_TOKEN" "$BASE/api/v1/user/tokens")
 check 'and it stops working immediately' "$code" '401'
+
+# -- Public registration uses its own instance and rate-limit bucket. ---------
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+    -d '{"username":"signup","password":"signup-password-1"}' "$BASE/api/v1/user/register")
+check 'public registration is disabled by default' "$code" '403'
+REG_PORT=$((PORT+4))
+REG_BASE="http://127.0.0.1:$REG_PORT"
+mkdir -p "$WORK/reg/repos" "$WORK/reg/data" "$WORK/reg/tmp"
+"$XNET" main.lua LISTEN_PORT="$REG_PORT" REPO_ROOT="$WORK/reg/repos" \
+    DATA_DIR="$WORK/reg/data" TMP_DIR="$WORK/reg/tmp" USERS_FILE="$WORK/reg/data/users.json" \
+    DB_DRIVER=file ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" GIT_STREAM=off \
+    AUTH_ALLOW_REGISTRATION=1 AUTH_REGISTER_MAX=10 AUTH_REGISTER_WINDOW_SEC=3600 \
+    > "$WORK/registration.log" 2>&1 &
+PID_REG=$!
+i=0
+while [ $i -lt 100 ]; do
+    curl -sf "$REG_BASE/api/v1/version" >/dev/null && break
+    i=$((i+1)); sleep 0.2
+done
+for payload in '{' '{}' '{"username":"../bad","password":"signup-password-1"}' \
+    '{"username":"signup","password":"short"}' \
+    '{"username":"signup","password":123456789}' \
+    '{"username":"signup","password":"signup-password-1","email":{}}'; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+        -d "$payload" "$REG_BASE/api/v1/user/register")
+    check "registration rejects invalid input: $payload" "$code" '400'
+done
+code=$(curl -s -o "$WORK/signup.json" -w '%{http_code}' -H 'Content-Type: application/json' \
+    -d '{"username":"signup","password":"signup-password-1","admin":true}' \
+    "$REG_BASE/api/v1/user/register")
+check 'anonymous registration succeeds' "$code" '201'
+grep -q '"admin":false' "$WORK/signup.json" && grep -q '"recovery_code":"' "$WORK/signup.json" \
+    && ok 'registration returns an ordinary account and recovery code' \
+    || bad 'registration returns an ordinary account and recovery code' "$(cat "$WORK/signup.json")"
+grep -qE 'pwhash|"tokens"|pbkdf2' "$WORK/signup.json" \
+    && bad 'registration hides stored credentials' 'credential material leaked' \
+    || ok 'registration hides stored credentials'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u signup:signup-password-1 "$REG_BASE/api/v1/user")
+check 'registered account can authenticate' "$code" '200'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u signup:signup-password-1 "$REG_BASE/api/v1/users")
+check 'registration cannot grant administrator access' "$code" '403'
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+    -d '{"username":"signup","password":"replacement-password-1"}' "$REG_BASE/api/v1/user/register")
+check 'duplicate registration is a conflict' "$code" '409'
+curl -s -o "$WORK/race1.json" -w '%{http_code}' -H 'Content-Type: application/json' \
+    -d '{"username":"race","password":"race-password-1"}' "$REG_BASE/api/v1/user/register" > "$WORK/race1.status" &
+RACE1=$!
+curl -s -o "$WORK/race2.json" -w '%{http_code}' -H 'Content-Type: application/json' \
+    -d '{"username":"race","password":"race-password-2"}' "$REG_BASE/api/v1/user/register" > "$WORK/race2.status" &
+RACE2=$!
+wait "$RACE1"; wait "$RACE2"
+codes="$(cat "$WORK/race1.status") $(cat "$WORK/race2.status")"
+case "$codes" in
+    '201 409'|'409 201') ok 'concurrent registration cannot overwrite an account' ;;
+    *) bad 'concurrent registration cannot overwrite an account' "$codes" ;;
+esac
+code=$(curl -s -o /dev/null -D "$WORK/signup.headers" -w '%{http_code}' \
+    -H 'Content-Type: application/json' -d '{"username":"signup2","password":"signup-password-1"}' \
+    "$REG_BASE/api/v1/user/register")
+check 'registration limit includes successes and survives login' "$code" '429'
+grep -qi '^Retry-After:' "$WORK/signup.headers" \
+    && ok 'registration limit supplies retry time' || bad 'registration limit supplies retry time' 'missing header'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u signup:signup-password-1 "$REG_BASE/api/v1/user")
+check 'registration limit does not block login or replace the password' "$code" '200'
+kill "$PID_REG" 2>/dev/null
+wait "$PID_REG" 2>/dev/null
+PID_REG=''
 
 # == Delete ==================================================================
 code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X DELETE \

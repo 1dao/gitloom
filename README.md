@@ -80,6 +80,27 @@ sh test/smoke.sh
 bin/xnet.exe test/unit.lua
 ```
 
+## Account registration
+
+Administrators can create accounts with `POST /api/v1/users`. To allow people
+to register themselves, set `AUTH_ALLOW_REGISTRATION=1` in `gitloom.local.cfg`
+or as a startup argument (disabled by default), then call without credentials:
+
+```bash
+curl -H 'Content-Type: application/json' \
+     -d '{"username":"alice","password":"a-long-password","email":"alice@example.com"}' \
+     http://127.0.0.1:8686/api/v1/user/register
+```
+
+The response is `201` with `username`, `admin: false`, `email`, and a one-time
+`recovery_code` to save. Sign in using the new username and password. Email is
+optional; usernames follow repository naming rules and passwords must meet
+`AUTH_MIN_PASSWORD` (8 by default). Client-supplied administrator privileges
+are ignored. Invalid input returns `400`, an existing username `409`, and
+disabled registration `403`. Each source IP gets `AUTH_REGISTER_MAX` attempts
+(5 by default) per `AUTH_REGISTER_WINDOW_SEC` (3600); excess attempts return
+`429` with `Retry-After`. Successful registrations also count toward this limit.
+
 ## If you forget the password
 
 The first boot prints a recovery code for the administrator account and says to
@@ -354,6 +375,7 @@ missing `/bin/sh`.
 | `GET /api/v1/user` | the caller's own record: `{username, admin, email, created_at}`. What the browser asks so it does not have to infer the administrator bit from the credential it holds |
 | `GET /api/v1/users` | administrator only |
 | `POST /api/v1/users` | administrator only |
+| `POST /api/v1/user/register` | `{username, password, email?}`; anonymous, requires `AUTH_ALLOW_REGISTRATION=1`; ordinary accounts only |
 | `POST /api/v1/user/password` | `{old_password, new_password}`; revokes every token the account holds |
 | `POST /api/v1/user/password/reset` | `{username, recovery_code, new_password}`; takes no credentials, so it sits behind the login lockout |
 | `GET /api/v1/user/tokens` | the account's own tokens — id, label, expiry, never the secret |

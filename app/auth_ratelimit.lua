@@ -1,7 +1,8 @@
 -- app/auth_ratelimit.lua — failure backoff for credential checks.
 --
 -- Exports: auth_ratelimit_check, auth_ratelimit_record_failure,
---          auth_ratelimit_record_success, auth_ratelimit_gc
+--          auth_ratelimit_record_success, auth_ratelimit_gc,
+--          auth_ratelimit_registration
 --
 -- Moving PBKDF2 onto its own thread (worker/kdf.lua) stops one bad login from
 -- stalling the event loop. It does not stop a thousand of them from saturating
@@ -28,6 +29,24 @@
 
 local by_ip   = {}    -- ip       -> { count, first_ts, until_ts }
 local by_user = {}    -- username -> { count, first_ts, until_ts }
+local registrations = {} -- separate from login: success must not reset this
+
+-- Reserve an attempt before any KDF yield, including successful registrations.
+function g_exports.auth_ratelimit_registration(ip)
+    local max = cfg_int('AUTH_REGISTER_MAX', 5)
+    local window = math.max(1, cfg_int('AUTH_REGISTER_WINDOW_SEC', 3600))
+    if max <= 0 then return true end
+    ip = ip or 'unknown'
+    local now = os.time()
+    local b = registrations[ip]
+    if not b or now >= b.expires then
+        b = { count = 0, expires = now + window }
+        registrations[ip] = b
+    end
+    if b.count >= max then return false, b.expires - now end
+    b.count = b.count + 1
+    return true
+end
 
 local function limits()
     return cfg_int('AUTH_FAIL_MAX', 10),
@@ -96,6 +115,9 @@ function g_exports.auth_ratelimit_gc()
     local now = os.time()
     local stale = math.max(window, lockout) * 2
     local n = 0
+    for ip, b in pairs(registrations) do
+        if b.expires <= now then registrations[ip] = nil; n = n + 1 end
+    end
     for _, tbl in ipairs({ by_ip, by_user }) do
         for k, b in pairs(tbl) do
             if b.until_ts <= now and now - b.first_ts > stale then
