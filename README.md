@@ -295,17 +295,15 @@ Linux is the deployment target and is where the streaming transport runs;
 Windows is supported for development and falls back to file staging.
 
 Verified on both: Arch Linux (gcc 16.2.1, git 2.55) and Windows (MinGW, git
-2.52). `test/smoke.sh` passes 253/253 on Windows and under `GIT_STREAM=off`
-(measured 2026-09-06) — the streamed-body cases are skipped there because they
-need the transport that platform does not have, and the browser parsers' own
-tests need node, which is a development convenience rather than a dependency and
-is skipped where it is absent. The Linux figure was 216 when the Windows one was
-206; the forty-seven cases added since — the file listing's last-commit column,
-the accounts panel, the compare endpoints and branch protection — need nothing
-this platform lacks, so a Linux run should now be 263, and it has not been
-re-run to say so. `test/unit.lua` is 216 on Windows, 215 on Linux (one case is about
+2.52). `test/smoke.sh` passes 280/280 on Windows and under `GIT_STREAM=off`, and
+289/289 on Linux (measured 2026-09-08, both runs) — the difference is the
+streamed-body cases, which need the transport Windows does not have. Two more
+are skipped on that Linux box for the browser parsers' own tests, which need
+node: a development convenience rather than a dependency, and skipped where it
+is absent. `test/unit.lua` is 216 on Windows, 215 on Linux (one case is about
 Windows path spelling). Adding `DB_DRIVER=mysql` runs the same suite against
-MySQL instead of JSON files.
+MySQL instead of JSON files, and `TLS_MB=0` skips the TLS transfers, which are
+the only cases that need `openssl` on PATH.
 
 What was checked in the runtime underneath, and is fine:
 

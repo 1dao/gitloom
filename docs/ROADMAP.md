@@ -1366,6 +1366,67 @@ recurses with no depth limit, which is why `util_dir_walk` carries a warning
 never to point it at `repos/` — one bare repository is one file per loose
 object. `list_dir` is the "what is directly in here" call that was missing.
 
+### TLS served pages it could not serve a repository through (2026-09-08)
+
+`HTTPS=1` had never been driven by a git client carrying anything. It came out
+of the operations pass above as sound — a self-signed certificate served the API
+and a `git clone` over TLS — and both of those are true at the size a test
+repository happens to be. At the size a real one is, neither direction worked:
+
+- **A push over ~8 MiB was closed with no reply**, which the client reports as
+  `curl 52 Empty reply from server`. `READ_BURST` (8 MiB) is handed to
+  `attach_tls` as `max_packet`, and the runtime checked it BEFORE dispatching to
+  the handler. `tls_read_plain` drains the socket until it runs dry, so a peer
+  that keeps it readable — git streaming a packfile — pushed the buffer past the
+  cap while the handler, which would have consumed every byte, had not been
+  called once. No status and no log line: the same defect Phase 1 found on the
+  plaintext side, in the one place nobody had looked for it.
+- **A clone over ~10 MiB hung forever**, stopped at exactly the queue cap.
+  `send_file_response` pushed the whole file into the send queue in one
+  synchronous loop; everything past `max_send` was refused, the loop gave up,
+  and the connection was left open holding a truncated body. Not an error a
+  client can see — it simply waits.
+- **Four methods `app/http.lua` calls did not exist on a TLS connection** —
+  `close_after_flush`, `pause_read`/`resume_read` and `stats`. Every
+  `Connection: close` response and the whole Linux streamed-body path would have
+  hit nil the moment TLS carried them, which is what the pre-fix run of the new
+  cases prints: `attempt to call a nil value (method 'close_after_flush')`.
+
+Fixed in xnet2lua (`xlua/lua_xnet_tls.c`), because none of it is reachable from
+Lua. The inbound cap now bounds UNCONSUMED bytes and the read loop dispatches
+once the buffer reaches it, so it is still a memory ceiling and no longer a
+speed limit. A file response is pumped one 64 KiB chunk at a time from
+`tls_flush_output` as the socket drains, so the queue never holds more than a
+chunk and `max_send` cannot be reached however large the file is — the same
+"accepted, not yet sent" contract the plaintext channel has, which is why
+`resp.release_file` was already written to survive it. And the missing methods
+are there, mirroring xchannel. `tests/lua/tls_flow_test.lua` (7 checks) is the
+regression case in that repository; it is red on the previous binary.
+
+The same pre-dispatch check exists in `xchannel.c`'s RAW branch and is
+deliberately left alone: the plaintext reader does at most three `recv` calls
+per event and dispatches after each, so the buffer is drained every time round
+and the cap already bounds, in practice, what nobody consumed. Changing a path
+that works for a failure that cannot be produced is the wrong trade.
+
+**What let it hide is the more useful finding.** `test/smoke.sh` had 273 cases
+and every one was plaintext, so a transport that could not carry a repository
+was green from end to end. There is now a TLS section: a self-signed
+certificate, an instance on `HTTPS=1`, and a 12 MiB repository pushed, cloned
+back byte-identical, and fetched raw under `Connection: close`. The size is
+chosen to cross both old caps and is the only reason the section moves
+megabytes; `TLS_MB=0` skips the transfers, and the section skips entirely
+without `openssl`, which is what makes the certificate. The transfers run under
+`timeout` where it exists, because the outbound failure is a stall rather than
+an error and an unguarded case would hang the suite instead of failing it.
+
+Verified with the rebuilt runtime on both platforms: `test/smoke.sh` 280 on
+Windows and 289 on Linux, `test/unit.lua` 216 and 215, and in xnet2lua
+`tls_flow_test` 7/7 with its C and Lua unit suites at 72 and 15. A 60 MiB push
+and clone over TLS are byte-identical and `git fsck` clean on both — 2.4 s and
+1.4 s streamed on Linux against 9.2 s and 13.2 s staged on Windows, which is the
+usual gap between the two transports rather than anything TLS costs.
+
 ## Phase 3 — collaboration
 
 Organisations and teams, then issues (comments, labels, milestones), then pull

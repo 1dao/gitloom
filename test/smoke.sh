@@ -9,6 +9,7 @@
 #   PORT=9000 sh test/smoke.sh        pick the port
 #   GIT_STREAM=off sh test/smoke.sh   force the file-staging transport
 #   BIG_MB=0 sh test/smoke.sh         skip the large-clone case (see below)
+#   TLS_MB=0 sh test/smoke.sh         skip the TLS transfers (see below)
 #
 #   DB_DRIVER=mysql DB_USER=... DB_PASSWORD=... DB_NAME=... sh test/smoke.sh
 #       run the main instance against MySQL instead of JSON files. The database
@@ -43,11 +44,13 @@ cleanup() {
     [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null
     [ -n "${PID2:-}" ] && kill "$PID2" 2>/dev/null
     [ -n "${PID_REG:-}" ] && kill "$PID_REG" 2>/dev/null
+    [ -n "${PID_TLS:-}" ] && kill "$PID_TLS" 2>/dev/null
     # A failed run is worth reading; a clean one is not.
     if [ "$fail" -ne 0 ]; then
         printf '\n--- server log (%s) ---\n' "$LOG"; tail -40 "$LOG"
         [ -f "${LOG2:-}" ] && { printf '\n--- second instance (%s) ---\n' "$LOG2"; tail -20 "$LOG2"; }
         [ -f "${LOG3:-}" ] && { printf '\n--- capped instance (%s) ---\n' "$LOG3"; tail -20 "$LOG3"; }
+        [ -f "${LOG_TLS:-}" ] && { printf '\n--- TLS instance (%s) ---\n' "$LOG_TLS"; tail -20 "$LOG_TLS"; }
     fi
 }
 trap cleanup EXIT INT TERM
@@ -1657,6 +1660,160 @@ check 'registration limit does not block login or replace the password' "$code" 
 kill "$PID_REG" 2>/dev/null
 wait "$PID_REG" 2>/dev/null
 PID_REG=''
+
+# == TLS =====================================================================
+# Every case above this line is plaintext, and that is precisely how the TLS
+# transport stayed unusable without one of them going red: HTTPS=1 served the
+# API and a small clone perfectly well, while a push over 8 MiB was closed with
+# no reply at all and a clone over 10 MiB hung forever at exactly that mark.
+# Both were caps in the runtime's TLS layer being applied to the wrong thing —
+# the inbound one to bytes a fast peer delivered rather than to bytes nobody had
+# consumed, the outbound one to a whole file pushed into the queue at once
+# instead of paced against the socket. Neither shows up below the cap, so the
+# payload here has to be larger than both. That is the only reason this section
+# moves megabytes, and why one file is enough.
+#
+# TLS_MB=0 keeps the cheap checks and skips the transfers. Without openssl the
+# whole section skips: it is what makes the certificate, and gitloom does not
+# ship one.
+TLS_MB="${TLS_MB:-12}"
+if ! command -v openssl >/dev/null 2>&1; then
+    skip 'the TLS transport (openssl not installed)'
+else
+    TLS_PORT=$((PORT+5))
+    TLS_BASE="https://127.0.0.1:$TLS_PORT"
+    LOG_TLS="$WORK/gitloom-tls.log"
+    mkdir -p "$WORK/tls/repos" "$WORK/tls/data" "$WORK/tls/tmp"
+
+    # A config file rather than -subj/-addext: -addext wants openssl 1.1.1, and
+    # MSYS rewrites an argument beginning with a slash into a Windows path, so
+    # "/CN=localhost" arrives as a drive letter and the certificate ends up with
+    # no name anyone can verify.
+    cat > "$WORK/tls/openssl.cnf" <<'CNF'
+[req]
+distinguished_name = dn
+x509_extensions    = v3
+prompt             = no
+[dn]
+CN = localhost
+[v3]
+subjectAltName   = DNS:localhost,IP:127.0.0.1
+basicConstraints = CA:FALSE
+CNF
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+        -config "$WORK/tls/openssl.cnf" \
+        -keyout "$WORK/tls/key.pem" -out "$WORK/tls/cert.pem" >/dev/null 2>&1
+
+    if [ ! -s "$WORK/tls/cert.pem" ]; then
+        skip 'the TLS transport (could not create a test certificate)'
+    else
+        "$XNET" main.lua \
+            LISTEN_PORT="$TLS_PORT" HTTPS=1 \
+            TLS_CERT_FILE="$WORK/tls/cert.pem" TLS_KEY_FILE="$WORK/tls/key.pem" \
+            REPO_ROOT="$WORK/tls/repos" DATA_DIR="$WORK/tls/data" \
+            TMP_DIR="$WORK/tls/tmp" USERS_FILE="$WORK/tls/data/users.json" \
+            ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" \
+            GIT_STREAM="${GIT_STREAM:-auto}" AUTH_ALLOW_REGISTRATION=0 \
+            > "$LOG_TLS" 2>&1 &
+        PID_TLS=$!
+
+        i=0
+        while [ $i -lt 100 ]; do
+            curl -skf "$TLS_BASE/api/v1/version" >/dev/null 2>&1 && break
+            kill -0 "$PID_TLS" 2>/dev/null || break
+            i=$((i+1)); sleep 0.2
+        done
+
+        if ! curl -skf "$TLS_BASE/api/v1/version" >/dev/null 2>&1; then
+            bad 'the TLS instance boots' "$(tail -5 "$LOG_TLS")"
+        else
+            ok 'the TLS instance boots'
+
+            # The scheme in a clone URL comes from whether OUR socket is TLS.
+            # Handing out http:// from an https instance is not cosmetic: git
+            # follows it and re-sends HTTP Basic on every request of every clone
+            # and push, in clear, which is the exposure TLS was turned on for.
+            curl -s -k -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+                -d '{"name":"tls"}' "$TLS_BASE/api/v1/repos" > "$WORK/tls/create.json"
+            grep -q '"clone_url":"https://' "$WORK/tls/create.json" \
+                && ok 'a TLS instance hands out an https clone URL' \
+                || bad 'a TLS instance hands out an https clone URL' "$(cat "$WORK/tls/create.json")"
+
+            # git checks the certificate like any other client, and needs to be
+            # told about this one. On Windows it uses schannel, which ignores
+            # http.sslCAInfo and reads the Windows certificate store instead —
+            # so the backend has to be named, and the path has to be one a
+            # native program can open rather than an MSYS one.
+            TLS_CA="$WORK/tls/cert.pem"
+            GIT_TLS_OPTS=""
+            case "$(uname -s 2>/dev/null)" in
+                MINGW*|MSYS*|CYGWIN*|Windows*)
+                    command -v cygpath >/dev/null 2>&1 && TLS_CA="$(cygpath -m "$TLS_CA")"
+                    GIT_TLS_OPTS="-c http.sslBackend=openssl" ;;
+            esac
+            GIT_TLS_OPTS="$GIT_TLS_OPTS -c http.sslCAInfo=$TLS_CA"
+
+            # The outbound failure this section is here for does not error, it
+            # STALLS — the body stops arriving and the client waits for bytes
+            # nobody is going to send. Under a deadline that is a red case;
+            # without one it is a suite that never finishes, which is worse than
+            # no case at all. Only a guard: 12 MiB over loopback is seconds.
+            TLS_T=""
+            command -v timeout >/dev/null 2>&1 && TLS_T="timeout -s KILL 300"
+
+            if [ "$TLS_MB" -gt 0 ]; then
+                # One incompressible file, larger than both old caps. Split into
+                # several it would still push as one packfile, but the raw fetch
+                # below wants a single body that crosses the outbound cap on its
+                # own.
+                ( cd "$WORK/tls" && git init -q payload && cd payload &&
+                  head -c $((TLS_MB * 1048576)) /dev/urandom > blob.bin &&
+                  git add -A &&
+                  git -c user.email=smoke@test -c user.name=smoke commit -qm tls ) >/dev/null 2>&1
+
+                # shellcheck disable=SC2086
+                ( cd "$WORK/tls/payload" && $TLS_T $GIT $GIT_TLS_OPTS push -q \
+                    "https://admin:$ADMIN_PW@127.0.0.1:$TLS_PORT/admin/tls.git" \
+                    HEAD:refs/heads/main ) 2>"$WORK/tls/epush" \
+                    && ok "push ${TLS_MB} MiB over TLS" \
+                    || bad "push ${TLS_MB} MiB over TLS" "$(tail -2 "$WORK/tls/epush")"
+
+                # shellcheck disable=SC2086
+                if $TLS_T $GIT $GIT_TLS_OPTS clone -q "$TLS_BASE/admin/tls.git" \
+                        "$WORK/tls/clone" 2>"$WORK/tls/eclone"; then
+                    ok "clone ${TLS_MB} MiB over TLS"
+                    # Byte-identical, not merely present: the failure this case
+                    # exists for delivered a prefix of the body and then stopped.
+                    cmp -s "$WORK/tls/payload/blob.bin" "$WORK/tls/clone/blob.bin" \
+                        && ok 'the TLS clone is byte-identical' \
+                        || bad 'the TLS clone is byte-identical' 'contents differ'
+                else
+                    bad "clone ${TLS_MB} MiB over TLS" "$(tail -2 "$WORK/tls/eclone")"
+                    skip 'the TLS clone is byte-identical'
+                fi
+
+                # A file response and a deferred close on one connection. Closing
+                # when the queue looks empty rather than when the file has
+                # finished drops whatever has not reached the socket, which at
+                # this size is most of the body.
+                code=$(curl -s -k -u "admin:$ADMIN_PW" -H 'Connection: close' --http1.1 \
+                    -o "$WORK/tls/raw.bin" -w '%{http_code}' \
+                    "$TLS_BASE/api/v1/repos/admin/tls/raw/main/blob.bin")
+                check 'a raw file over TLS answers 200' "$code" '200'
+                cmp -s "$WORK/tls/payload/blob.bin" "$WORK/tls/raw.bin" \
+                    && ok 'Connection: close over TLS delivers the whole body' \
+                    || bad 'Connection: close over TLS delivers the whole body' \
+                           "got $(wc -c < "$WORK/tls/raw.bin" 2>/dev/null) bytes"
+            else
+                skip 'the TLS transfers (TLS_MB=0)'
+            fi
+        fi
+
+        kill "$PID_TLS" 2>/dev/null
+        wait "$PID_TLS" 2>/dev/null
+        PID_TLS=''
+    fi
+fi
 
 # == Delete ==================================================================
 code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X DELETE \
