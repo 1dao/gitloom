@@ -256,11 +256,24 @@ if command -v node >/dev/null 2>&1; then
     else
         bad 'browser parsers pass their own tests' "$(head -c 600 "$WORK/webjs.out")"
     fi
+    if node "$(dirname "$0")/webauth.js" > "$WORK/webauth.out" 2>&1; then
+        ok 'browser registration workflow passes its own tests'
+    else
+        bad 'browser registration workflow passes its own tests' "$(head -c 600 "$WORK/webauth.out")"
+    fi
 else
     skip 'browser parsers pass their own tests (node not installed)'
+    skip 'browser registration workflow (node not installed)'
 fi
 curl -s "$BASE/app.js" | grep -q 'state.repo.owner === state.username' \
     && ok 'browser only offers owner deletion' || bad 'browser only offers owner deletion' 'owner guard missing'
+curl -s "$BASE/app.js" | grep -q '/api/v1/user/register' \
+    && ok 'browser offers public registration' || bad 'browser offers public registration' 'registration endpoint missing'
+if grep -q 'id="auth-register"' "$WORK/web.index" && ! grep -q 'id="register-toggle"' "$WORK/web.index"; then
+    ok 'browser reaches registration from under the login form'
+else
+    bad 'browser reaches registration from under the login form' 'the entry is missing, or the top bar grew a second account button'
+fi
 curl -s "$BASE/app.js" | grep -q 'requestToken && state.token === requestToken' \
     && ok 'browser guards stale authentication responses' || bad 'browser guards stale authentication responses' 'request credential guard missing'
 if grep -q 'id="auth-close"[^>]*type="button"' "$WORK/web.index" &&

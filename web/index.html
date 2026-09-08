@@ -16,8 +16,7 @@
       </a>
       <nav class="topbar-crumbs" id="topbar-crumbs" aria-label="当前仓库" hidden></nav>
       <div class="topbar-actions">
-        <span class="connection-dot" id="connection-dot" aria-hidden="true"></span>
-        <span class="connection-label" id="connection-label">正在连接</span>
+        <button class="button button-quiet theme-toggle" id="theme-toggle" type="button" aria-label="切换主题" title="切换主题">☀︎</button>
         <button class="button button-quiet" id="manage-users" type="button" hidden>账号</button>
         <button class="button button-quiet" id="manage-tokens" type="button" hidden>令牌</button>
         <button class="button button-quiet" id="auth-toggle" type="button">登录</button>
@@ -275,7 +274,44 @@
         <button class="button button-quiet" data-dialog-close="auth-dialog" type="button">取消</button>
         <button class="button button-primary" id="auth-submit" value="default" type="submit">登录</button>
       </div>
+      <p class="auth-switch">还没有账号？<button id="auth-register" type="button">注册账号</button></p>
     </form>
+  </dialog>
+
+  <dialog id="register-dialog" class="auth-dialog" aria-labelledby="register-heading">
+    <div class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">CREATE ACCOUNT</p>
+          <h2 id="register-heading">注册 Gitloom</h2>
+        </div>
+        <button class="icon-button" data-dialog-close="register-dialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <form id="register-form">
+        <p class="dialog-copy">创建账号，开始托管代码与协作。</p>
+        <label>用户名<input id="register-user" name="username" type="text" autocomplete="username" required></label>
+        <label>邮箱（可选）<input id="register-email" name="email" type="email" autocomplete="email" maxlength="254"></label>
+        <label>密码<input id="register-password" name="password" type="password" autocomplete="new-password" required></label>
+        <label>确认密码<input id="register-confirm" type="password" autocomplete="new-password" required></label>
+        <p id="register-message" class="form-message" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="button button-quiet" data-dialog-close="register-dialog" type="button">取消</button>
+          <button class="button button-primary" id="register-submit" type="submit">创建账号</button>
+        </div>
+        <p class="auth-switch">已有账号？<button id="register-login" type="button">去登录</button></p>
+      </form>
+      <section id="register-success" hidden aria-live="polite">
+        <p class="dialog-copy">账号 <strong id="register-created-name"></strong> 已创建成功。</p>
+        <div class="recovery-note">
+          <p class="recovery-copy">请保存恢复码。忘记密码时需要用它恢复账号，关闭后无法再次查看。</p>
+          <code class="recovery-code" id="register-recovery-code"></code>
+          <button class="button button-quiet" id="register-copy" type="button">复制恢复码</button>
+        </div>
+        <div class="dialog-actions">
+          <button class="button button-primary" id="register-done" type="button">已保存，去登录</button>
+        </div>
+      </section>
+    </div>
   </dialog>
 
   <dialog id="create-dialog" class="auth-dialog">

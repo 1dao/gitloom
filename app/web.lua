@@ -112,7 +112,12 @@ function g_exports.web_install()
 
     for _, file in ipairs(FILES) do
         http_get(file.route, function(req)
-            return serve(STATIC_ROOT, ASSET_VERSION, file, req.query)
+            -- Recompute the page digest on navigation. This keeps a long-lived
+            -- development server from handing a browser an immutable URL for
+            -- an older app.js after the static assets were edited; stamped
+            -- assets still remain immutable once the new page is loaded.
+            local version = file.name == INDEX and asset_version(STATIC_ROOT) or ASSET_VERSION
+            return serve(STATIC_ROOT, version, file, req.query)
         end)
     end
 

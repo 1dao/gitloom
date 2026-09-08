@@ -101,6 +101,11 @@ disabled registration `403`. Each source IP gets `AUTH_REGISTER_MAX` attempts
 (5 by default) per `AUTH_REGISTER_WINDOW_SEC` (3600); excess attempts return
 `429` with `Retry-After`. Successful registrations also count toward this limit.
 
+In the browser, the top bar carries **登录** alone; **注册账号** sits under the
+login button in the dialog it opens. After registration, save the recovery code
+shown on screen, then continue to login. If registration is disabled, the form
+directs visitors to the administrator; the browser does not enable it.
+
 ## If you forget the password
 
 The first boot prints a recovery code for the administrator account and says to

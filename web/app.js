@@ -62,6 +62,27 @@
   var $ = function (id) { return document.getElementById(id); };
   var $$ = function (selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); };
 
+  // Keep the preference local to this browser and apply it before the first
+  // network render so the page does not flash between palettes.
+  function applyTheme(theme) {
+    var light = theme === 'light';
+    document.documentElement.dataset.theme = light ? 'light' : 'dark';
+    var toggle = $('theme-toggle');
+    if (toggle) {
+      toggle.textContent = light ? '☾' : '☀︎';
+      toggle.title = light ? '切换到深色主题' : '切换到浅色主题';
+      toggle.setAttribute('aria-label', toggle.title);
+    }
+  }
+  var initialTheme = 'dark';
+  try { initialTheme = localStorage.getItem('gitloom-theme') || 'dark'; } catch (_) {}
+  applyTheme(initialTheme);
+  if ($('theme-toggle')) $('theme-toggle').addEventListener('click', function () {
+    var next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    try { localStorage.setItem('gitloom-theme', next); } catch (_) {}
+    applyTheme(next);
+  });
+
   function beginView() {
     seq.view += 1;
     seq.file += 1;   // a panel opened under the old view must not land either
@@ -136,13 +157,6 @@
       if (detail.indexOf(DETAIL_TEXT[i][0]) !== -1) return DETAIL_TEXT[i][1];
     }
     return (error && error.message) || '操作失败';
-  }
-
-  function setConnection(kind, label) {
-    var dot = $('connection-dot');
-    var text = $('connection-label');
-    dot.className = 'connection-dot' + (kind ? ' ' + kind : '');
-    text.textContent = label;
   }
 
   function showToast(message) {
@@ -439,12 +453,10 @@
 
   function loadRepos() {
     var ticket = (seq.repos += 1);
-    setConnection('', '正在读取');
     setLoading($('repo-grid'), '正在读取仓库…');
     return json('/api/v1/repos').then(function (data) {
       if (ticket !== seq.repos) return state.repos;
       state.repos = Array.isArray(data.repos) ? data.repos : [];
-      setConnection('ok', state.username ? '已登录' : '在线');
       if (state.repo) {
         var current = state.repos.find(function (repo) { return repo.full_name === state.repo.full_name; });
         if (current) {
@@ -461,13 +473,10 @@
       return state.repos;
     }).catch(function (error) {
       if (ticket !== seq.repos) throw error;
-      if (error.status === 401) {
-        setConnection('', '需要登录');
-        setError($('repo-grid'), '登录后查看仓库');
-      } else {
-        setConnection('error', '连接失败');
-        setError($('repo-grid'), error.message);
-      }
+      // The grid is where the reader is already looking, and it carries the
+      // actual reason -- which is why there is no separate status light saying
+      // the same thing in fewer words.
+      setError($('repo-grid'), error.status === 401 ? '登录后查看仓库' : error.message);
       state.repos = [];
       $('repo-count').textContent = '0';
       $('owned-count').textContent = '0';
@@ -2290,6 +2299,119 @@
     showToast('已退出登录');
   }
 
+  // Public registration returns a recovery code once. Keep the dialog open
+  // while the request is pending so its response cannot disappear unseen.
+  var registering = false;
+  var registrationLoggedIn = false;
+
+  function openRegister() {
+    if (state.username || !$('register-dialog')) return;
+    if ($('auth-dialog').open) $('auth-dialog').close();
+    $('register-form').reset();
+    $('register-message').textContent = '';
+    registrationLoggedIn = false;
+    $('register-form').hidden = false;
+    $('register-success').hidden = true;
+    $('register-recovery-code').textContent = '';
+    $('register-dialog').showModal();
+    $('register-user').focus();
+  }
+
+  function registerLogin() {
+    if (registrationLoggedIn) {
+      $('register-dialog').close();
+      return;
+    }
+    var username = $('register-success').hidden
+      ? $('register-user').value.trim() : $('register-created-name').textContent;
+    $('register-dialog').close();
+    openAuth();
+    $('auth-user').value = username;
+    if (username) $('auth-password').focus();
+  }
+
+  // The top bar carries one account control, so registration is reached from
+  // under the login form rather than from a second button beside it.
+  if ($('auth-register')) $('auth-register').addEventListener('click', openRegister);
+  if ($('register-form')) {
+    $('register-login').addEventListener('click', registerLogin);
+    $('register-done').addEventListener('click', registerLogin);
+    $('register-copy').addEventListener('click', function () {
+      copyText($('register-recovery-code').textContent, '已复制恢复码');
+    });
+    $('register-dialog').addEventListener('cancel', function (event) {
+      if (registering) event.preventDefault();
+    });
+    $('register-dialog').addEventListener('close', function () {
+      $('register-form').reset();
+      $('register-recovery-code').textContent = '';
+      $('register-created-name').textContent = '';
+    });
+    $('register-form').addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (registering) return;
+      var username = $('register-user').value.trim();
+      var password = $('register-password').value;
+      if (!username || !password) {
+        $('register-message').textContent = '请输入用户名和密码';
+        return;
+      }
+      if (password !== $('register-confirm').value) {
+        $('register-message').textContent = '两次输入的密码不一致';
+        $('register-confirm').focus();
+        return;
+      }
+      var payload = { username: username, password: password };
+      var email = $('register-email').value.trim();
+      if (email) payload.email = email;
+      registering = true;
+      $('register-message').textContent = '';
+      $$('#register-dialog button').forEach(function (button) { button.disabled = true; });
+      $('register-submit').textContent = '正在创建…';
+      // This endpoint is anonymous, even if another request updates the
+      // session while registration is in progress.
+      fetch('/api/v1/user/register', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).then(function (response) {
+        if (!response.ok) return failure(response);
+        return response.json();
+      }).then(function (created) {
+        $('register-form').reset();
+        $('register-created-name').textContent = created.username || username;
+        $('register-recovery-code').textContent = created.recovery_code || '未能生成恢复码，请联系管理员。';
+        $('register-copy').hidden = !created.recovery_code;
+        $('register-form').hidden = true;
+        $('register-success').hidden = false;
+        // The password is still only in this function's memory. Exchange it
+        // immediately for the normal short-lived token so registration does
+        // not force a second login step.
+        return login(created.username || username, password).then(function () {
+          registrationLoggedIn = true;
+          updateAuthButton();
+          loadSelf();
+          loadRepos().catch(function () {});
+          showToast('注册成功，已自动登录');
+          $('register-done').textContent = '已保存，进入 Gitloom';
+        }).catch(function () {
+          registrationLoggedIn = false;
+          $('register-message').textContent = '账号已创建，请点击下方按钮登录';
+          $('register-done').textContent = '去登录';
+        });
+      }).catch(function (error) {
+        $('register-message').textContent = error.status === 403
+          ? '本站暂未开放注册，请联系管理员创建账号。'
+          : error.status === 429 ? '注册尝试次数过多，请稍后再试。' : userError(error);
+      }).finally(function () {
+        registering = false;
+        $$('#register-dialog button').forEach(function (button) { button.disabled = false; });
+        $('register-submit').textContent = '创建账号';
+        if (!$('register-success').hidden) $('register-done').focus();
+      });
+    });
+  }
+
   $('repo-search').addEventListener('input', renderRepos);
   $('refresh-repos').addEventListener('click', function () { loadRepos().catch(function () {}); });
   $$('[data-dialog-close]').forEach(function (button) {
@@ -2807,6 +2929,10 @@
 
   loadCredentials();
   updateAuthButton();
+  // The browser starts in an authenticated workflow: visitors can dismiss the
+  // dialog to browse public repositories, while the login link remains in the
+  // top bar for anyone who wants to come back to it.
+  if (!state.username) openAuth();
   loadSelf();
   // The address bar can only be applied once the repository list is in: it names
   // a repository by owner/name, and the record behind it is what selectRepo
