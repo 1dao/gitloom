@@ -325,12 +325,12 @@ h1, h2, h3, p { margin-top: 0; }
 .code-layout.file .file-panel > .file-image { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; }
 .code-sidebar {
   position: sticky; top: 84px;
-  max-height: calc(100vh - 108px);
+  height: calc(100vh - 104px);
   display: flex; flex-direction: column; overflow: hidden;
   border: 1px solid var(--line); border-radius: 12px;
   background: rgba(17, 26, 36, .86); box-shadow: var(--shadow);
 }
-.side-tree { overflow: auto; padding: 8px 0; }
+.side-tree { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 8px 0; }
 .side-row {
   appearance: none; display: flex; align-items: center; gap: 6px; width: 100%;
   border: 0; background: transparent; color: var(--text-soft); cursor: pointer;
