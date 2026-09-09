@@ -330,7 +330,11 @@ function g_exports.browse_last_commits(dir, oid, path)
     -- %x01 and %x02 rather than the literal control bytes the other formats in
     -- this file use: git substitutes these itself, so neither byte has to
     -- survive the trip out through a command line.
-    local fmt = '%x02%H%x01%h%x01%cI%x01%an%x01%s'
+    -- %b LAST, and for a reason: it is the only field that may contain
+    -- newlines, and everything after the header is file names. A reader hovering
+    -- the column wants the whole message -- the subject says what changed, the
+    -- body says why -- so the walk that is already running carries it.
+    local fmt = '%x02%H%x01%h%x01%cI%x01%an%x01%s%x01%b'
     local args = { 'log', '--format=' .. fmt, '--name-only', '-c', '-z',
                    '--no-renames', '--max-count=' .. MAX_LASTCOMMIT_SCAN,
                    '--end-of-options', oid }
@@ -358,9 +362,16 @@ function g_exports.browse_last_commits(dir, oid, path)
             f[#f + 1] = field
         end
         if f[1] and f[1]:match('^%x+$') then
+            -- The tail is rejoined rather than taken as one field: a commit
+            -- message may contain any byte, FIELD included, and the body is the
+            -- one place where a stray one would silently cut off what a reader
+            -- is being shown.
+            local body = f[6] or ''
+            for i = 7, #f do body = body .. FIELD .. f[i] end
             local commit = {
                 oid = f[1], short = f[2], date = f[3],
                 author = f[4] or '', subject = f[5] or '',
+                body = util_str_trim(body),
             }
             if not latest then latest = commit end
             -- The LF git puts between the header and the first name is not part

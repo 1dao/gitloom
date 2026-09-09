@@ -407,7 +407,7 @@ fi
 # Incremental fetch: a second commit must arrive without a full re-clone.
 (
     cd "$WORK/w1" && printf 'second line\n' >> README.md && git add -A &&
-    git -c user.email=smoke@test -c user.name=smoke commit -qm 'second' &&
+    git -c user.email=smoke@test -c user.name=smoke commit -qm 'second' -m 'why the second commit happened' &&
     $GIT push -q "$AUTH" HEAD:refs/heads/main
 ) >/dev/null 2>&1
 ( cd "$WORK/w2" && $GIT pull -q "$ANON" main >/dev/null 2>&1 &&
@@ -792,6 +792,12 @@ curl -s "$L" | grep -q '"name":"src"' \
 curl -s "$L" | grep -q '"latest"' \
     && ok 'the directory reports its own newest commit' \
     || bad 'the directory reports its own newest commit' "$(curl -s "$L")"
+# The column shows the subject and the row's tooltip shows the whole message,
+# so the walk has to carry the body -- the subject says what changed, and the
+# reason it changed is in the part that did not fit.
+curl -s "$L" | grep -q '"body":"why the second commit happened"' \
+    && ok 'the last-commit walk carries the message body' \
+    || bad 'the last-commit walk carries the message body' "$(curl -s "$L")"
 # Scoped to the subdirectory, and to its direct children only.
 curl -s "$L/src" | grep -q '"name":"app.lua"' \
     && ok 'last commits scope to a subdirectory' \

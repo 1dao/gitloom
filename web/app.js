@@ -1522,12 +1522,17 @@
     list.appendChild(row);
   }
 
+  // A row asks two questions -- what is this, and what last changed it -- and
+  // they lead two different places, so the row is no longer one button over the
+  // lot. The name opens the file or the directory; the commit message opens the
+  // commit. The age stays text: it is the same link as the message, and a second
+  // control onto one target is noise for anything reading the row aloud.
   function renderTreeEntry(entry, list) {
-    var row = document.createElement('button');
-    row.type = 'button';
+    var row = document.createElement('div');
     row.className = 'tree-row entry ' + (entry.type === 'tree' ? 'directory' : 'file');
 
-    var cell = document.createElement('span');
+    var cell = document.createElement('button');
+    cell.type = 'button';
     cell.className = 'tree-entry-name';
     var icon = document.createElement('span');
     icon.className = 'tree-icon';
@@ -1543,14 +1548,25 @@
     size.className = 'tree-size';
     size.textContent = entry.type === 'blob' ? formatBytes(entry.size) : '';
     cell.appendChild(size);
+    cell.addEventListener('click', function () {
+      if (entry.type === 'tree') {
+        openDirectory(entry.path);
+      } else {
+        loadFile(entry.path);
+        routeWrite();
+      }
+    });
     row.appendChild(cell);
 
     // Both columns start empty and are filled by loadLastCommits. They stay
     // empty if it fails, and also if it ran but did not reach far enough back to
     // find this entry -- see the cap in browse_last_commits. Blank is the honest
-    // answer for both, and neither is worth failing a listing over.
-    var message = document.createElement('span');
+    // answer for both, and neither is worth failing a listing over. Disabled
+    // until then, because there is no commit to open yet.
+    var message = document.createElement('button');
+    message.type = 'button';
     message.className = 'tree-entry-commit pending';
+    message.disabled = true;
     message.textContent = '…';
     row.appendChild(message);
     var age = document.createElement('span');
@@ -1559,15 +1575,6 @@
     // A directory can hold a file called `__proto__`, so this map has no
     // prototype to collide with.
     treeCells[entry.name] = { message: message, age: age };
-
-    row.addEventListener('click', function () {
-      if (entry.type === 'tree') {
-        openDirectory(entry.path);
-      } else {
-        loadFile(entry.path);
-        routeWrite();
-      }
-    });
     list.appendChild(row);
   }
 
@@ -1579,13 +1586,45 @@
       if (cells.message.className.indexOf('pending') === -1) return;
       cells.message.className = 'tree-entry-commit';
       cells.message.textContent = '';
+      cells.message.disabled = true;
       cells.age.className = 'tree-entry-age';
     });
   }
 
+  // The column has room for a subject and a commit message is not a subject:
+  // the first line says what changed and the rest says why, which is the half
+  // somebody hovering it is usually after.
+  function commitTooltip(commit) {
+    var subject = commit.subject || '';
+    var body = (commit.body || '').replace(/\s+$/, '');
+    return body ? (subject + '\n\n' + body) : subject;
+  }
+
+  // Where the commit column leads: the log, with this commit's diff open under
+  // it. browse_last_commits does not return the shape the log's own rows have
+  // -- an author is a name here and an object there -- so it is converted at
+  // the one call site rather than teaching loadDiff a second shape.
+  function openCommit(commit) {
+    if (!commit || !commit.oid) return;
+    showView('commits');
+    routeWrite();
+    loadDiff({
+      oid: commit.oid,
+      short: commit.short,
+      subject: commit.subject,
+      author: { name: commit.author, date: commit.date },
+    });
+  }
+
+  // The strip's own commit, so the listener wired once at the bottom of this
+  // file has something to open. Re-registering it on every listing would stack
+  // a handler per directory visited.
+  var latestCommit = null;
+
   function renderTreeLatest(commit) {
     var strip = $('tree-latest');
     if (!strip) return;
+    latestCommit = commit || null;
     if (!commit) {
       strip.hidden = true;
       return;
@@ -1593,7 +1632,7 @@
     $('tree-latest-author').textContent = commit.author || '';
     var subject = $('tree-latest-subject');
     subject.textContent = commit.subject || '';
-    subject.title = commit.subject || '';
+    subject.title = commitTooltip(commit);
     var age = $('tree-latest-age');
     age.textContent = relativeTime(commit.date);
     age.title = formatDate(commit.date);
@@ -1619,7 +1658,11 @@
         if (!target) return;
         target.message.className = 'tree-entry-commit';
         target.message.textContent = item.commit.subject || '';
-        target.message.title = item.commit.subject || '';
+        target.message.title = commitTooltip(item.commit);
+        target.message.disabled = !item.commit.oid;
+        target.message.addEventListener('click', (function (commit) {
+          return function () { openCommit(commit); };
+        }(item.commit)));
         target.age.className = 'tree-entry-age';
         target.age.textContent = relativeTime(item.commit.date);
         target.age.title = formatDate(item.commit.date);
@@ -3153,6 +3196,7 @@
     state.fileRaw = !state.fileRaw;
     showFileText(state.fileText, state.file);
   });
+  on('tree-latest-subject', 'click', function () { openCommit(latestCommit); });
   $('close-diff').addEventListener('click', function () {
     seq.diff += 1;
     $('diff-panel').hidden = true;

@@ -289,11 +289,24 @@ h1, h2, h3, p { margin-top: 0; }
    Proportional columns rather than a grid spanning the whole card: each row is
    its own grid, and `2fr 3fr` is relative to the same card width in every one of
    them, so they line up without the rows having to give up being buttons. */
+/* The row is a div now and the two cells inside it are the buttons, so the
+   reset .tree-row was carrying moves onto them. Colour and size stay with the
+   rules below, which is why this comes first. */
+.tree-entry-name, .tree-entry-commit, .tree-latest-subject {
+  appearance: none; border: 0; padding: 0; background: transparent;
+  color: inherit; text-align: left; cursor: pointer;
+}
+.tree-row.entry { cursor: default; }
 .tree-row.entry { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) 6.5rem; gap: 14px; text-align: left; }
 .tree-entry-name { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .tree-entry-commit { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
 .tree-entry-age { overflow: hidden; color: var(--dim); font-family: var(--mono); font-size: 12px; text-align: right; white-space: nowrap; }
 .tree-entry-commit.pending, .tree-entry-age.pending { color: var(--line); }
+/* The message leads somewhere the name does not, so it has to look like it
+   does. Nothing to open until the history walk lands, and nothing to promise
+   until then either. */
+.tree-entry-commit:disabled { cursor: default; }
+.tree-entry-commit:not(:disabled):hover, .tree-latest-subject:hover { color: var(--text); text-decoration: underline; }
 .tree-row.parent .tree-name { color: var(--muted); }
 
 .tree-latest { display: flex; align-items: baseline; gap: 10px; padding: 11px 16px; border-bottom: 1px solid var(--line-soft); background: var(--panel-2); font-size: 13px; }
