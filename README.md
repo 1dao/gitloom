@@ -29,6 +29,9 @@ and delete repositories.
 A repository shows its README rendered, and source files are syntax-coloured;
 both parsers are ours rather than vendored, for the reason given at the top of
 `web/markdown.js`.
+Stepping into a directory or opening a file splits the repository page in two —
+the tree on the left, what you clicked on the right — so reading across a
+project does not mean walking back out through the listing each time.
 Where you are is in the address bar, so a file, a directory, a tag, the commit
 log, a comparison and an issue can each be bookmarked, shared, reloaded and gone
 Back from.

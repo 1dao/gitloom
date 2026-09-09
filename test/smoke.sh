@@ -192,6 +192,19 @@ curl -s "$BASE/app.js" | grep -q "state.file ? '/blob/' : '/tree/'" \
 curl -s "$BASE/app.js" | grep -q 'if (!restoring) routeWrite();' \
     && ok 'restoring does not overwrite the link being restored' || bad 'restoring does not overwrite the link being restored' 'ordering guard missing'
 
+# Opening a file used to leave the listing where it was and stack the file under
+# it, so reading one meant scrolling past the directory it came from and there
+# was no way across to a neighbour. The code view splits once you step off the
+# root: the tree on the left, whatever was clicked on the right. Markup in one
+# file and behaviour in the other, so the page is only right when both shipped.
+grep -q 'id="code-sidebar"' "$WORK/web.index" && grep -q 'id="side-tree"' "$WORK/web.index" \
+    && ok 'browser ships the file tree panel' || bad 'browser ships the file tree panel' 'panel missing'
+# Lazily, one directory at a time: every listing forks an ls-tree on the server,
+# so walking a repository up front would be a process per directory to draw rows
+# nobody asked to see.
+curl -s "$BASE/app.js" | grep -q 'function sideLoad' \
+    && ok 'the file tree loads a directory at a time' || bad 'the file tree loads a directory at a time' 'lazy load missing'
+
 # A repository page that does not show its README is most of a git front end
 # missing. Both parsers are served as their own routes -- see web.lua for why --
 # so the page is only whole if all three arrive.

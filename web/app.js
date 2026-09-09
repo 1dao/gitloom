@@ -912,44 +912,30 @@
     if (block) block.hidden = !input.value;
   }
 
+  // Owner and name are in the top bar and nowhere else: a page heading that
+  // repeated them, with the repository's three actions hanging off it, was a
+  // whole band of chrome saying what the breadcrumb already said. What is left
+  // is the panel that actually describes the repository.
   function renderRepoMeta(repo) {
-    var title = $('repo-title');
-    title.textContent = '';
-    var owner = document.createElement('span');
-    owner.className = 'repo-owner';
-    owner.textContent = repo.owner;
-    var separator = document.createElement('span');
-    separator.className = 'repo-sep';
-    separator.textContent = ' / ';
-    var name = document.createElement('span');
-    name.textContent = repo.name;
-    title.appendChild(owner);
-    title.appendChild(separator);
-    title.appendChild(name);
-
     $('repo-description').textContent = repo.description || '暂无描述';
     renderTopbarCrumbs(repo);
     renderCloneUrl(repo);
-    var label = repo.private ? '私有' : '公开';
-    var visibility = $('repo-visibility');
-    visibility.textContent = label;
-    visibility.className = 'visibility-pill' + (repo.private ? ' private' : '');
     var note = $('repo-visibility-note');
-    if (note) note.textContent = label;
+    if (note) note.textContent = repo.private ? '私有' : '公开';
     $('repo-default-branch').textContent = repo.default_branch || 'main';
   }
 
   function setFirstPush(repo, empty) {
     var panel = $('first-push');
-    var browser = $('tree-browser');
     panel.hidden = !empty;
-    browser.hidden = !!empty;
     if (empty && repo) {
       var branch = repo.default_branch || state.branch || 'main';
       $('first-push-commands').textContent =
         'git remote add origin ' + (repo.clone_url || '') + '\n' +
         'git push -u origin ' + branch;
     }
+    // Whether the listing belongs on screen is part of the same decision.
+    syncCodeLayout();
   }
 
   function resetCommits(message) {
@@ -1040,7 +1026,6 @@
     $('overview').hidden = true;
     $('repo-view').hidden = false;
     renderRepoMeta(repo);
-    setFirstPush(repo, false);
     syncWriteActions();
     closeSearch();       // results belong to the repository being left
     hideFile();          // clears state.file; the file itself is fetched below
@@ -1051,6 +1036,7 @@
       state.file = target.file;
       state.path = target.file.replace(/\/?[^\/]*$/, '');
     }
+    setFirstPush(repo, false);
     $('diff-panel').hidden = true;
     var comparePanel = $('compare-diff-panel');
     if (comparePanel) comparePanel.hidden = true;
@@ -1226,9 +1212,237 @@
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // The file tree beside the listing
+  //
+  // The repository root is a page in its own right -- a listing with the README
+  // under it -- so it keeps the plain single column. Stepping into a directory
+  // or opening a file is where somebody starts moving BETWEEN files, and that is
+  // where the view splits: the tree on the left, whatever was clicked on the
+  // right.
+  //
+  // Only directories somebody opened are ever fetched. A repository is
+  // arbitrarily deep and every listing forks an `ls-tree` on the server, so
+  // walking the whole of one up front would cost a process per directory to draw
+  // rows nobody asked to see.
+  // ---------------------------------------------------------------------------
+
+  var sideOpen = Object.create(null);   // path -> true, the directories showing their contents
+  // path -> { entries } once its listing is in, { pending: true } while it is on
+  // the way. A directory can hold something called `__proto__`, so neither map
+  // has a prototype for it to collide with.
+  var sideNodes = Object.create(null);
+  // Every path in those two is relative to one repository at one ref, so both
+  // are dropped wholesale when either changes rather than invalidated entry by
+  // entry. The generation is what a reply still in flight is checked against.
+  var sideKey = '';
+  var sideGen = 0;
+  var sideHidden = false;               // the toolbar's collapse toggle
+
+  function sideKeep() {
+    var key = state.repo ? (state.repo.full_name + '\n' + state.branch) : '';
+    if (key === sideKey) return;
+    sideKey = key;
+    sideGen += 1;
+    sideOpen = Object.create(null);
+    sideNodes = Object.create(null);
+  }
+
+  // Marked before the request goes out, so the panel and the listing never ask
+  // the server for the same directory twice -- see the call in loadTree.
+  function sideMark(path) {
+    sideKeep();
+    if (!sideNodes[path]) sideNodes[path] = { pending: true };
+  }
+
+  function sideStore(path, entries, gen) {
+    if (gen !== sideGen) return;
+    sideNodes[path] = { entries: entries };
+    sideRender();
+  }
+
+  // A failure leaves NO entry rather than an empty one: an empty listing is a
+  // claim about the repository, and the next navigation should try again.
+  function sideFail(path, gen) {
+    if (gen !== sideGen) return;
+    delete sideNodes[path];
+    sideRender();
+  }
+
+  function sideLoad(path) {
+    sideKeep();
+    if (sideNodes[path]) return;        // in hand, or already on the way
+    var gen = sideGen;
+    sideNodes[path] = { pending: true };
+    var suffix = '/tree/' + encodeRef(state.branch) + (path ? '/' + encodePath(path) : '');
+    json(repoPath(suffix)).then(function (data) {
+      sideStore(path, Array.isArray(data.entries) ? data.entries : [], gen);
+    }).catch(function () {
+      sideFail(path, gen);
+    });
+  }
+
+  function sideToggle(path) {
+    if (sideOpen[path]) {
+      delete sideOpen[path];
+    } else {
+      sideOpen[path] = true;
+      sideLoad(path);
+    }
+    sideRender();
+  }
+
+  function sideNote(text, depth) {
+    var note = document.createElement('div');
+    note.className = 'side-note';
+    note.style.paddingLeft = (10 + depth * 13) + 'px';
+    note.textContent = text;
+    return note;
+  }
+
+  function sideRow(entry, depth) {
+    var dir = entry.type === 'tree';
+    var open = dir && !!sideOpen[entry.path];
+    var here = dir ? (!state.file && state.path === entry.path) : (state.file === entry.path);
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'side-row ' + (dir ? 'dir' : 'file') +
+      (open ? ' open' : '') + (here ? ' current' : '');
+    row.style.paddingLeft = (10 + depth * 13) + 'px';
+    row.title = entry.name;
+
+    var chevron = document.createElement('span');
+    chevron.className = 'side-chevron';
+    if (dir) {
+      chevron.textContent = '›';
+      // The chevron opens and closes, the name navigates: looking into a
+      // directory should not cost somebody the file they are reading.
+      chevron.addEventListener('click', function (event) {
+        event.stopPropagation();
+        sideToggle(entry.path);
+      });
+    }
+    row.appendChild(chevron);
+
+    var icon = document.createElement('span');
+    icon.className = 'side-icon';
+    icon.textContent = dir ? '▱' : '·';
+    row.appendChild(icon);
+
+    // textContent, like everywhere else a repository's own names are drawn.
+    var name = document.createElement('span');
+    name.className = 'side-name';
+    name.textContent = entry.name;
+    row.appendChild(name);
+
+    row.addEventListener('click', function () {
+      if (dir) {
+        sideOpen[entry.path] = true;
+        sideLoad(entry.path);
+        openDirectory(entry.path);
+      } else {
+        loadFile(entry.path);
+        routeWrite();
+      }
+    });
+    return row;
+  }
+
+  // Flat rows carrying their depth as padding rather than nested lists: the
+  // panel is rebuilt from the cache whenever anything lands, and one walk of the
+  // open directories is the whole of it.
+  function sideBranch(host, path, depth) {
+    var node = sideNodes[path];
+    if (!node || !node.entries) {
+      if (node) host.appendChild(sideNote('读取中…', depth));
+      return;
+    }
+    if (!node.entries.length) {
+      host.appendChild(sideNote('空目录', depth));
+      return;
+    }
+    node.entries.forEach(function (entry) {
+      host.appendChild(sideRow(entry, depth));
+      if (entry.type === 'tree' && sideOpen[entry.path]) sideBranch(host, entry.path, depth + 1);
+    });
+  }
+
+  function sideRender() {
+    var host = $('side-tree');
+    if (!host) return;
+    host.textContent = '';
+    sideBranch(host, '', 0);
+    // `nearest` so a row already in view moves nothing: this runs again for
+    // every listing that lands, and scrolling on each one would be a panel that
+    // will not sit still.
+    var current = host.querySelector('.side-row.current');
+    if (current) current.scrollIntoView({ block: 'nearest' });
+  }
+
+  // Open the tree at wherever the reader is standing and ask for what that
+  // needs. A file is standing in its own directory.
+  function sideSync() {
+    if (!state.repo) return;
+    sideKeep();
+    var here = state.file ? state.file.replace(/\/?[^\/]*$/, '') : (state.path || '');
+    var path = '';
+    sideOpen[''] = true;
+    sideLoad('');
+    (here ? here.split('/') : []).forEach(function (name) {
+      path = path ? path + '/' + name : name;
+      sideOpen[path] = true;
+      sideLoad(path);
+    });
+    sideRender();
+  }
+
+  // Which shape the code view is in, decided in one place because the tree, the
+  // listing and the About panel all hang off the same two facts: where we are,
+  // and whether a file is open.
+  function syncCodeLayout() {
+    var code = state.view === 'code';
+    var empty = !$('first-push').hidden;         // a repository with no commits
+    var split = code && !!state.repo && !empty && !!(state.path || state.file);
+
+    var layout = $('code-layout');
+    if (layout) {
+      // The class is what draws the two columns, so a collapsed tree has to
+      // drop it: a grid still holding a 268px first column puts the content in
+      // it and the file comes out the width of the panel that is not there.
+      layout.classList.toggle('split', split && !sideHidden);
+      layout.classList.toggle('file', split && !!state.file);
+    }
+    var aside = $('code-sidebar');
+    if (aside) aside.hidden = !split || sideHidden;
+    var toggle = $('side-toggle');
+    if (toggle) {
+      toggle.hidden = !split;
+      toggle.classList.toggle('off', sideHidden);
+      var label = sideHidden ? '展开文件树' : '收起文件树';
+      toggle.title = label;
+      toggle.setAttribute('aria-label', label);
+    }
+    // A file REPLACES the listing rather than sitting under it: with the tree on
+    // the left nothing is lost by taking it away, and two long scrolling panels
+    // stacked is what made a file hard to read.
+    var browser = $('tree-browser');
+    if (browser) browser.hidden = empty || (split && !!state.file);
+    // About and Clone describe the repository, not the file being read -- on a
+    // split screen they are a third column nobody asked for. The grid has to
+    // give the column back, not just empty it, or the rest stays squeezed.
+    var side = $('repo-side');
+    if (side) {
+      var show = code && !split;
+      side.hidden = !show;
+      side.parentNode.classList.toggle('no-side', !show);
+    }
+    if (split && !sideHidden) sideSync();
+  }
+
   function loadTree(view) {
     var list = $('tree-list');
-    var path = encodePath(state.path);
+    var here = state.path;
+    var path = encodePath(here);
     var suffix = '/tree/' + encodeRef(state.branch) + (path ? '/' + path : '');
     setLoading(list, '正在读取文件树…');
     renderPathCrumbs();
@@ -1236,9 +1450,21 @@
     // it must not land in the rows of the one being entered.
     treeCells = Object.create(null);
     renderTreeLatest(null);
+    // The tree panel wants this same directory, so it is told the request is
+    // already out and handed the answer below -- marked BEFORE syncCodeLayout,
+    // or the two of them ask the server for it twice.
+    sideMark(here);
+    var gen = sideGen;
+    // Laid out here rather than by the callers because this is the one place
+    // that runs with the ref settled: loadBranches can correct the branch after
+    // selectRepo has already arranged the view for a different one.
+    syncCodeLayout();
     return json(repoPath(suffix)).then(function (data) {
-      if (!viewIsCurrent(view)) return [];
       var entries = Array.isArray(data.entries) ? data.entries : [];
+      // Before the ticket check: a listing of a directory is right whichever
+      // one the reader has moved on to, and the panel can still use it.
+      sideStore(here, entries, gen);
+      if (!viewIsCurrent(view)) return [];
       $('tree-caption').textContent = state.path ? state.path : '文件';
       $('tree-count').textContent = entries.length + ' 项';
       list.textContent = '';
@@ -1257,6 +1483,7 @@
       loadReadme(view, entries);
       return entries;
     }).catch(function (error) {
+      sideFail(here, gen);
       if (!viewIsCurrent(view)) return [];
       $('tree-count').textContent = '';
       $('readme-panel').hidden = true;
@@ -1437,6 +1664,17 @@
     row.appendChild(text);
 
     row.addEventListener('click', function () {
+      // A hit can be anywhere in the revision, and the listing behind an open
+      // file has to be the directory that file sits in -- otherwise closing it
+      // lands in whichever directory the search happened to start from. Not
+      // openDirectory: that writes the address bar, and the file below is about
+      // to write it again.
+      var dir = hit.path.replace(/\/?[^\/]*$/, '');
+      if (dir !== state.path) {
+        var view = beginView();
+        state.path = dir;
+        loadTree(view);
+      }
       loadFile(hit.path);
       routeWrite();
     });
@@ -1718,6 +1956,7 @@
     state.file = path;
     state.fileRaw = false;         // a Markdown file opens rendered
     panel.hidden = false;
+    syncCodeLayout();
     $('readme-panel').hidden = true;
     wrap.hidden = true;
     link.hidden = true;
@@ -1744,13 +1983,13 @@
         $('file-image').src = state.fileBlobUrl;
         text.hidden = true;
         wrap.hidden = false;
-        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         return;
       }
       return got.blob.text().then(function (body) {
         if (ticket !== seq.file) return;
         showFileText(body, path);
-        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       });
     }).catch(function (error) {
       if (ticket !== seq.file) return;
@@ -2258,13 +2497,7 @@
     var compare = $('compare-view');
     if (compare) compare.hidden = view !== 'compare';
     $('issues-view').hidden = view !== 'issues';
-    var side = $('repo-side');
-    if (side) {
-      side.hidden = view !== 'code';
-      // The grid has to give the column back, not just empty it, or the log and
-      // the issue list stay squeezed into two thirds of the page.
-      side.parentNode.classList.toggle('no-side', view !== 'code');
-    }
+    syncCodeLayout();
     if (view === 'issues' && state.repo) loadIssues(seq.view);
     // Only once the ref lists are in. On a tab click they already are; on a
     // restore from the address bar showView runs before loadBranches has
@@ -2900,7 +3133,17 @@
     $('diff-panel').hidden = true;
     loadCommits(seq.view, state.commitSkip + COMMIT_PAGE_SIZE);
   });
-  $('close-file').addEventListener('click', function () { hideFile(); routeWrite(); });
+  $('close-file').addEventListener('click', function () {
+    hideFile();
+    routeWrite();
+    syncCodeLayout();
+  });
+  // Collapsing the tree is the only way to give a file the whole width, which
+  // is worth having the moment one of its lines is long.
+  if ($('side-toggle')) $('side-toggle').addEventListener('click', function () {
+    sideHidden = !sideHidden;
+    syncCodeLayout();
+  });
   // The source is already in hand, so this is a re-render rather than a fetch.
   // Deliberately not in the URL: a link to a file should open the way the
   // repository reads, and how one reader prefers to look at it is not state
