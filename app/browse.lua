@@ -249,13 +249,19 @@ local function parse_log(text)
             if f[1] and f[1]:match('^%x+$') then
                 local parents = {}
                 for p in tostring(f[9] or ''):gmatch('%S+') do parents[#parents + 1] = p end
+                -- Same rejoin as browse_last_commits, for the same reason: %b is
+                -- last in the format because it is the only field that may
+                -- contain anything, FIELD included, and truncating a commit
+                -- message at a stray one loses the half that says why.
+                local body = f[11] or ''
+                for i = 12, #f do body = body .. FIELD .. f[i] end
                 out[#out + 1] = {
                     oid = f[1], short = f[2],
                     author    = { name = f[3], email = f[4], date = f[5] },
                     committer = { name = f[6], email = f[7], date = f[8] },
                     parents = util_json_array(parents),
                     subject = f[10] or '',
-                    body = util_str_trim(f[11] or ''),
+                    body = util_str_trim(body),
                 }
             end
         end

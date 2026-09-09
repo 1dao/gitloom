@@ -798,6 +798,12 @@ curl -s "$L" | grep -q '"latest"' \
 curl -s "$L" | grep -q '"body":"why the second commit happened"' \
     && ok 'the last-commit walk carries the message body' \
     || bad 'the last-commit walk carries the message body' "$(curl -s "$L")"
+# And the panel a commit opens into has somewhere to put it. It showed the
+# subject and then the patch, so the paragraphs saying why the patch looks
+# like that were the one part of a commit it did not show.
+grep -q 'id="diff-message"' "$WORK/web.index" && curl -s "$BASE/app.js" | grep -q 'diff-message' \
+    && ok 'the commit panel shows the message body' \
+    || bad 'the commit panel shows the message body' 'markup or handler missing'
 # Scoped to the subdirectory, and to its direct children only.
 curl -s "$L/src" | grep -q '"name":"app.lua"' \
     && ok 'last commits scope to a subdirectory' \

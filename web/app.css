@@ -389,6 +389,10 @@ h1, h2, h3, p { margin-top: 0; }
 .commit-meta { color: var(--muted); font-size: 11px; }
 .commit-meta code { color: var(--accent-2); font-family: var(--mono); }
 .commit-date { color: var(--dim); font-size: 11px; white-space: nowrap; }
+/* The subject is the headline and the body is the reason. A commit opened from
+   a listing used to show only the first, which is the half the listing had
+   already shown -- and monospace because a commit message is written wrapped. */
+.commit-message { margin: 0; padding: 14px 18px; border-bottom: 1px solid var(--line-soft); color: var(--text-soft); font: 13px/1.7 var(--mono); white-space: pre-wrap; overflow-wrap: break-word; }
 .diff-meta { padding: 12px 18px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line-soft); }
 .diff-block { max-height: 620px; }
 .diff-add { color: #89e0ad; background: rgba(79, 198, 126, .08); }

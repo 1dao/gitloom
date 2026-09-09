@@ -1612,6 +1612,7 @@
       oid: commit.oid,
       short: commit.short,
       subject: commit.subject,
+      body: commit.body,
       author: { name: commit.author, date: commit.date },
     });
   }
@@ -2140,6 +2141,7 @@
     date.className = 'commit-date';
     date.textContent = formatDate(commit.author && commit.author.date);
     row.appendChild(date);
+    row.title = commitTooltip(commit);
     row.addEventListener('click', onClick || function () { loadDiff(commit); });
     list.appendChild(row);
   }
@@ -2185,6 +2187,12 @@
     var panel = $('diff-panel');
     panel.hidden = false;
     $('diff-title').textContent = commit.subject || commit.short || commit.oid;
+    var message = $('diff-message');
+    if (message) {
+      var body = (commit.body || '').replace(/\s+$/, '');
+      message.textContent = body;
+      message.hidden = body === '';
+    }
     $('diff-meta').textContent = (commit.author && commit.author.name ? commit.author.name : 'unknown') +
       ' · ' + formatDate(commit.author && commit.author.date) + ' · ' + (commit.oid || '');
     $('diff-content').textContent = '正在生成 diff…';
