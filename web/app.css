@@ -206,6 +206,10 @@ h1, h2, h3, p { margin-top: 0; }
   font-family: var(--mono); font-size: 12px;
 }
 .clone-row input:focus { outline: none; border-color: var(--line); color: var(--text); }
+/* The two archive buttons share the row's spacing and split it evenly, so the
+   block reads as one control group rather than as a second thing bolted on. */
+.archive-row { margin-top: 9px; }
+.archive-row .button { flex: 1; justify-content: center; }
 
 .view-tabs { display: flex; gap: 20px; margin: 2px 0 14px; border-bottom: 1px solid var(--line-soft); }
 .view-tab { display: inline-flex; align-items: center; gap: 7px; border: 0; border-bottom: 2px solid transparent; padding: 0 2px 12px; margin-bottom: -1px; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; }
@@ -410,8 +414,13 @@ h1, h2, h3, p { margin-top: 0; }
 .auth-card label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 14px; }
 .auth-card input { display: block; width: 100%; margin-top: 7px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; color: var(--text); background: var(--bg); outline: 0; }
 .auth-card input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88, 213, 201, .08); }
-.auth-card textarea { display: block; width: 100%; margin-top: 7px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; resize: vertical; color: var(--text); background: var(--bg); outline: 0; font: inherit; line-height: 1.5; }
-.auth-card textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88, 213, 201, .08); }
+/* The comment box is styled with the dialogs' fields rather than on its own:
+   it sits outside .auth-card, which is where every form control on this page
+   is dressed, so it had been rendering as a bare browser textarea -- grey, in
+   a dark page, at whatever size the rows attribute gave it. Two rules for one
+   kind of field is how the second one ends up looking like this. */
+.auth-card textarea, .issue-comment-form textarea { display: block; width: 100%; margin-top: 7px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; resize: vertical; color: var(--text); background: var(--bg); outline: 0; font: inherit; line-height: 1.5; }
+.auth-card textarea:focus, .issue-comment-form textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88, 213, 201, .08); }
 .form-message { min-height: 17px; color: var(--danger); font-size: 12px; }
 .auth-switch { margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 13px; text-align: center; }
 .auth-switch button { border: 0; padding: 4px 6px; background: transparent; color: var(--accent); cursor: pointer; font-size: inherit; }
@@ -443,14 +452,27 @@ h1, h2, h3, p { margin-top: 0; }
 .issue-detail { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 20px; }
 .issue-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .issue-detail-head h3 { margin-bottom: 6px; font-size: 20px; }
-.issue-detail-body { white-space: pre-wrap; margin: 16px 0 22px; color: var(--text-soft); font-size: 14px; line-height: 1.65; }
+.issue-detail-actions { flex: 0 0 auto; display: flex; gap: 9px; }
+/* Spacing only -- .md owns the typography of everything the Markdown parser
+   builds. This rule named .issue-detail-body while the element carried
+   class="issue-body", so it had never matched anything; the element is the
+   thing that moved, since `issue-body` is also the id of the new-issue
+   dialog's textarea and one name for two elements is how that happens. */
+.issue-detail-body { margin: 16px 0 22px; }
 .issue-comments-head { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--text); font-size: 13px; font-weight: 650; }
 .issue-comments { display: grid; gap: 8px; }
 .issue-comment { border: 1px solid var(--line-soft); border-radius: 9px; padding: 11px 13px; background: var(--panel); }
 .issue-comment-meta { color: var(--muted); font-size: 11px; }
-.issue-comment-body { white-space: pre-wrap; margin-top: 7px; color: var(--text-soft); font-size: 13px; line-height: 1.55; }
+.issue-comment-body { margin-top: 7px; }
+/* A comment reads one step down from the issue it answers. Scoped through
+   .issue-comment so it outranks .md, which is later in this file. */
+.issue-comment .md { font-size: 13px; line-height: 1.55; }
 .issue-comment-form { margin-top: 15px; }
-.issue-comment-form textarea { min-height: 70px; }
+/* Four lines rather than three, and a floor under it: this is where somebody
+   writes a paragraph about a bug, and a box that shows two lines of it makes
+   the writing feel like filling in a field. It is resize: vertical like every
+   other textarea here, so the floor is a starting point rather than a cap. */
+.issue-comment-form textarea { min-height: 110px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 12px; }
 .toast { position: fixed; right: 24px; bottom: 24px; opacity: 0; pointer-events: none; transform: translateY(8px); transition: .2s ease; border: 1px solid var(--line); border-radius: 9px; padding: 10px 14px; background: var(--panel-2); color: var(--text); font-size: 13px; box-shadow: var(--shadow); }
 .toast.show { opacity: 1; transform: translateY(0); }

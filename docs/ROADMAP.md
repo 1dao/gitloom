@@ -1427,6 +1427,160 @@ and clone over TLS are byte-identical and `git fsck` clean on both — 2.4 s and
 1.4 s streamed on Linux against 9.2 s and 13.2 s staged on Windows, which is the
 usual gap between the two transports rather than anything TLS costs.
 
+### Three things one person hits every day (2026-09-12)
+
+A pass over the solo loop, taken from the other end than the feature list: not
+what is missing against gitea, but what a single operator touches on an ordinary
+day and finds is not there. Three came out, and all three were places where the
+server was already right or nearly so — the same shape as the tag selector and
+the image viewer before them.
+
+**An issue renders as Markdown.** The body and every comment were `textContent`,
+which turns a stack trace into one long line and a checklist into literal
+hyphens — while `web/markdown.js`, in the same file, had been rendering READMEs
+for a week. Nothing new was needed and nothing new was trusted: it is the parser
+that never builds an HTML string, so an issue body is safe by the same
+construction a README is, and `test/webjs.js` still asserts the property both
+rest on. If anything the README is the more hostile of the two, since anyone who
+can push can write it.
+
+Two things it turned up. `renderMarkdownInto` took the path the Markdown came
+out of and fell back to "wherever the browser currently is" — two states where
+there are three, because an issue's text belongs to the REPOSITORY rather than
+to any directory in it. Left as it was, `[see](README.md)` in an issue meant a
+different file depending on which directory happened to be open when the issue
+was clicked. The parameter now distinguishes "no path given" from "the root".
+And the object URLs behind images are held on the element that shows them, which
+is right until the element is thrown away: the comment list is rebuilt from
+scratch on every load, and nothing else would ever release what the old bodies
+held. `releaseIssueMarkdown` runs from the three places that drop them —
+reloading an issue, re-rendering the list, and closing the repository view,
+which is the same set `closeRepoView` already had to learn for the README.
+
+A third thing fell out on the way. The rule meant to style an issue body was
+written as `.issue-detail-body` while the element carried `class="issue-body"`,
+so it had never matched anything and the body had been rendering with no styling
+at all — part of why a multi-line issue read as one run-on block, and invisible
+because an unstyled paragraph still looks like a paragraph. The element is what
+moved rather than the rule, since `issue-body` is ALSO the id of the new-issue
+dialog's textarea and one name for two elements is how that happens twice. Both
+bodies now carry `md`, the container class the parser's own stylesheet hangs
+off, so an issue and a README render as the same document.
+
+**The repository list is ordered by what was last pushed to.** Alphabetical was
+the order the map could be put in without asking anything about the records, and
+it is the wrong one for the page it feeds: the repository someone wants is
+nearly always the one they last pushed to, and thirty of them in name order
+buries it. Sorted on the SERVER so that a curl of `/api/v1/repos` and the page
+agree about what "first" means, with the name still the tie-break — `pairs` has
+no promised order, so without a total order two calls can disagree about
+repositories that share a timestamp, which every repository created by the same
+script in the same second does.
+
+The stamp is when receive-pack RETURNED, not when a ref moved. The report that
+says which refs were updated is the child's own stdout, and on the streaming
+transport it has already gone to the client by the time the handler is back —
+reading it would mean holding the packfile response open to parse it, which is a
+real cost for a timestamp. So a push the protection hook refused counts as
+activity too, and that is the direction to be wrong in: the field answers "when
+was this last pushed to", and a refused push was one.
+
+Both halves of the after-push bookkeeping now go through one `repo_after_push`,
+because both transports have to do both and a second call added to one path only
+is exactly how the two drift. Migration 4 adds the column as `NOT NULL DEFAULT
+0`, which leaves two spellings of "never pushed to" — an absent key under JSON
+and a 0 under MySQL — so `activity_at` answers for both and the API always
+serialises 0 rather than sometimes omitting the field.
+
+The regression case is built so that it cannot pass by accident: `zulu` is
+created FIRST and pushed to LAST, `aardvark` is created after it and never
+pushed, and both of the orders this replaces — by name and by creation — put
+aardvark first. The `sleep 1` in it is load-bearing rather than lazy, because
+these are Unix seconds and a tie falls back to the name.
+
+**A revision downloads as one file.** `git archive`, staged to a scratch file
+and streamed by the C layer exactly as a raw blob is, under a
+`<name>-<short oid>/` prefix so unpacking one cannot scatter a tree across
+whatever directory it was unpacked in. Named after the object id rather than the
+ref: `demo-main.zip` taken twice a week apart is two different trees under one
+name in a downloads folder.
+
+The part worth writing down is why `--format` is an allowlist rather than a
+shape check. It does not name a fixed set — git resolves an unknown format
+against `tar.<fmt>.command`, which is a CONFIGURED SHELL COMMAND — so an
+instance whose operator has one of those defined would otherwise let a query
+string pick it. Two built-ins are on offer and nothing else reaches the command
+line. `MAX_ARCHIVE_MB` is then the one cap here checked AFTER the work rather
+than before it, and there is no other order available: `git archive` has no size
+switch and a compressed tree has no size until it is compressed. What it bounds
+is the response, not the CPU, and the scratch file is released either way.
+
+In the browser it is fetched rather than linked, for the reason the images ran
+into first: the URL needs an `Authorization` header, which an `<a href>` cannot
+send, so a plain link would 401 on every private repository. The bytes come back
+through `api()` and the anchor is synthesised around them, with the file name
+read out of the server's `Content-Disposition` rather than rebuilt from a second
+copy of the naming rule. The control is hidden on a repository with no commits,
+where the endpoint is a 404 and the button would be the page asking a question
+it already knows the answer to.
+
+The ref-injection loop covers the new endpoint alongside `tree`, which matters
+more here than anywhere: `git archive --output=` is a REAL option that writes a
+file, so this is the one browsing command where the class of bug rule 1 of
+`browse.lua` exists to prevent has a working payload rather than a theoretical
+one.
+
+**A fourth, because the third one made it obvious.** Once an issue rendered
+properly it was plain that it could not be CORRECTED: `PATCH` had taken
+`{title, body, state}` since the tracker shipped, and the page only ever sent
+`state` — so fixing a typo in your own issue meant a curl, or a second issue.
+The dialog follows the pattern the repository editor set, and the server needed
+no change at all.
+
+Three things worth recording about it. The form sends title AND body every time,
+unchanged half included, because `issue_update` compares before it writes and
+returns the issue untouched when nothing differs — so a save that changes
+nothing does not move `updated_at` or reorder the list, and the page does not
+have to diff against a copy that may already be stale. That property now has a
+case of its own, as does the title/body half of `PATCH`, which nothing had ever
+driven: every existing case sent `state`.
+
+The comment box below it turned out to have the same shape of fault as the issue
+body's dead CSS rule. It carried a visible 「添加评论」 label between a heading
+that says 评论 and a button that says 发表评论 — the same sentence three times —
+and, because the form sits OUTSIDE `.auth-card`, where every form control on
+this page is dressed, the textarea itself had never been styled at all: a grey
+browser default, three rows tall, not even full width, in a dark page. The label
+is gone (the accessible name stays as an `aria-label`), and the field is styled
+by extending the selector that already dresses the dialogs' textareas rather
+than by writing a second rule for it — two rules for one kind of field is
+exactly how the second one ends up looking like that.
+
+The other two are the same bug in different places. The page's own idea of who
+may edit an issue left out the ADMINISTRATOR, while every other owner-only
+control on the same page is drawn from `state.admin` — so an administrator was
+shown an issue they were allowed to change and no control to change it with. And
+those controls were only ever set while RENDERING an issue, so signing in with
+one already open left it with no edit, no close and no comment box until it was
+clicked a second time. Both fixed by `syncIssueActions`, which answers "who may
+act on the open issue" and is called from the render and from
+`syncWriteActions` — the function that already answered the same question one
+level up. A write collaborator is still not offered the controls, because the
+page is not told its own permission on a repository; that is the safe direction
+to be wrong in, and the note is here so the next person knows it is a gap rather
+than a rule.
+
+Verified on Windows against the JSON store: `test/smoke.sh` **313**, 29 of them
+new, `test/unit.lua` 216, `test/webjs.js` 65. Driven in a real browser as well —
+the listing leads with the pushed repository and dates its card "推送于", an
+empty one still says "建于" and hides the archive control, an issue shows its
+task list, fenced Lua and table with a relative link resolving to
+`#/admin/zulu/blob/main/README.md` rather than to the open directory, and the
+zip arrives named `zulu-62de9157baea.zip` with no console error. The edit dialog
+opens filled from the issue on screen, saves a new title into both the panel and
+the list row, persists across a reload, and answers a 300-character title with
+「Issue 标题太长了」 in the form rather than the server's English.
+
 ## Phase 3 — collaboration
 
 Organisations and teams, then issues (comments, labels, milestones), then pull

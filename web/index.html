@@ -219,13 +219,18 @@
                   <h3 id="issue-detail-title">—</h3>
                   <p id="issue-detail-meta" class="muted"></p>
                 </div>
-                <button class="button button-quiet" id="issue-toggle-state" type="button" hidden></button>
+                <div class="issue-detail-actions">
+                  <button class="button button-quiet" id="issue-edit" type="button" hidden>编辑</button>
+                  <button class="button button-quiet" id="issue-toggle-state" type="button" hidden></button>
+                </div>
               </div>
-              <div id="issue-detail-body" class="issue-body"></div>
+              <div id="issue-detail-body" class="issue-detail-body md"></div>
               <div class="issue-comments-head"><span>评论</span><span id="issue-comment-count" class="muted"></span></div>
               <div id="issue-comments" class="issue-comments"></div>
               <form id="issue-comment-form" class="issue-comment-form" hidden>
-                <label>添加评论<textarea id="issue-comment-body" rows="3" required></textarea></label>
+                <!-- 没有可见的标签：上面那行就是「评论」，下面那个按钮就是「发表评论」，
+                     中间再写一次「添加评论」是同一句话说第三遍。 -->
+                <textarea id="issue-comment-body" rows="4" required aria-label="添加评论"></textarea>
                 <div class="dialog-actions"><button class="button button-primary" type="submit">发表评论</button></div>
               </form>
             </div>
@@ -251,12 +256,17 @@
                 </div>
               </section>
               <section class="side-block" id="clone-block" hidden>
-                <h3>克隆</h3>
+                <h3>获取代码</h3>
                 <div class="clone-row" id="clone-row">
                   <input id="clone-url" type="text" readonly aria-label="克隆地址">
                   <button class="button button-quiet" id="copy-clone" type="button">复制</button>
                 </div>
                 <p class="side-hint">推送需要密码或访问令牌。</p>
+                <!-- 打包的是当前选中的分支或标签；分支选择器就在上面，这里不再重复一遍。 -->
+                <div class="clone-row archive-row" id="archive-row" hidden>
+                  <button class="button button-quiet" id="download-zip" type="button">下载 ZIP</button>
+                  <button class="button button-quiet" id="download-tgz" type="button">下载 tar.gz</button>
+                </div>
               </section>
             </aside>
           </div>
@@ -473,6 +483,26 @@
       <div class="dialog-actions">
         <button class="button button-quiet" data-dialog-close="issue-dialog" type="button">取消</button>
         <button class="button button-primary" id="issue-submit" type="submit">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="issue-edit-dialog" class="auth-dialog">
+    <form method="dialog" id="issue-edit-form" class="auth-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">EDIT ISSUE</p>
+          <h2>编辑 Issue</h2>
+        </div>
+        <button class="icon-button" data-dialog-close="issue-edit-dialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <label>标题<input id="issue-edit-title" type="text" autocomplete="off" required></label>
+      <!-- 比新建时高一些：改的是已经写完的东西，看得见全文才好改。 -->
+      <label>描述（可选）<textarea id="issue-edit-body" rows="10"></textarea></label>
+      <p id="issue-edit-message" class="form-message" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" data-dialog-close="issue-edit-dialog" type="button">取消</button>
+        <button class="button button-primary" id="issue-edit-submit" type="submit">保存</button>
       </div>
     </form>
   </dialog>

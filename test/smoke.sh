@@ -83,11 +83,16 @@ if [ -n "$DB_ARGS" ]; then
     "$XNET" test/dbreset.lua $DB_ARGS || { echo "could not reset the test database"; exit 2; }
 fi
 
+# MAX_ARCHIVE_MB is deliberately not its default. The archive ceiling is the one
+# cap here that can only be checked after the work is done, and 8 MiB sits
+# between the demo repository and the BIG_MB one built further down — so both
+# sides of it are reachable from repositories the suite already has.
 "$XNET" main.lua \
     LISTEN_PORT="$PORT" REPO_ROOT="$ROOT" DATA_DIR="$DATA" TMP_DIR="$SCRATCH" \
     USERS_FILE="$DATA/users.json" ADMIN_USER=admin ADMIN_PASSWORD="$ADMIN_PW" \
     GIT_STREAM="${GIT_STREAM:-auto}" \
     AUTH_ALLOW_REGISTRATION=0 \
+    MAX_ARCHIVE_MB=8 \
     TRUSTED_PROXIES=127.0.0.1 \
     $DB_ARGS \
     > "$LOG" 2>&1 &
@@ -253,6 +258,35 @@ curl -s "$BASE/app.js" | grep -q 'a repository with that name already exists' \
 curl -s "$BASE/app.js" | grep -q "typeof value === 'number' ? new Date(value \* 1000)" \
     && ok 'a server timestamp is read as seconds, not milliseconds' || bad 'a server timestamp is read as seconds, not milliseconds' 'conversion missing'
 
+# Three things a single-person instance uses every day, each markup in one file
+# and behaviour in the other.
+#
+# The archive control is fetched rather than linked, for the reason the images
+# were: the URL needs an Authorization header, which an <a href> cannot send.
+grep -q 'id="archive-row"' "$WORK/web.index" && grep -q 'id="download-zip"' "$WORK/web.index" \
+    && ok 'the browser offers an archive download' || bad 'the browser offers an archive download' 'control missing'
+curl -s "$BASE/app.js" | grep -q 'function downloadArchive' \
+    && ok 'the archive is fetched with the credential' || bad 'the archive is fetched with the credential' 'handler missing'
+# An issue body is text about code and is written like it. Rendered through the
+# same parser as the README, which is safe by construction rather than by
+# sanitising -- so this is the parser being reused, not a second one.
+curl -s "$BASE/app.js" | grep -q 'function renderIssueText' \
+    && ok 'an issue renders as Markdown' || bad 'an issue renders as Markdown' 'renderer missing'
+# The images in one are object URLs on elements the comment list THROWS AWAY on
+# every reload, which nothing else would ever release.
+curl -s "$BASE/app.js" | grep -q 'function releaseIssueMarkdown' \
+    && ok 'an issue releases what it rendered' || bad 'an issue releases what it rendered' 'release missing'
+# The cards are in push order, so a card dated by its creation would sit in a
+# sequence its own text contradicts.
+curl -s "$BASE/app.js" | grep -q "repo.pushed_at ?" \
+    && ok 'a card is dated by its last push' || bad 'a card is dated by its last push' 'stamp missing'
+# An issue could be closed from the page and not corrected -- PATCH took the
+# text all along and only a curl ever sent it.
+grep -q 'id="issue-edit-dialog"' "$WORK/web.index" && grep -q 'id="issue-edit"' "$WORK/web.index" \
+    && ok 'the browser offers an issue edit' || bad 'the browser offers an issue edit' 'dialog missing'
+curl -s "$BASE/app.js" | grep -q 'function openIssueEditDialog' \
+    && ok 'the edit form is filled from the issue in hand' || bad 'the edit form is filled from the issue in hand' 'handler missing'
+
 # A link destination is a URL, so `[x](my%20docs/a.md)` -- the ordinary way to
 # write a link to a file with a space -- names `my docs/a.md`. Encoding it again
 # without decoding first produces `my%2520docs`, a path no repository has.
@@ -417,6 +451,33 @@ fi
 curl -s "$BASE/api/v1/repos/admin/demo" | grep -q 'refs/heads/main' \
     && ok 'refs appear in the API' || bad 'refs appear in the API' "$(curl -s "$BASE/api/v1/repos/admin/demo")"
 
+# The listing is ordered by when a repository was last pushed to, so a push has
+# to leave that behind. 0 rather than an absent key for one nobody has pushed
+# to: the JSON store simply has no field there and MySQL has a NOT NULL 0, and a
+# value that is sometimes missing is one every client has to test for before it
+# can compare it.
+pushed=$(curl -s "$BASE/api/v1/repos/admin/demo" | grep -o '"pushed_at":[0-9]*' | cut -d: -f2)
+[ -n "$pushed" ] && [ "$pushed" -gt 0 ] \
+    && ok 'a push stamps the repository' || bad 'a push stamps the repository' "pushed_at=$pushed"
+
+# And the order that stamp exists for. `zulu` is created FIRST and pushed to
+# LAST; `aardvark` is created after it and never pushed. Both of the orders this
+# replaces -- by name, and by creation -- put aardvark first, so this fails
+# unless the push is what decided it.
+#
+# The sleep is load-bearing. These are Unix SECONDS and a tie falls back to the
+# name, so without it the push can land in the same second as the create and
+# aardvark wins on the tie-break rather than on anything being wrong.
+curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+    -d '{"name":"zulu"}' "$BASE/api/v1/repos" >/dev/null
+curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+    -d '{"name":"aardvark"}' "$BASE/api/v1/repos" >/dev/null
+sleep 1
+( cd "$WORK/w1" && $GIT push -q \
+    "http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/zulu.git" HEAD:refs/heads/main ) >/dev/null 2>&1
+first=$(curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/repos" | grep -o '"full_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+check 'the listing leads with the most recently pushed' "$first" 'admin/zulu'
+
 # ── Private repositories ────────────────────────────────────────────────────
 curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
     -d '{"name":"secret","private":true}' "$BASE/api/v1/repos" >/dev/null
@@ -553,6 +614,34 @@ check 'invalid issue state is rejected' "$code" '400'
 code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
     -H 'Content-Type: application/json' -d '{"state":"open"}' "$ISSUES/1")
 check 'owner can reopen an issue' "$code" '200'
+
+# PATCH has always taken title and body as well as state, and until the browser
+# grew an edit dialog nothing sent them -- so the endpoint the button now rests
+# on had no case of its own.
+edited=$(curl -s -u "admin:$ADMIN_PW" -X PATCH -H 'Content-Type: application/json' \
+    -d '{"title":"Track smoke regression (edited)","body":"Now with a **fenced** body."}' "$ISSUES/1")
+echo "$edited" | grep -q 'Track smoke regression (edited)' \
+    && ok 'owner can edit an issue title' || bad 'owner can edit an issue title' "$edited"
+curl -s "$ISSUES/1" | grep -q 'Now with a ' \
+    && ok 'the edited body is what is served back' || bad 'the edited body is what is served back' "$(curl -s "$ISSUES/1")"
+
+# The dialog sends title AND body every time, unchanged half included, so an
+# edit that changes nothing must not look like an edit. issue_update compares
+# before it writes; without that, opening the form and pressing 保存 would move
+# updated_at and reorder the list for nothing.
+before=$(curl -s "$ISSUES/1" | grep -o '"updated_at":[0-9]*' | cut -d: -f2)
+sleep 1
+curl -s -o /dev/null -u "admin:$ADMIN_PW" -X PATCH -H 'Content-Type: application/json' \
+    -d '{"title":"Track smoke regression (edited)","body":"Now with a **fenced** body."}' "$ISSUES/1"
+after=$(curl -s "$ISSUES/1" | grep -o '"updated_at":[0-9]*' | cut -d: -f2)
+check 'an edit that changes nothing does not touch the issue' "$after" "$before"
+
+# The title is measured in CHARACTERS against a VARCHAR(200), which is the whole
+# reason it is measured rather than counted in bytes.
+LONGTITLE=$(awk 'BEGIN { s = ""; while (length(s) < 300) s = s "x"; print s }')
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d "{\"title\":\"$LONGTITLE\"}" "$ISSUES/1")
+check 'an over-long issue title is refused' "$code" '400'
 
 # ── Access tokens ───────────────────────────────────────────────────────────
 TOKEN=$(curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
@@ -867,6 +956,43 @@ curl -s -D- -o /dev/null "$DEMO/raw/main/binary.dat" | grep -qi 'content-type: a
 curl -s -D- -o /dev/null "$DEMO/raw/main/binary.dat" | grep -qi 'x-content-type-options: nosniff' \
     && ok 'raw sends nosniff' || bad 'raw sends nosniff' 'header missing'
 
+# An archive of one revision as a single file -- what `git clone` is overkill
+# for. Asserted on the headers and on what unpacks out of it, never on the size:
+# a zip's bytes depend on the git version's deflate, its contents do not.
+arc=$(curl -s -D "$WORK/arc.headers" -o "$WORK/demo.zip" -w '%{http_code}' "$DEMO/archive/main")
+check 'archive serves a zip' "$arc" '200'
+grep -qi 'content-type: application/zip' "$WORK/arc.headers" \
+    && ok 'archive is typed as a zip' || bad 'archive is typed as a zip' "$(grep -i content-type "$WORK/arc.headers")"
+# Named after the OBJECT ID, not the ref: `demo-main.zip` taken twice a week
+# apart is two different trees under one name in a downloads folder.
+grep -qi 'content-disposition: attachment; filename="demo-[0-9a-f]*.zip"' "$WORK/arc.headers" \
+    && ok 'archive is offered as a download' || bad 'archive is offered as a download' "$(grep -i content-disposition "$WORK/arc.headers")"
+grep -qi 'x-content-type-options: nosniff' "$WORK/arc.headers" \
+    && ok 'archive sends nosniff' || bad 'archive sends nosniff' 'header missing'
+head -c 2 "$WORK/demo.zip" | grep -q 'PK' \
+    && ok 'archive really is a zip' || bad 'archive really is a zip' 'no zip magic'
+
+# tar.gz is the other format, and the one whose contents can be listed without
+# a tool the platform may not have. The prefix is what this is really checking:
+# everything must sit under ONE directory, or unpacking an archive scatters a
+# repository across whatever directory it was unpacked in.
+if command -v tar >/dev/null 2>&1; then
+    curl -s -o "$WORK/demo.tgz" "$DEMO/archive/main?format=tar.gz"
+    names=$(tar tzf "$WORK/demo.tgz" 2>/dev/null)
+    echo "$names" | grep -q '^demo-[0-9a-f][0-9a-f]*/src/app.lua$' \
+        && ok 'tar.gz unpacks under one prefixed directory' \
+        || bad 'tar.gz unpacks under one prefixed directory' "$(echo "$names" | head -4)"
+else
+    skip 'tar.gz unpacks under one prefixed directory (no tar)'
+fi
+
+# `--format` is not a shape, it is an allowlist: git resolves an unknown one
+# against tar.<fmt>.command, which is a configured SHELL COMMAND.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$DEMO/archive/main?format=evil")
+check 'archive refuses a format it does not make' "$code" '400'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$DEMO/archive/no-such-ref")
+check 'archive of an unknown ref is 404' "$code" '404'
+
 page1=$(curl -s "$DEMO/commits?ref=main&limit=1&skip=0")
 echo "$page1" | grep -q '"count":1' \
     && ok 'commits honours limit' || bad 'commits honours limit' "$page1"
@@ -1074,7 +1200,11 @@ curl -s "$DEMO/tags" | grep -q '"tags":\[\]' \
 rm -f "$WORK/pwned"
 for r in '--output=%2Ftmp%2Fpwned' '-a' '--upload-pack=touch' 'HEAD%40%7B1%7D' '%2e%2e'; do
     code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/tree/$r")
-    check "ref injection refused: $r" "$code" '404'
+    check "ref injection refused: tree $r" "$code" '404'
+    # The archive endpoint takes a ref like every other one, and `git archive`
+    # is the command where --output= is a REAL option that writes a file.
+    code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/archive/$r")
+    check "ref injection refused: archive $r" "$code" '404'
 done
 [ -e "$WORK/pwned" ] && bad 'ref injection had no side effect' 'a file was created' \
                      || ok 'ref injection had no side effect'
@@ -1087,7 +1217,7 @@ for pth in '..%2f..%2fgitloom.cfg' '%2e%2e/%2e%2e/etc/passwd' '.git/config' '-rf
 done
 
 # Browsing obeys the same visibility rule as the transport.
-for ep in branches tags commits tree/main lastcommits/main compare/main/main; do
+for ep in branches tags commits tree/main lastcommits/main compare/main/main archive/main; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/repos/admin/secret/$ep")
     check "private repo hidden from browsing: $ep" "$code" '404'
 done
@@ -1215,6 +1345,18 @@ if [ "$BIG_MB" -gt 0 ]; then
         check 'large clone has every file' "$n" "$BIG_MB"
         ( cd "$WORK/bigclone" && git fsck --no-progress >/dev/null 2>&1 ) \
             && ok 'large clone passes git fsck' || bad 'large clone passes git fsck' 'fsck failed'
+
+        # The archive ceiling, which is the one cap here that is checked AFTER
+        # the work rather than before it: `git archive` has no size switch and
+        # a compressed tree has no size until it is compressed. This repository
+        # is BIG_MB of incompressible data against the instance's
+        # MAX_ARCHIVE_MB=8, so the archive is built, measured and refused.
+        code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "$BASE/api/v1/repos/admin/large/archive/main")
+        check 'an archive over MAX_ARCHIVE_MB is refused' "$code" '413'
+        # And the small one still comes back, so what was refused was the size.
+        code=$(curl -s -o /dev/null -w '%{http_code}' "$DEMO/archive/main")
+        check 'the ceiling does not refuse a small archive' "$code" '200'
 
         # Connection: close must not truncate the body.
         #

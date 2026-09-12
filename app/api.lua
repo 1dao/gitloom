@@ -110,6 +110,10 @@ local function repo_public(rec, req, ctx)
         private        = rec.private and true or false,
         default_branch = rec.default_branch,
         created_at     = rec.created_at,
+        -- 0, never nil: the file backend has no key at all for a repository
+        -- nobody has pushed to, and a field that is sometimes absent is a field
+        -- every client has to test for before it can compare it.
+        pushed_at      = rec.pushed_at or 0,
         clone_url      = string.format('%s://%s/%s/%s.git', scheme, host, rec.owner, rec.name),
     }
 end
@@ -1010,6 +1014,59 @@ local function h_raw(req, ctx)
     return resp
 end
 
+-- GET /api/v1/repos/:owner/:name/archive/:ref?format=zip|tar.gz
+--
+-- A snapshot of one revision as a single file — the thing a `git clone` is
+-- overkill for: handing somebody a tag, or keeping a copy of what shipped.
+--
+-- The size is CHECKED AFTER the archive is built, which looks like the wrong
+-- order and is the only one available: `git archive` has no ceiling switch and
+-- the compressed size of a tree is not knowable without compressing it. Summing
+-- the blob sizes first would cost a second walk and still answer a different
+-- question. What the cap protects is the response, not the work — and the
+-- scratch file is released either way, so a refused archive leaves nothing
+-- behind but the CPU it took.
+local function h_archive(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+
+    local oid, refused = resolve_ref(dir, rec, ctx.params.ref)
+    if not oid then return refused end
+
+    local kind = browse_archive_kind((req.query or {}).format or 'zip')
+    if not kind then
+        return http_response_error(400, 'format must be zip or tar.gz')
+    end
+
+    -- The name of the directory inside the archive AND of the file offered to
+    -- the browser. The object id rather than the ref: `demo-main.zip` taken
+    -- twice a week apart is two different trees under one name in a downloads
+    -- folder, and the ref may also contain a slash, which a file name may not.
+    local stem = rec.name .. '-' .. oid:sub(1, 12)
+
+    local out, aerr = browse_archive(dir, oid, kind, stem)
+    if not out then return http_response_error(500, http_safe_error(aerr)) end
+
+    local max = cfg_int('MAX_ARCHIVE_MB', 512) * 1024 * 1024
+    local size = util_file_size(out)
+    if max > 0 and size and size > max then
+        proc_tmp_release(out)
+        return http_response_error(413, string.format(
+            'archive is %d bytes; MAX_ARCHIVE_MB allows %d', size, max))
+    end
+
+    -- Same two headers a raw blob carries, for the same reason, plus the
+    -- disposition: an archive is never a document, so nothing here should ever
+    -- be rendered on this origin.
+    local resp = http_response_file(out, kind.ctype, {
+        ['X-Content-Type-Options']  = 'nosniff',
+        ['Content-Security-Policy'] = "default-src 'none'; sandbox",
+        ['Content-Disposition']     = 'attachment; filename="' .. stem .. kind.ext .. '"',
+    })
+    resp.release_file = out
+    return resp
+end
+
 -- ---------------------------------------------------------------------------
 
 function g_exports.api_install()
@@ -1053,6 +1110,7 @@ function g_exports.api_install()
     http_get('/api/v1/repos/:owner/:name/lastcommits/:ref', h_last_commits)
     http_get('/api/v1/repos/:owner/:name/lastcommits/:ref/*path', h_last_commits)
     http_get('/api/v1/repos/:owner/:name/raw/:ref/*path', h_raw)
+    http_get('/api/v1/repos/:owner/:name/archive/:ref', h_archive)
     http_get('/api/v1/repos/:owner/:name/compare/:base/:head', h_compare)
     http_get('/api/v1/repos/:owner/:name/compare/:base/:head/diff', h_compare_diff)
     http_get('/api/v1/repos/:owner/:name/search', h_search)

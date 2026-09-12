@@ -149,6 +149,23 @@ local MIGRATIONS = {
             end,
         },
     },
+    {
+        id = 4,
+        name = 'repository push timestamps',
+        up = {
+            -- What the repository listing is ordered by: when receive-pack last
+            -- ran, in Unix seconds like every other timestamp here.
+            --
+            -- NOT NULL DEFAULT 0 rather than a nullable column, so every row
+            -- that predates this migration answers the same as a repository
+            -- nobody has pushed to — which is what repo.lua's activity_at
+            -- already has to handle for the file backend, where the key is
+            -- simply absent. One spelling of "never" per backend is enough.
+            function()
+                return add_column('gl_repos', 'pushed_at', 'BIGINT NOT NULL DEFAULT 0')
+            end,
+        },
+    },
 }
 
 function g_exports.migrate_latest()

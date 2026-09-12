@@ -2,6 +2,7 @@
 --
 -- Exports: browse_path_ok, browse_decode_path, browse_resolve,
 --          browse_tree, browse_blob_info, browse_blob_file,
+--          browse_archive_kind, browse_archive,
 --          browse_log, browse_last_commits, browse_commit, browse_diff,
 --          browse_merge_base, browse_compare, browse_compare_diff,
 --          browse_refs, browse_search
@@ -215,6 +216,67 @@ function g_exports.browse_blob_file(dir, spec)
     if not r.ok then
         proc_tmp_release(out)
         return nil, 'could not read the file'
+    end
+    return out
+end
+
+-- ---------------------------------------------------------------------------
+-- Archives
+-- ---------------------------------------------------------------------------
+
+-- The archive formats on offer, and the only strings from a request that ever
+-- reach `git archive --format=`.
+--
+-- An allowlist rather than a shape check, because `--format` does not name a
+-- fixed set: git resolves it against `tar.<fmt>.command`, which is a CONFIGURED
+-- SHELL COMMAND. An instance whose operator has one of those defined would
+-- otherwise let a query string pick it. The two here are git's own built-ins.
+--
+-- The content type belongs in the table rather than at the call site for the
+-- same reason INLINE_TYPES lives in one place: two lists of what a format is
+-- called drift, and the one that drifts is the one that decides how a browser
+-- treats the bytes.
+-- Exactly the two the API documents and the suite drives, with no aliases: a
+-- `tgz` that happens to work is a third spelling nothing tests and the error
+-- message does not mention.
+local ARCHIVE_KINDS = {
+    ['zip']    = { format = 'zip',    ext = '.zip',    ctype = 'application/zip' },
+    ['tar.gz'] = { format = 'tar.gz', ext = '.tar.gz', ctype = 'application/gzip' },
+}
+
+-- The archive kind `name` asks for, or nil when it is not one we make.
+function g_exports.browse_archive_kind(name)
+    return ARCHIVE_KINDS[tostring(name or ''):lower()]
+end
+
+-- Write an archive of the tree at `oid` to a scratch file and return its path.
+--
+-- Through a file for the reason browse_blob_file uses one, more so: the size is
+-- not knowable until git has finished, and holding a repository's whole tree in
+-- a Lua string to measure it is the one thing this design has always avoided.
+--
+-- `prefix` becomes the single directory everything sits under inside the
+-- archive, so unpacking one cannot scatter a tree across the current directory.
+-- The caller builds it from the repository name, which repo_name_ok has already
+-- bounded to `[A-Za-z0-9_][A-Za-z0-9._-]*` -- there is no path separator, no
+-- leading dash and no quote it could contribute.
+--
+-- `oid` must come from browse_resolve. `--end-of-options` is belt and braces
+-- after that, exactly as everywhere else in this file.
+--
+-- The caller MUST proc_tmp_release() the returned path once the response is
+-- queued -- or straight away, if it decides not to send it.
+function g_exports.browse_archive(dir, oid, kind, prefix)
+    if type(kind) ~= 'table' or not kind.format then return nil, 'unknown archive format' end
+
+    local out = proc_tmp_path('archive')
+    local r = git_exec({ 'archive', '--format=' .. kind.format,
+                         '--prefix=' .. prefix .. '/',
+                         '--end-of-options', oid },
+                       { cwd = dir, stdout_file = out })
+    if not r.ok then
+        proc_tmp_release(out)
+        return nil, 'could not build the archive'
     end
     return out
 end

@@ -371,6 +371,7 @@
     $('edit-repo').hidden = !canManage;
     $('manage-access').hidden = !canManage;
     $('delete-repo').hidden = !canManage;
+    syncIssueActions();
   }
 
   // The repository-shaped glyph the cards and the page header share. Inlined
@@ -438,11 +439,18 @@
       var branch = document.createElement('code');
       branch.textContent = repo.default_branch || 'main';
       foot.appendChild(branch);
-      if (repo.created_at) {
-        var created = document.createElement('span');
-        created.textContent = '建于 ' + relativeTime(repo.created_at);
-        created.title = formatDate(repo.created_at);
-        foot.appendChild(created);
+      // The push, when there has been one: the cards are in push order, so a
+      // card dated by its creation would be sitting in a sequence its own text
+      // contradicts. A repository nobody has pushed to still says when it was
+      // made, because that is the only date it has and it is the one deciding
+      // where the card sits.
+      var stamp = repo.pushed_at ? { at: repo.pushed_at, label: '推送于 ' }
+                                 : (repo.created_at ? { at: repo.created_at, label: '建于 ' } : null);
+      if (stamp) {
+        var when = document.createElement('span');
+        when.textContent = stamp.label + relativeTime(stamp.at);
+        when.title = formatDate(stamp.at);
+        foot.appendChild(when);
       }
       card.appendChild(foot);
 
@@ -770,6 +778,7 @@
     var detail = $('issue-detail');
     detail.hidden = false;
     $('issue-detail-title').textContent = '正在读取…';
+    releaseIssueMarkdown();
     $('issue-detail-body').textContent = '';
     $('issue-comments').textContent = '';
     $('issue-comment-form').hidden = true;
@@ -790,10 +799,44 @@
     });
   }
 
+  // Every Markdown target keeps its own object URLs (see releaseMarkdownBlobs),
+  // and the issue panel is the one place those targets are DISCARDED rather
+  // than re-rendered: the comment list is rebuilt from scratch every time an
+  // issue is opened. Releasing the old bodies before dropping them is what
+  // keeps an issue that shows a committed image from holding those bytes for
+  // the life of the tab.
+  function releaseIssueMarkdown() {
+    releaseMarkdownBlobs($('issue-detail-body'));
+    var bodies = $('issue-comments').querySelectorAll('.issue-comment-body');
+    for (var i = 0; i < bodies.length; i++) releaseMarkdownBlobs(bodies[i]);
+  }
+
+  // Markdown, through the same parser the README goes through.
+  //
+  // An issue body is user-written text about code, so it is written the way
+  // that is written: fenced blocks, lists, links. It was rendered as
+  // textContent, which turned a stack trace into one long line and a checklist
+  // into literal hyphens.
+  //
+  // Safe for the same reason the README is safe rather than for a new one —
+  // glMarkdown never builds an HTML string, so there is nothing here to
+  // sanitise and nothing an author can inject. Both are untrusted input; the
+  // README is arguably the more hostile of the two, since anyone who can push
+  // can write it.
+  function renderIssueText(target, source, fallback) {
+    if (!source) {
+      releaseMarkdownBlobs(target);
+      target.textContent = fallback || '';
+      return;
+    }
+    renderMarkdownInto(target, source, '');
+  }
+
   function renderIssue(issue) {
     $('issue-detail-title').textContent = '#' + issue.number + ' ' + issue.title;
     $('issue-detail-meta').textContent = issue.author + ' · ' + formatDate(issue.created_at);
-    $('issue-detail-body').textContent = issue.body || '没有描述';
+    releaseIssueMarkdown();
+    renderIssueText($('issue-detail-body'), issue.body, '没有描述');
     $('issue-comment-count').textContent = (issue.comments || []).length + ' 条';
     var comments = $('issue-comments');
     comments.textContent = '';
@@ -805,17 +848,51 @@
       meta.textContent = comment.author + ' · ' + formatDate(comment.created_at);
       item.appendChild(meta);
       var body = document.createElement('div');
-      body.className = 'issue-comment-body';
-      body.textContent = comment.body;
+      body.className = 'issue-comment-body md';
       item.appendChild(body);
+      renderIssueText(body, comment.body, '');
       comments.appendChild(item);
     });
-    var canEdit = !!state.username &&
-      (state.username === issue.author || (state.repo && state.repo.owner === state.username));
+    syncIssueActions();
+  }
+
+  // Who may act on the OPEN issue.
+  //
+  // Split out of renderIssue because the answer changes when the CREDENTIAL
+  // changes and not only when the issue does. Only a render ever set these, so
+  // signing in while looking at an issue left it with no controls at all — no
+  // edit, no close, no comment box — until it was clicked a second time.
+  // syncWriteActions asks the same question one level up and now asks this one
+  // with it.
+  //
+  // The rule the server enforces is issue_can_edit: the author, a write
+  // collaborator, or an administrator. The administrator was missing here while
+  // the same page already draws every other owner-only control from
+  // `state.admin`. A write collaborator still misses out — the page is not told
+  // its own permission on a repository — and that is the safe direction to be
+  // wrong in: a hidden button, rather than one that 403s.
+  function syncIssueActions() {
+    var issue = state.issue;
+    var canEdit = !!issue && !!state.username &&
+      (state.username === issue.author || state.admin ||
+       (state.repo && state.repo.owner === state.username));
+    $('issue-edit').hidden = !canEdit;
     var toggle = $('issue-toggle-state');
     toggle.hidden = !canEdit;
-    toggle.textContent = issue.state === 'open' ? '关闭 Issue' : '重新打开';
-    $('issue-comment-form').hidden = !state.username;
+    if (issue) toggle.textContent = issue.state === 'open' ? '关闭 Issue' : '重新打开';
+    $('issue-comment-form').hidden = !issue || !state.username;
+  }
+
+  // Filled from the issue in hand rather than re-fetched: `state.issue` is what
+  // the panel underneath is already showing, so the form and the page cannot
+  // disagree about what is being edited.
+  function openIssueEditDialog() {
+    if (!state.repo || !state.issue) return;
+    $('issue-edit-message').textContent = '';
+    $('issue-edit-title').value = state.issue.title || '';
+    $('issue-edit-body').value = state.issue.body || '';
+    $('issue-edit-dialog').showModal();
+    $('issue-edit-title').focus();
   }
 
   function openIssueDialog() {
@@ -835,11 +912,20 @@
     }).then(function (response) { return response.json(); });
   }
 
-  function updateIssue(repo, number, stateValue) {
+  // `fields` is whatever of {title, body, state} is being changed. It took a
+  // bare state string while closing an issue was the only thing the page could
+  // do to one, which is also why editing the text meant a curl.
+  //
+  // The edit form sends title AND body every time, unchanged half included:
+  // issue_update compares before it writes and returns the issue untouched when
+  // nothing differs, so resending a field costs nothing and does not move
+  // updated_at. Sending only the changed one would mean diffing here against a
+  // copy that may already be stale.
+  function updateIssue(repo, number, fields) {
     return api(issuesPath(repo, '/' + encodeURIComponent(number)), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state: stateValue }),
+      body: JSON.stringify(fields),
     }).then(function (response) { return response.json(); });
   }
 
@@ -858,8 +944,10 @@
     // to those bytes and nothing else would ever let go of it -- and this is
     // the path a token expiring takes, which is not a rare one.
     hideFile();
-    // Same argument for the README's own images, which hideFile does not reach.
+    // Same argument for the README's own images, which hideFile does not reach
+    // -- and for an open issue's, which are rendered through the same parser.
     releaseMarkdownBlobs($('readme-body'));
+    releaseIssueMarkdown();
     $('readme-body').textContent = '';
     $('readme-panel').hidden = true;
     state.repo = null;
@@ -928,6 +1016,11 @@
   function setFirstPush(repo, empty) {
     var panel = $('first-push');
     panel.hidden = !empty;
+    // There is nothing to pack in a repository with no commits, and the
+    // endpoint says so with a 404. Offering the button anyway would make the
+    // page ask a question it already knows the answer to.
+    var archive = $('archive-row');
+    if (archive) archive.hidden = !!empty;
     if (empty && repo) {
       var branch = repo.default_branch || state.branch || 'main';
       $('first-push-commands').textContent =
@@ -1866,8 +1959,14 @@
     target.mdBlobUrls = [];
   }
 
+  // `fromPath` is the file the Markdown came OUT of, and relative links in it
+  // resolve against that file's directory. Three states, not two: a path is a
+  // file, '' is the repository root, and leaving it out means "wherever the
+  // browser currently is". An issue is the '' case — its text belongs to the
+  // repository rather than to any directory in it, and inheriting whatever
+  // directory happened to be open would make the same link mean two things.
   function renderMarkdownInto(target, source, fromPath) {
-    var dir = fromPath ? fromPath.replace(/\/?[^\/]*$/, '') : (state.path || '');
+    var dir = fromPath == null ? (state.path || '') : fromPath.replace(/\/?[^\/]*$/, '');
     releaseMarkdownBlobs(target);
     var bin = target.mdBlobUrls;
     target.textContent = '';
@@ -1961,6 +2060,48 @@
     if (!state.fileBlobUrl) return;
     URL.revokeObjectURL(state.fileBlobUrl);
     state.fileBlobUrl = '';
+  }
+
+  // The name the server put on the archive, out of its Content-Disposition.
+  //
+  // Read back rather than rebuilt here: the server names the file after the
+  // resolved object id, which is the whole point of the name — two downloads a
+  // week apart are two different trees — and this side does not know that id.
+  function filenameFrom(header) {
+    var match = /filename="([^"]+)"/.exec(header || '');
+    return match ? match[1] : '';
+  }
+
+  // A snapshot of the selected ref, as one file.
+  //
+  // Fetched rather than linked to, for the reason the images ran into first:
+  // the URL needs an Authorization header, which an <a href> cannot send, so a
+  // plain link would 401 on every private repository. The bytes come back
+  // here and the anchor is synthesised around them.
+  function downloadArchive(format) {
+    if (!state.repo || !state.branch) return;
+    var suffix = '/archive/' + encodeRef(state.branch) + '?format=' + encodeURIComponent(format);
+    showToast('正在打包 ' + state.branch + '…');
+    return api(repoPath(suffix)).then(function (response) {
+      var name = filenameFrom(response.headers.get('content-disposition'));
+      return response.blob().then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var link = document.createElement('a');
+        link.href = url;
+        link.download = name || (state.repo.name + '.' + format);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        // Not revoked in this turn: the click starts the save asynchronously,
+        // and pulling the URL out from under it cancels the download. A minute
+        // is far longer than a save needs to begin, and the tab is the only
+        // thing holding the bytes until then.
+        window.setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+        showToast('已下载 ' + link.download);
+      });
+    }).catch(function (error) {
+      showToast(error && error.message ? error.message : '打包失败');
+    });
   }
 
   // Does this decode to something worth putting in a <pre>?
@@ -2832,6 +2973,35 @@
       .catch(function (error) { $('issue-message').textContent = issueError(error); })
       .finally(function () { $('issue-submit').disabled = false; });
   });
+  $('issue-edit').addEventListener('click', openIssueEditDialog);
+  $('issue-edit-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (!state.repo || !state.issue) return;
+    var repo = state.repo;
+    var number = state.issue.number;
+    var title = $('issue-edit-title').value.trim();
+    if (!title) {
+      $('issue-edit-message').textContent = '请输入 Issue 标题';
+      return;
+    }
+    $('issue-edit-submit').disabled = true;
+    $('issue-edit-message').textContent = '';
+    updateIssue(repo, number, { title: title, body: $('issue-edit-body').value })
+      .then(function (updated) {
+        $('issue-edit-dialog').close();
+        // The row in the list carries the title and the timestamp, so the panel
+        // alone is half the update.
+        if (state.repo && state.repo.full_name === repo.full_name &&
+            state.issue && state.issue.number === number) {
+          state.issue = updated;
+          renderIssue(updated);
+        }
+        showToast('Issue #' + number + ' 已保存');
+        return loadIssues(seq.view);
+      })
+      .catch(function (error) { $('issue-edit-message').textContent = issueError(error); })
+      .finally(function () { $('issue-edit-submit').disabled = false; });
+  });
   $('issue-state').addEventListener('change', function (event) {
     state.issueState = event.target.value;
     state.issue = null;
@@ -2844,7 +3014,7 @@
     var issue = state.issue;
     var nextState = issue.state === 'open' ? 'closed' : 'open';
     $('issue-toggle-state').disabled = true;
-    updateIssue(state.repo, issue.number, nextState)
+    updateIssue(state.repo, issue.number, { state: nextState })
       .then(function (updated) {
         state.issue = updated;
         renderIssue(updated);
@@ -3119,6 +3289,8 @@
   });
 
   $('copy-clone').addEventListener('click', copyCloneUrl);
+  $('download-zip').addEventListener('click', function () { downloadArchive('zip'); });
+  $('download-tgz').addEventListener('click', function () { downloadArchive('tar.gz'); });
   $('copy-push').addEventListener('click', function () {
     copyText($('first-push-commands').textContent, '已复制推送命令');
   });

@@ -4,7 +4,7 @@
 --          repo_exists, repo_exists_of, repo_get, repo_list, repo_create,
 --          repo_update, repo_rename, repo_collaborators, repo_collaborator_put,
 --          repo_collaborator_delete, repo_delete, repo_sync_head,
---          repo_index_load, repo_key
+--          repo_touch_push, repo_after_push, repo_index_load, repo_key
 --
 -- ON-DISK LAYOUT
 --   <REPO_ROOT>/<owner>/<name>.git     one bare repository per directory
@@ -215,13 +215,38 @@ end
 
 -- Every repository, optionally filtered by owner. Sorted, so the listing is
 -- stable between calls.
+-- When this repository was last worked on, for the listing order below.
+--
+-- Both spellings of "never pushed to" have to answer the same: the file backend
+-- simply has no key, and the MySQL column is NOT NULL and therefore 0. Falling
+-- back to created_at rather than to zero is what keeps a repository made this
+-- morning above one made last year, neither of which has been pushed to yet.
+local function activity_at(r)
+    local pushed = tonumber(r.pushed_at) or 0
+    if pushed > 0 then return pushed end
+    return tonumber(r.created_at) or 0
+end
+
 function g_exports.repo_list(owner)
     if not have_index() then return {} end
     local out = {}
     for _, r in pairs(index) do
         if not owner or r.owner == owner then out[#out + 1] = r end
     end
+    -- Most recently pushed first. Alphabetical was the order the map could be
+    -- put in without asking anything about the records, and it is the wrong one
+    -- for the page it feeds: the repository someone wants is nearly always the
+    -- one they last pushed to, and on an instance with thirty of them the name
+    -- order buries it. Sorted HERE rather than in the browser so a curl of
+    -- /api/v1/repos and the page agree about what "first" means.
+    --
+    -- The name is still the tie-break, and not only for looks: `pairs` has no
+    -- promised order, so without a total order two calls could disagree about
+    -- repositories that share a timestamp — which every repository created by
+    -- the same script in the same second does.
     table.sort(out, function(a, b)
+        local ta, tb = activity_at(a), activity_at(b)
+        if ta ~= tb then return ta > tb end
         if a.owner ~= b.owner then return a.owner < b.owner end
         return a.name < b.name
     end)
@@ -555,6 +580,44 @@ function g_exports.repo_sync_head(rec)
     end
     cfg_log_info('%s/%s: HEAD now points at %s', rec.owner, rec.name, pick)
     return true
+end
+
+-- Stamp the repository as pushed to, now.
+--
+-- WHEN receive-pack RETURNED, not when a ref actually moved. The report that
+-- says which refs were updated is the child's own stdout, and on the streaming
+-- transport it has already gone to the client by the time this runs — reading
+-- it would mean holding the packfile response back to parse it, which is a real
+-- cost for a timestamp. So a push the protection hook refused counts as
+-- activity too. That is the direction to be wrong in: the field answers "when
+-- was this repository last pushed to", and a refused push was one.
+--
+-- A failed save is logged and swallowed. git has already accepted the objects
+-- and the client has already been told so; turning a bookkeeping write into a
+-- failed push would trade the operation for the record of it.
+function g_exports.repo_touch_push(rec)
+    if type(rec) ~= 'table' then return false end
+    rec.pushed_at = os.time()
+    local ok, err = store_repo_put(rec)
+    if not ok then
+        cfg_log_warn('%s/%s: push timestamp not saved: %s',
+            tostring(rec.owner), tostring(rec.name), tostring(err))
+        return false
+    end
+    return true
+end
+
+-- Everything the index has to be told once a push has landed.
+--
+-- One entry point because both transports in smart.lua — streamed and staged —
+-- have to do both halves, and a second call added to one path only is exactly
+-- how the two drift apart. HEAD first: repo_sync_head may correct
+-- default_branch, and the stamp's save then carries that correction as well —
+-- the other order can leave a row holding a new timestamp and a stale branch.
+function g_exports.repo_after_push(rec)
+    local moved = repo_sync_head(rec)
+    repo_touch_push(rec)
+    return moved
 end
 
 -- Remove a repository from the index and from disk. The on-disk removal is a

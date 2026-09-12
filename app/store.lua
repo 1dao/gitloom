@@ -294,13 +294,14 @@ local function row_to_repo(row)
         private        = db_boolean(row.is_private),
         default_branch = db_text(row.default_branch, cfg_get('DEFAULT_BRANCH', 'main')),
         created_at     = db_number(row.created_at, 0),
+        pushed_at      = db_number(row.pushed_at, 0),
         collaborators  = decode_sub(row.collaborators),
     }
 end
 
 local function db_repos_load()
     local rows, err = db_query('SELECT owner, name, description, is_private, ' ..
-        'default_branch, created_at, collaborators FROM gl_repos')
+        'default_branch, created_at, pushed_at, collaborators FROM gl_repos')
     if not rows then return nil, 'could not read the repository index: ' .. tostring(err) end
     local map = {}
     for _, row in ipairs(rows) do
@@ -322,17 +323,17 @@ local function db_repo_put(r)
 
     local ok, err = db_exec(string.format(
         'INSERT INTO gl_repos (owner_key, name_key, owner, name, description, ' ..
-        'is_private, default_branch, created_at, collaborators) ' ..
-        'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ' ..
+        'is_private, default_branch, created_at, pushed_at, collaborators) ' ..
+        'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ' ..
         'ON DUPLICATE KEY UPDATE owner=VALUES(owner), name=VALUES(name), ' ..
         'description=VALUES(description), is_private=VALUES(is_private), ' ..
         'default_branch=VALUES(default_branch), created_at=VALUES(created_at), ' ..
-        'collaborators=VALUES(collaborators)',
+        'pushed_at=VALUES(pushed_at), collaborators=VALUES(collaborators)',
         db_quote(r.owner:lower()), db_quote(r.name:lower()),
         db_quote(r.owner), db_quote(r.name),
         db_quote(r.description or ''), db_quote(r.private and true or false),
         db_quote(r.default_branch or cfg_get('DEFAULT_BRANCH', 'main')),
-        db_quote(r.created_at or 0), db_quote(collab)))
+        db_quote(r.created_at or 0), db_quote(r.pushed_at or 0), db_quote(collab)))
     if not ok then return nil, 'could not save the repository: ' .. tostring(err) end
     return true
 end

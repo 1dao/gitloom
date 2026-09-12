@@ -171,8 +171,8 @@ local function service_rpc(req, ctx, prefix, service)
                                             }))
         if ok then
             if spec.write then
-                local hok, herr = pcall(repo_sync_head, rec)
-                if not hok then cfg_log_warn('HEAD sync after push failed: %s', tostring(herr)) end
+                local hok, herr = pcall(repo_after_push, rec)
+                if not hok then cfg_log_warn('index update after push failed: %s', tostring(herr)) end
             end
             return stream_response()
         end
@@ -189,11 +189,12 @@ local function service_rpc(req, ctx, prefix, service)
     end
 
     -- A push can create the repository's first branch, or a branch other than
-    -- the one HEAD names. Fix HEAD up now, while we know a push just landed.
+    -- the one HEAD names. Fix HEAD up now, while we know a push just landed —
+    -- and stamp the record, which is the same "we know a push just landed".
     if spec.write then
-        local sok, serr = pcall(repo_sync_head, rec)
+        local sok, serr = pcall(repo_after_push, rec)
         if not sok then
-            cfg_log_warn('HEAD sync after push failed: %s', tostring(serr))
+            cfg_log_warn('index update after push failed: %s', tostring(serr))
         end
     end
 

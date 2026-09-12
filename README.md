@@ -35,14 +35,18 @@ project does not mean walking back out through the listing each time.
 Where you are is in the address bar, so a file, a directory, a tag, the commit
 log, a comparison and an issue can each be bookmarked, shared, reloaded and gone
 Back from.
+Any revision can be downloaded as a zip or a tar.gz without cloning it, and the
+repository list is ordered by what was last pushed to rather than by name.
 Repositories can be renamed, searched (fixed-string, one revision at a time),
 and the account's own access tokens listed and revoked one by one. Owners can
 also grant existing accounts read or write access to private repositories, and
 an administrator can create those accounts from the same page — so the solo loop
 and the first multi-user loop both stay in the browser. Each repository's
 default branch is protected: it cannot be deleted, and it cannot be force-pushed
-over (`PROTECT_DEFAULT_BRANCH`). Issues have a tracker; pull requests are not implemented yet — see
-[docs/ROADMAP.md](docs/ROADMAP.md).
+over (`PROTECT_DEFAULT_BRANCH`). Issues have a tracker: an issue or a comment is written and rendered as Markdown
+through the same parser the README goes through, and an issue's title and body
+can be corrected from the page as well as closed. Comments cannot be edited.
+Pull requests are not implemented yet — see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
 
@@ -365,7 +369,7 @@ missing `/bin/sh`.
 | | |
 |---|---|
 | `GET /api/v1/version` | |
-| `GET /api/v1/repos` | repositories visible to the caller |
+| `GET /api/v1/repos` | repositories visible to the caller, most recently pushed to first |
 | `POST /api/v1/repos` | `{name, description?, private?, owner?, default_branch?}` |
 | `GET /api/v1/repos/:owner/:name` | detail, including refs and `empty` |
 | `PATCH /api/v1/repos/:owner/:name` | `{name?, description?, private?}`; owner or administrator. A rename moves a directory and re-keys the index, so it runs first and alone |
@@ -404,6 +408,7 @@ Browsing a repository's contents:
 | `GET .../lastcommits/:ref` and `.../lastcommits/:ref/<path>` | newest commit per entry, from one bounded history walk |
 | `GET .../raw/:ref/<path>` | file contents |
 | `GET .../search` | `?q=` `&ref=` `&limit=`; fixed-string `git grep` at one resolved revision |
+| `GET .../archive/:ref` | `?format=zip\|tar.gz`, default `zip`; the tree at that revision as one file, under a `<name>-<oid>/` prefix, bounded by `MAX_ARCHIVE_MB` |
 
 Authentication is HTTP Basic, with either a password or an access token as the
 password field. A token without `ttl_seconds` never expires, which is what a CI
