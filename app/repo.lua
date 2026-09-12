@@ -458,7 +458,7 @@ function g_exports.repo_collaborators(rec)
     local out = {}
     if rec and type(rec.collaborators) == 'table' then
         for username, permission in pairs(rec.collaborators) do
-            if type(username) == 'string' and
+            if type(username) == 'string' and username:sub(1, 1) ~= '@' and
                (permission == 'read' or permission == 'write') then
                 out[#out + 1] = { username = username, permission = permission }
             end
@@ -524,6 +524,31 @@ function g_exports.repo_collaborator_delete(owner, name, username)
         collaborators[username] = old_permission
         return nil, 'could not persist collaborator access: ' .. tostring(serr), 500
     end
+    return rec
+end
+
+-- Grants travel with the repository record through rename/delete. The key
+-- cannot collide with a username, and an ID is never reused by a new team.
+function g_exports.repo_team_grant(rec, id, permission)
+    if type(id) ~= 'string' or not id:match('^[0-9a-f]+$') or #id ~= 32 then
+        return nil, 'team needs a persistent ID', 400
+    end
+    if permission ~= nil and permission ~= 'read' and permission ~= 'write' then
+        return nil, 'permission must be read or write', 400
+    end
+    local candidate, grants = {}, {}
+    for k, v in pairs(rec) do candidate[k] = v end
+    for k, v in pairs(rec.collaborators or {}) do grants[k] = v end
+    grants['@team/' .. id] = permission
+    candidate.collaborators = grants
+    -- The JSON DAO serialises its live index, so swap just for the synchronous
+    -- file write. MySQL yields; retain the old visible record until it succeeds.
+    local k = repo_key(rec.owner, rec.name)
+    if not db_enabled() then index[k] = candidate end
+    local ok, err = store_repo_put(candidate)
+    if not ok then index[k] = rec; return nil, 'could not persist team grant', 500 end
+    rec.collaborators = grants
+    index[k] = rec
     return rec
 end
 

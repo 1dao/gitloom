@@ -166,6 +166,16 @@ local MIGRATIONS = {
             end,
         },
     },
+    {
+        id = 5,
+        name = 'collaboration documents',
+        up = {
+            [[CREATE TABLE IF NOT EXISTS gl_collaboration (
+                kind VARCHAR(32) NOT NULL PRIMARY KEY,
+                document LONGTEXT NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
+        },
+    },
 }
 
 function g_exports.migrate_latest()

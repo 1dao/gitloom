@@ -500,3 +500,40 @@ function g_exports.store_issue_repo_rename(owner, name, new_name)
     if db_enabled() then return db_issue_repo_rename(owner, name, new_name) end
     return file_issues_save()
 end
+
+-- Collaboration documents are published by their callers only after this
+-- write succeeds. One statement/atomic file replacement gives both stores the
+-- same failure semantics; callers serialize writes while the MySQL RPC yields.
+local function collaboration_path(kind)
+    assert(kind == 'organizations' or kind == 'pull_requests', 'bad collaboration store')
+    return util_path_join(cfg_get('DATA_DIR', 'data'), kind .. '.json')
+end
+
+function g_exports.store_collaboration_load(kind)
+    local path = collaboration_path(kind)
+    local raw
+    if db_enabled() then
+        local rows, err = db_query('SELECT document FROM gl_collaboration WHERE kind=' .. db_quote(kind))
+        if not rows then return nil, err end
+        raw = rows[1] and db_text(rows[1].document, '')
+    else
+        raw = util_file_read(path)
+        if not raw and util_file_exists(path) then return nil, 'collaboration file is unreadable' end
+    end
+    if raw == nil then return {} end
+    local ok, value = pcall(xutils.json_unpack, raw)
+    if not ok or type(value) ~= 'table' then return nil, 'invalid collaboration document' end
+    return value
+end
+
+function g_exports.store_collaboration_save(kind, value)
+    local path = collaboration_path(kind)
+    local raw = xutils.json_pack(value)
+    if not raw then return nil, 'invalid UTF-8 in collaboration document' end
+    if db_enabled() then
+        return db_exec('INSERT INTO gl_collaboration (kind, document) VALUES (' ..
+            db_quote(kind) .. ',' .. db_quote(raw) ..
+            ') ON DUPLICATE KEY UPDATE document=VALUES(document)')
+    end
+    return util_file_write_atomic(path, raw)
+end

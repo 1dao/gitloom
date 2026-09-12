@@ -229,6 +229,14 @@ function g_exports.auth_user_exists(username)
     return users[tostring(username or '')] ~= nil
 end
 
+function g_exports.auth_namespace_exists(name)
+    if not have_users() then return true end -- fail closed
+    name = tostring(name):lower()
+    for username in pairs(users) do if username:lower() == name then return true end end
+    for username in pairs(creating) do if username:lower() == name then return true end end
+    return false
+end
+
 -- ---------------------------------------------------------------------------
 -- Account recovery codes
 --
@@ -412,6 +420,7 @@ function g_exports.auth_user_create(username, password, opts)
     end
     if not have_users() then return nil, 'the account store is unavailable' end
     if users[username] then return nil, 'user already exists' end
+    if org_name_reserved(username) then return nil, 'owner namespace already exists' end
 
     local email = tostring(opts.email or (username .. '@gitloom.local'))
     if #email > MAX_EMAIL then
@@ -423,6 +432,7 @@ function g_exports.auth_user_create(username, password, opts)
     local pwhash = password_hash(password)
     creating[username] = nil
     if users[username] then return nil, 'user already exists' end
+    if org_name_reserved(username) then return nil, 'owner namespace already exists' end
     users[username] = {
         username   = username,
         pwhash     = pwhash,
@@ -730,6 +740,11 @@ local function collaborator_level(rec, user)
     return rec.collaborators[user.username]
 end
 
+function g_exports.auth_can_manage(rec, user)
+    if not rec or not user then return false end
+    return user.admin or rec.owner == user.username or org_repo_permission(rec, user) == 'admin'
+end
+
 function g_exports.auth_can_read(rec, user)
     if not rec then return false end
     if not rec.private then
@@ -742,14 +757,16 @@ function g_exports.auth_can_read(rec, user)
     if user.admin then return true end
     if rec.owner == user.username then return true end
     local level = collaborator_level(rec, user)
-    return level == 'read' or level == 'write'
+    local team = org_repo_permission(rec, user)
+    return level == 'read' or level == 'write' or team == 'read' or team == 'write' or team == 'admin'
 end
 
 function g_exports.auth_can_write(rec, user)
     if not rec or not user then return false end
     if user.admin then return true end
     if rec.owner == user.username then return true end
-    return collaborator_level(rec, user) == 'write'
+    local team = org_repo_permission(rec, user)
+    return collaborator_level(rec, user) == 'write' or team == 'write' or team == 'admin'
 end
 
 -- ---------------------------------------------------------------------------

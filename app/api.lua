@@ -217,7 +217,9 @@ local function h_repo_create(req, ctx)
     -- Creating under another account is an administrator action; everyone else
     -- creates under their own name whatever they ask for.
     local owner = b.owner or user.username
-    if owner ~= user.username and not user.admin then
+    local organization = org_get(owner)
+    if organization then owner = organization.slug end
+    if owner ~= user.username and not user.admin and not org_can_manage(organization, user) then
         return http_response_error(403, 'cannot create a repository under another account')
     end
 
@@ -266,8 +268,7 @@ local function h_repo_update(req, ctx)
     end
     -- Keep the same existence boundary as DELETE: a caller who cannot read a
     -- private repository gets 404, while a reader gets the useful 403.
-    if not auth_can_write(rec, user) or
-       (rec.owner ~= user.username and not user.admin) then
+    if not auth_can_manage(rec, user) then
         if auth_can_read(rec, user) then
             return http_response_error(403, 'only the owner or an administrator may update')
         end
@@ -322,7 +323,7 @@ local function managed_repo(req, ctx)
     if not rec or not repo_exists_of(rec) then
         return nil, http_response_error(404, 'no such repository')
     end
-    if rec.owner == user.username or user.admin then return rec, user end
+    if auth_can_manage(rec, user) then return rec, user end
     if auth_can_read(rec, user) then
         return nil, http_response_error(403, 'only the owner or an administrator may manage collaborators')
     end
@@ -364,36 +365,138 @@ local function h_collaborator_delete(req, ctx)
     return http_response_json(200, { removed = username })
 end
 
-local function org_admin(req, ctx)
-    local u, resp = require_user(req); if not u then return nil, resp end
-    local o = org_get(ctx.params.slug); if not o then return nil, http_response_error(404, 'no such organization') end
-    local role = o.members and o.members[u.username]
-    if u.admin or role == 'owner' or role == 'admin' then return o, u end
-    return nil, http_response_error(403, 'organization administrator required')
+-- Organization membership lists are visible only to members and system admins.
+-- Team maintainers may manage their team's membership but cannot grant access.
+local function organization_for_user(req, ctx, manage, maintain)
+    local user, bad = require_user(req)
+    if bad then return nil, nil, bad end
+    local org = org_get(ctx.params.slug)
+    if not org or (not user.admin and not org.members[user.username]) then
+        return nil, nil, http_response_error(404, 'no such organization')
+    end
+    if manage and not org_can_manage(org, user) then
+        local team = maintain and org.teams[ctx.params.team]
+        if not team or team.members[user.username] ~= 'maintainer' then
+            return nil, nil, http_response_error(403, 'organization administrator required')
+        end
+    end
+    return org, user
 end
-local function h_org_list() return http_response_json(200, {organizations=util_json_array(org_list())}) end
+
+local function organization_public(org, user)
+    return { slug = org.slug, name = org.name, owner = org.owner,
+        created_at = org.created_at, members = org.members, teams = org.teams,
+        can_manage = org_can_manage(org, user) and true or false }
+end
+
+local function h_org_list(req)
+    local user, bad = require_user(req)
+    if bad then return bad end
+    local out = {}
+    for _, org in ipairs(org_list(user)) do out[#out + 1] = organization_public(org, user) end
+    return http_response_json(200, { organizations = util_json_array(out), count = #out })
+end
+
 local function h_org_create(req)
-    local u, resp = require_user(req); if not u then return resp end
-    local b, e = body_json(req); if not b then return http_response_error(400,e) end
-    local o, err, st = org_create(u.username, b.slug, b.name); if not o then return http_response_error(st or 400, err) end
-    return http_response_json(201, o)
+    local user, bad = require_user(req)
+    if bad then return bad end
+    local body, err = body_json(req)
+    if not body then return http_response_error(400, err) end
+    local org, why, status = org_create(user.username, body.slug, body.name)
+    if not org then return http_response_error(status or 400, http_safe_error(why)) end
+    return http_response_json(201, organization_public(org, user))
 end
-local function h_org_get(req,ctx) local o=org_get(ctx.params.slug); if not o then return http_response_error(404,'no such organization') end; return http_response_json(200,o) end
-local function h_org_member_put(req,ctx)
-    local o, resp = org_admin(req,ctx); if not o then return resp end
-    local b,e=body_json(req); if not b then return http_response_error(400,e) end
-    local out,err,st=org_member_put(ctx.params.slug,ctx.params.username,b.role); if not out then return http_response_error(st or 400,err) end
-    return http_response_json(200,out)
+
+local function h_org_get(req, ctx)
+    local org, user, bad = organization_for_user(req, ctx)
+    if bad then return bad end
+    return http_response_json(200, organization_public(org, user))
 end
-local function h_org_team_put(req,ctx)
-    local o, resp = org_admin(req,ctx); if not o then return resp end
-    local b,e=body_json(req); if not b then return http_response_error(400,e) end
-    local out,err,st=org_team_put(ctx.params.slug,ctx.params.team,ctx.params.username,b.role); if not out then return http_response_error(st or 400,err) end
-    return http_response_json(200,out)
+
+local function h_org_teams(req, ctx)
+    local org, _, bad = organization_for_user(req, ctx)
+    if bad then return bad end
+    local out = {}
+    for _, team in pairs(org.teams) do out[#out + 1] = team end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    return http_response_json(200, { teams = util_json_array(out), count = #out })
 end
-local function h_org_member_delete(req,ctx) local o,resp=org_admin(req,ctx); if not o then return resp end; local out,e,st=org_member_delete(ctx.params.slug,ctx.params.username); if not out then return http_response_error(st or 400,e) end; return http_response_json(200,out) end
-local function h_org_teams(req,ctx) local a,e=org_teams(ctx.params.slug); if not a then return http_response_error(404,e) end; return http_response_json(200,{teams=util_json_array(a)}) end
-local function h_org_team_delete(req,ctx) local o,resp=org_admin(req,ctx); if not o then return resp end; local out,e,st=org_team_delete(ctx.params.slug,ctx.params.team); if not out then return http_response_error(st or 400,e) end; return http_response_json(200,out) end
+
+-- Mutations share the same auth and response path; there is no anonymous list
+-- shortcut that forgets to reject incorrect credentials.
+local function organization_mutation(action, maintain, needs_body, created)
+    return function(req, ctx)
+        local org, user, bad = organization_for_user(req, ctx, true, maintain)
+        if bad then return bad end
+        local body, err = {}
+        if needs_body then body, err = body_json(req) end
+        if not body then return http_response_error(400, err) end
+        -- A maintainer may not appoint another maintainer or demote one.
+        if maintain and not org_can_manage(org, user) then
+            local team = org.teams[ctx.params.team]
+            if body.role == 'maintainer' or team.members[ctx.params.username] == 'maintainer' then
+                return http_response_error(403, 'only organization administrators manage maintainers')
+            end
+        end
+        local updated, why, status = action(org, ctx.params, body)
+        if not updated then return http_response_error(status or 400, http_safe_error(why)) end
+        return http_response_json(created and 201 or 200, organization_public(updated, user))
+    end
+end
+
+local h_org_member_put = organization_mutation(function(org, p, b)
+    return org_member_put(org.slug, p.username, b.role)
+end, false, true)
+local h_org_member_delete = organization_mutation(function(org, p)
+    return org_member_delete(org.slug, p.username)
+end)
+local h_org_team_create = organization_mutation(function(org, p, b)
+    return org_team_create(org.slug, b.name)
+end, false, true, true)
+local h_org_team_put = organization_mutation(function(org, p, b)
+    return org_team_put(org.slug, p.team, p.username, b.role)
+end, true, true)
+local h_org_team_member_delete = organization_mutation(function(org, p)
+    return org_team_member_delete(org.slug, p.team, p.username)
+end, true)
+local h_org_team_delete = organization_mutation(function(org, p)
+    return org_team_delete(org.slug, p.team)
+end)
+
+local function h_repo_teams(req, ctx)
+    local rec, bad = managed_repo(req, ctx)
+    if not rec then return bad end
+    local org = org_get(rec.owner)
+    if not org then return http_response_error(400, 'repository is not owned by an organization') end
+    local out = {}
+    for _, team in pairs(org.teams) do
+        local grant = team.id and (rec.collaborators or {})['@team/' .. team.id]
+        if grant then out[#out + 1] = { name = team.name, permission = grant } end
+    end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    return http_response_json(200, { teams = util_json_array(out), count = #out })
+end
+
+local function h_repo_team_grant(req, ctx)
+    local rec, bad = managed_repo(req, ctx)
+    if not rec then return bad end
+    local org = org_get(rec.owner)
+    local team = org and org.teams[ctx.params.team]
+    if not team then return http_response_error(404, 'no such team') end
+    local permission
+    if req.method ~= 'DELETE' then
+        local body, err = body_json(req)
+        if not body then return http_response_error(400, err) end
+        permission = body.permission
+        if permission ~= 'read' and permission ~= 'write' then
+            return http_response_error(400, 'permission must be read or write')
+        end
+    end
+    local updated, err, status = repo_team_grant(rec, team.id, permission)
+    if not updated then return http_response_error(status or 400, http_safe_error(err)) end
+    return http_response_json(200, { name = team.name, permission = permission or 'none' })
+end
+
 local function h_pr_list(req,ctx) local a,resp=identify_optional(req); if resp then return resp end; return http_response_json(200,{pull_requests=util_json_array(pr_list(ctx.params.owner,ctx.params.name))}) end
 local function h_pr_create(req,ctx) local u,resp=require_user(req); if not u then return resp end; local b,e=body_json(req); if not b then return http_response_error(400,e) end; local p,er,st=pr_create(ctx.params.owner,ctx.params.name,u.username,b); if not p then return http_response_error(st or 400,er) end; return http_response_json(201,p) end
 local function h_pr_get(req,ctx) local p=pr_get(ctx.params.owner,ctx.params.name,ctx.params.number); if not p then return http_response_error(404,'no such pull request') end; return http_response_json(200,p) end
@@ -526,8 +629,7 @@ local function h_repo_delete(req, ctx)
     --
     -- Someone who CAN read it gets the honest 403: they already know it is
     -- there, so the accurate reason is more useful than a false 404.
-    if not auth_can_write(rec, user) or
-       (rec.owner ~= user.username and not user.admin) then
+    if not auth_can_manage(rec, user) then
         if auth_can_read(rec, user) then
             return http_response_error(403, 'only the owner or an administrator may delete')
         end
@@ -1136,9 +1238,11 @@ function g_exports.api_install()
     http_post('/api/v1/organizations', h_org_create)
     http_get('/api/v1/organizations/:slug', h_org_get)
     http_get('/api/v1/organizations/:slug/teams', h_org_teams)
+    http_post('/api/v1/organizations/:slug/teams', h_org_team_create)
     http_put('/api/v1/organizations/:slug/members/:username', h_org_member_put)
     http_delete('/api/v1/organizations/:slug/members/:username', h_org_member_delete)
     http_put('/api/v1/organizations/:slug/teams/:team/members/:username', h_org_team_put)
+    http_delete('/api/v1/organizations/:slug/teams/:team/members/:username', h_org_team_member_delete)
     http_delete('/api/v1/organizations/:slug/teams/:team', h_org_team_delete)
     http_get('/api/v1/repos/:owner/:name/pulls', h_pr_list)
     http_post('/api/v1/repos/:owner/:name/pulls', h_pr_create)
@@ -1156,6 +1260,9 @@ function g_exports.api_install()
     http_get('/api/v1/repos/:owner/:name/collaborators', h_collaborator_list)
     http_put('/api/v1/repos/:owner/:name/collaborators/:username', h_collaborator_put)
     http_delete('/api/v1/repos/:owner/:name/collaborators/:username', h_collaborator_delete)
+    http_get('/api/v1/repos/:owner/:name/teams', h_repo_teams)
+    http_put('/api/v1/repos/:owner/:name/teams/:team', h_repo_team_grant)
+    http_delete('/api/v1/repos/:owner/:name/teams/:team', h_repo_team_grant)
     http_get('/api/v1/repos/:owner/:name/issues', h_issue_list)
     http_post('/api/v1/repos/:owner/:name/issues', h_issue_create)
     http_get('/api/v1/repos/:owner/:name/issues/:number', h_issue_get)

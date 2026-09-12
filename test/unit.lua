@@ -32,6 +32,7 @@ boot.load_script('app/store.lua')
 boot.load_script('app/proc.lua')
 boot.load_script('app/pkt.lua')
 boot.load_script('app/repo.lua')
+boot.load_script('app/org.lua')
 boot.load_script('app/git.lua')
 boot.load_script('app/auth_ratelimit.lua')   -- before auth.lua; see main.lua
 boot.load_script('app/auth.lua')

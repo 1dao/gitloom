@@ -51,6 +51,8 @@ boot.load_script('app/proc.lua')     -- proc_*
 boot.load_script('app/pkt.lua')      -- pkt_*
 boot.load_script('app/repo.lua')     -- repo_*
 boot.load_script('app/issue.lua')    -- issue_*
+boot.load_script('app/org.lua')      -- organization membership and team grants
+boot.load_script('app/pr.lua')       -- pull requests and reviews
 boot.load_script('app/protect.lua')  -- protect_*   what a push may not do
 boot.load_script('app/git.lua')      -- git_*
 -- Before auth.lua, and not only by convention: namespace ownership is decided
@@ -163,6 +165,7 @@ local function boot_async()
     -- __init runs on the main state where a yield is not possible.
     if not repo_index_load() then xthread.stop(1); return end
     if not issue_index_load() then xthread.stop(1); return end
+    if not org_index_load() then xthread.stop(1); return end
     if not auth_load() then xthread.stop(1); return end
     auth_bootstrap()
     cfg_log_system('store: %s', store_describe())
