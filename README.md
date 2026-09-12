@@ -33,8 +33,12 @@ Stepping into a directory or opening a file splits the repository page in two �
 the tree on the left, what you clicked on the right — so reading across a
 project does not mean walking back out through the listing each time.
 Where you are is in the address bar, so a file, a directory, a tag, the commit
-log, a comparison and an issue can each be bookmarked, shared, reloaded and gone
-Back from.
+log, a comparison, an issue, a line of a file and one file's history can each be
+bookmarked, shared, reloaded and gone Back from.
+Source is numbered line by line: clicking a number puts it in the URL, and a URL
+that names one opens the file scrolled to it and marked.
+A file can be found by name as well as by content — one box, two questions —
+and the file panel can ask for the history of just that path.
 Any revision can be downloaded as a zip or a tar.gz without cloning it, and the
 repository list is ordered by what was last pushed to rather than by name.
 Repositories can be renamed, searched (fixed-string, one revision at a time),
@@ -408,6 +412,7 @@ Browsing a repository's contents:
 | `GET .../lastcommits/:ref` and `.../lastcommits/:ref/<path>` | newest commit per entry, from one bounded history walk |
 | `GET .../raw/:ref/<path>` | file contents |
 | `GET .../search` | `?q=` `&ref=` `&limit=`; fixed-string `git grep` at one resolved revision |
+| `GET .../paths/:ref` | `?q=` `&limit=`; files whose PATH contains `q`, name matches first. The query is filtered in Lua and never reaches a command line |
 | `GET .../archive/:ref` | `?format=zip\|tar.gz`, default `zip`; the tree at that revision as one file, under a `<name>-<oid>/` prefix, bounded by `MAX_ARCHIVE_MB` |
 
 Authentication is HTTP Basic, with either a password or an access token as the

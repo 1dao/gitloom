@@ -87,6 +87,11 @@
               <nav id="path-crumbs" class="path-crumbs" aria-label="目录路径"></nav>
               <div class="toolbar-spacer"></div>
               <form id="search-form" class="search-form">
+                <!-- 一个选择器换掉两个搜索框：问的是同一个版本，只是问内容还是问文件名。 -->
+                <select id="search-kind" aria-label="搜索方式">
+                  <option value="content">内容</option>
+                  <option value="path">文件名</option>
+                </select>
                 <input id="search-input" type="search" placeholder="在这个版本里查找" aria-label="在仓库中搜索" autocomplete="off">
                 <button class="button button-quiet" type="submit">查找</button>
               </form>
@@ -133,6 +138,7 @@
                     </div>
                     <div class="file-actions">
                       <button class="button button-quiet" id="toggle-render" type="button" hidden>查看源码</button>
+                      <button class="button button-quiet" id="file-history" type="button">历史</button>
                       <a class="button button-quiet" id="download-file" download hidden>下载</a>
                       <button class="button button-quiet" id="close-file" type="button">关闭</button>
                     </div>
@@ -159,6 +165,11 @@
               <span class="toolbar-title">提交记录</span>
               <div class="toolbar-spacer"></div>
               <span id="commit-count" class="muted"></span>
+            </div>
+            <!-- 只在按路径过滤时出现：没有过滤时它什么也不说，就不该占一行。 -->
+            <div id="commit-filter" class="commit-filter" hidden>
+              <span>只看</span><code id="commit-filter-path"></code>
+              <button class="button button-quiet" id="commit-filter-clear" type="button">看全部</button>
             </div>
             <div id="commit-list" class="commit-list"></div>
             <div id="commit-pagination" class="commit-pagination" hidden>

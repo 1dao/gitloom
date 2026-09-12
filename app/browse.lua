@@ -5,7 +5,7 @@
 --          browse_archive_kind, browse_archive,
 --          browse_log, browse_last_commits, browse_commit, browse_diff,
 --          browse_merge_base, browse_compare, browse_compare_diff,
---          browse_refs, browse_search
+--          browse_refs, browse_search, browse_paths
 --
 -- Everything here answers "what is IN this repository", as opposed to repo.lua,
 -- which answers "which repositories are there". All of it shells out; all of it
@@ -218,6 +218,82 @@ function g_exports.browse_blob_file(dir, spec)
         return nil, 'could not read the file'
     end
     return out
+end
+
+-- ---------------------------------------------------------------------------
+-- Finding a file by its name
+-- ---------------------------------------------------------------------------
+
+-- Paths at `oid` whose name contains `query`, case-insensitively.
+--
+-- The other half of "find it in this revision": browse_search asks git what is
+-- IN the files, and this asks what the files are CALLED. A repository of any
+-- size makes the second question the more common one -- the tree loads a
+-- directory at a time, so reaching app/browse.lua from the root is four clicks
+-- and knowing where it lives.
+--
+-- THE QUERY NEVER REACHES A COMMAND LINE. git is asked for the whole path list
+-- and the filtering happens here, in Lua. That is not laziness about handing
+-- git a pathspec: a pathspec is a magic mini-language (`:(glob)`, `:!`, and a
+-- leading dash) and rule 1 of this file says caller text does not become argv.
+-- A substring match on a string we already hold cannot be any of that.
+--
+-- Bounded twice, because a tree has no size limit: SCAN_MAX paths are looked
+-- at and `limit` are returned, and the answer says which bound it hit. A
+-- repository large enough to reach the scan bound is one where the first
+-- matches are the ones being looked for anyway.
+--
+-- Ordering is what makes it usable rather than merely correct. A match in the
+-- FILE NAME beats one in a directory further up (typing "browse" wants
+-- app/browse.lua, not app/browse/anything-else.txt), a shorter path beats a
+-- longer one, and the path itself breaks the tie so two calls agree.
+local SCAN_MAX = 20000
+
+function g_exports.browse_paths(dir, oid, query, limit)
+    local needle = tostring(query or '')
+    if needle == '' then return nil, 'a search string is required' end
+    if #needle > 256 then return nil, 'search string is too long' end
+    limit = math.max(1, math.min(tonumber(limit) or 100, 500))
+    needle = needle:lower()
+
+    local r = git_exec({ 'ls-tree', '-r', '-z', '--name-only',
+                         '--full-name', '--end-of-options', oid },
+                       { cwd = dir, max_capture = 8 * 1024 * 1024 })
+    if not r.ok then
+        cfg_log_warn('git ls-tree failed (exit %s): %s', tostring(r.exit_code),
+            util_str_trim(tostring(r.stderr or '')))
+        return nil, 'could not read the file list'
+    end
+
+    local hits, scanned, truncated = {}, 0, false
+    -- -z, so the separator is NUL: a file name may contain a newline, and a
+    -- line-based split would report one such name as two paths that do not
+    -- exist. Same reason browse_tree reads it this way.
+    for path in tostring(r.stdout or ''):gmatch('([^%z]+)') do
+        scanned = scanned + 1
+        if scanned > SCAN_MAX then truncated = true; break end
+        local lower = path:lower()
+        if lower:find(needle, 1, true) then
+            local base = lower:match('([^/]+)$') or lower
+            hits[#hits + 1] = {
+                path = path,
+                -- Sort keys, dropped before the response is built.
+                in_name = base:find(needle, 1, true) and 0 or 1,
+                length = #path,
+            }
+        end
+    end
+
+    table.sort(hits, function(a, b)
+        if a.in_name ~= b.in_name then return a.in_name < b.in_name end
+        if a.length ~= b.length then return a.length < b.length end
+        return a.path < b.path
+    end)
+
+    local out = {}
+    for i = 1, math.min(#hits, limit) do out[i] = hits[i].path end
+    if #hits > limit then truncated = true end
+    return { paths = out, count = #out, scanned = scanned, truncated = truncated }
 end
 
 -- ---------------------------------------------------------------------------

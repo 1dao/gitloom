@@ -36,6 +36,12 @@
     // DOM. The address bar has to be able to say both, so they live here now.
     view: 'code',
     file: '',
+    // The line a blob URL names, and the path a commit list is filtered to.
+    // Both are route state rather than panel state, which is the whole point of
+    // them: a line worth pointing at is a line worth linking to.
+    fileLine: 0,
+    commitPath: '',
+    searchKind: 'content',
   };
 
   // Every navigation takes a ticket. A response whose ticket is no longer the
@@ -1031,6 +1037,40 @@
     syncCodeLayout();
   }
 
+  // The strip above the list, which exists only while there is a filter to
+  // describe. The path is shown whole: a commit list filtered to a file is only
+  // legible if you can see WHICH file, and truncating it in the middle is how
+  // two files in different directories start looking like the same one.
+  function renderCommitFilter() {
+    var strip = $('commit-filter');
+    if (!strip) return;
+    strip.hidden = !state.commitPath;
+    $('commit-filter-path').textContent = state.commitPath || '';
+  }
+
+  // "Show me this file's history" -- the commit list, walked for one path.
+  //
+  // The API has taken ?path= since the browsing endpoints shipped and nothing
+  // ever sent it, so this is a button rather than a feature: the same list, the
+  // same pagination, one parameter.
+  function openPathHistory(path) {
+    if (!state.repo || !path) return;
+    state.commitPath = path;
+    state.commitSkip = 0;
+    showView('commits');
+    routeWrite();
+    loadCommits(seq.view);
+    $('commits-view').scrollIntoView({ block: 'start' });
+  }
+
+  function clearPathHistory() {
+    if (!state.commitPath) return;
+    state.commitPath = '';
+    state.commitSkip = 0;
+    routeWrite();
+    loadCommits(seq.view);
+  }
+
   function resetCommits(message) {
     state.commits = [];
     state.commitHasMore = false;
@@ -1113,6 +1153,8 @@
     state.compareBase = target.compareBase || repo.default_branch || 'main';
     state.compareHead = target.compareHead || state.branch;
     state.path = target.path || '';
+    state.fileLine = target.line || 0;
+    state.commitPath = target.commitPath || '';
     state.commitSkip = 0;
     state.commitHasMore = false;
     resetCommits();
@@ -1152,7 +1194,7 @@
     // a URL should still open, and dropping it silently is worse than a panel
     // that reports its own error.
     function applyTarget(done) {
-      if (target.file) loadFile(target.file);
+      if (target.file) loadFile(target.file, target.line);
       if (target.issue) loadIssue(target.issue);
       // Now the URL can be written, and with replace(): the state may differ
       // from what was asked for — loadBranches falls back when the ref is gone,
@@ -1812,10 +1854,66 @@
         state.path = dir;
         loadTree(view);
       }
-      loadFile(hit.path);
+      loadFile(hit.path, hit.line);
       routeWrite();
     });
     list.appendChild(row);
+  }
+
+  // A row naming a file, and nothing else to say about it: the answer to "where
+  // is it" is the path, so the path is the whole row.
+  function renderPathHit(path, list) {
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'tree-row file search-hit';
+    var where = document.createElement('span');
+    where.className = 'tree-name';
+    var dir = path.replace(/\/?[^\/]*$/, '');
+    if (dir) {
+      var lead = document.createElement('span');
+      lead.className = 'muted';
+      lead.textContent = dir + '/';
+      where.appendChild(lead);
+    }
+    var name = document.createElement('strong');
+    name.textContent = path.split('/').pop();
+    where.appendChild(name);
+    row.appendChild(where);
+    row.addEventListener('click', function () {
+      // Same argument as a content hit: the listing behind an open file has to
+      // be the directory that file sits in.
+      if (dir !== state.path) {
+        var view = beginView();
+        state.path = dir;
+        loadTree(view);
+      }
+      loadFile(path);
+      routeWrite();
+    });
+    list.appendChild(row);
+  }
+
+  // The file finder. Content search asks what is IN the files; this asks what
+  // they are CALLED, which on any repository past a few directories is the more
+  // common question -- the tree loads one level at a time, so reaching a file
+  // means already knowing where it lives.
+  function runPathSearch(query, view, list) {
+    var suffix = '/paths/' + encodeRef(state.branch) + '?q=' + encodeURIComponent(query);
+    json(repoPath(suffix)).then(function (data) {
+      if (!viewIsCurrent(view)) return;
+      var paths = Array.isArray(data.paths) ? data.paths : [];
+      list.textContent = '';
+      if (!paths.length) {
+        setError(list, '没有匹配的文件名');
+        return;
+      }
+      paths.forEach(function (path) { renderPathHit(path, list); });
+      $('search-caption').textContent = '文件名 “' + query + '” · ' + paths.length + ' 个' +
+        (data.truncated ? '（结果已截断）' : '');
+    }).catch(function (error) {
+      if (!viewIsCurrent(view)) return;
+      setError(list, detailMessage(error));
+    });
   }
 
   function runSearch(query) {
@@ -1826,6 +1924,8 @@
     panel.hidden = false;
     setLoading(list, '正在搜索…');
     $('search-caption').textContent = '搜索 “' + query + '”';
+
+    if (state.searchKind === 'path') return runPathSearch(query, view, list);
 
     var suffix = '/search?q=' + encodeURIComponent(query) +
                  '&ref=' + encodeRef(state.branch);
@@ -2027,6 +2127,10 @@
     var rendered = $('file-render');
 
     state.fileText = body;
+    // Whatever the previous file left behind. numberLines puts them back when
+    // this one is source and short enough to number.
+    code.classList.remove('numbered');
+    pre.classList.remove('numbered-block');
 
     if (looksBinary(body)) {
       $('toggle-render').hidden = true;
@@ -2051,6 +2155,96 @@
     pre.hidden = false;
     code.textContent = body;
     highlightInto(code, window.glHighlight && window.glHighlight.languageFor(path));
+    numberLines(code);
+    if (state.fileLine) markLine(state.fileLine, true);
+  }
+
+  // How many lines still get a gutter. Past this the block is left as one run
+  // of text: the numbering is one element per line and a file with a hundred
+  // thousand of them is a page that stops responding, which costs more than the
+  // numbers are worth. The highlighter has its own ceiling for the same reason.
+  var LINE_LIMIT = 5000;
+
+  // Split the ALREADY HIGHLIGHTED block into one row per line.
+  //
+  // After, not instead of: the highlighter is stateful across lines -- a block
+  // comment or a multi-line string is one token -- so colouring line by line
+  // would break exactly the constructs that span lines. paint() leaves a flat
+  // list of text nodes and single-level spans, so the split walks that list and
+  // clones a span whenever its text crosses a newline, which keeps the class on
+  // both halves.
+  //
+  // The number sits in its own cell, sticky to the left so it survives a
+  // horizontal scroll, and user-select: none so copying the file does not come
+  // with a column of digits down the side.
+  function numberLines(code) {
+    var source = code.textContent;
+    if (!source) return;
+    var total = source.split('\n').length;
+    if (total > LINE_LIMIT) return;
+
+    var rows = document.createDocumentFragment();
+    var row = startRow(rows, 1);
+    var line = 1;
+
+    Array.prototype.slice.call(code.childNodes).forEach(function (node) {
+      var cls = node.nodeType === 1 ? node.className : '';
+      var pieces = (node.textContent || '').split('\n');
+      pieces.forEach(function (piece, i) {
+        if (i > 0) {
+          line += 1;
+          row = startRow(rows, line);
+        }
+        if (piece === '') return;
+        if (cls) {
+          var span = document.createElement('span');
+          span.className = cls;
+          span.textContent = piece;
+          row.appendChild(span);
+        } else {
+          row.appendChild(document.createTextNode(piece));
+        }
+      });
+    });
+
+    code.textContent = '';
+    code.appendChild(rows);
+    code.classList.add('numbered');
+    if (code.parentNode && code.parentNode.classList) code.parentNode.classList.add('numbered-block');
+  }
+
+  // One row: the number cell, then the text cell the tokens go into.
+  function startRow(parent, number) {
+    var wrap = document.createElement('div');
+    wrap.className = 'code-row';
+    wrap.dataset.line = String(number);
+    var num = document.createElement('button');
+    num.type = 'button';
+    num.className = 'code-num';
+    num.textContent = String(number);
+    num.title = '链接到第 ' + number + ' 行';
+    wrap.appendChild(num);
+    var text = document.createElement('span');
+    text.className = 'code-text';
+    wrap.appendChild(text);
+    parent.appendChild(wrap);
+    return text;
+  }
+
+  // Mark a line as the one being pointed at, and optionally bring it on screen.
+  // Called both from a click and from a restored URL, which is why the scroll
+  // is a parameter: clicking a line you are already looking at should not move
+  // the page under you.
+  function markLine(number, scroll) {
+    var code = $('file-code');
+    var rows = code.querySelectorAll('.code-row');
+    var target = null;
+    for (var i = 0; i < rows.length; i += 1) {
+      var on = Number(rows[i].dataset.line) === number;
+      rows[i].classList.toggle('active', on);
+      if (on) target = rows[i];
+    }
+    if (target && scroll) target.scrollIntoView({ block: 'center' });
   }
 
   // An object URL is a document-lifetime reference to the bytes behind it, so
@@ -2131,8 +2325,12 @@
   // Through api() and a blob rather than pointing <img src> at the raw URL: the
   // URL needs an Authorization header, which an <img> cannot send, so a private
   // repository's images would 401.
-  function loadFile(path) {
+  function loadFile(path, line) {
     var ticket = (seq.file += 1);
+    // A click opens a file at no line in particular; a restored URL opens it at
+    // the one it names. Passed in rather than read from state, so the one code
+    // path that HAS a line to honour is the one that says so.
+    state.fileLine = Math.max(0, Math.floor(Number(line)) || 0);
     var panel = $('file-panel');
     var text = $('file-content');
     var wrap = $('file-image-wrap');
@@ -2189,6 +2387,7 @@
   function hideFile() {
     seq.file += 1;   // whatever is in flight no longer has a panel to land in
     state.file = '';
+    state.fileLine = 0;
     state.fileText = '';
     state.fileRaw = false;
     releaseFileBlob();
@@ -2221,8 +2420,15 @@
     var list = $('commit-list');
     $('commit-pagination').hidden = true;
     setLoading(list, '正在读取提交记录…');
-    return json(repoPath('/commits?ref=' + encodeURIComponent(state.branch) +
-      '&limit=' + COMMIT_PAGE_SIZE + '&skip=' + requestedSkip)).then(function (data) {
+    renderCommitFilter();
+    // The path filter is the server's, not a filter over what came back: git
+    // walks the history OF that path, so a file touched once in a thousand
+    // commits still answers in one page instead of being looked for across
+    // forty of them.
+    var query = '/commits?ref=' + encodeURIComponent(state.branch) +
+      '&limit=' + COMMIT_PAGE_SIZE + '&skip=' + requestedSkip +
+      (state.commitPath ? '&path=' + encodeURIComponent(state.commitPath) : '');
+    return json(repoPath(query)).then(function (data) {
       if (!viewIsCurrent(view) || ticket !== seq.commits) return [];
       state.commits = Array.isArray(data.commits) ? data.commits : [];
       state.commitSkip = Number.isFinite(Number(data.skip)) ? Number(data.skip) : requestedSkip;
@@ -2233,7 +2439,10 @@
       list.textContent = '';
       if (!state.commits.length) {
         updateCommitPagination();
-        setError(list, '这个分支还没有提交');
+        // Two different nothings: a branch with no commits at all, and a path
+        // this branch never touched. Saying the first about the second sends
+        // somebody looking for a bug in the repository.
+        setError(list, state.commitPath ? '这个分支上没有改动过它' : '这个分支还没有提交');
         return [];
       }
       state.commits.forEach(function (commit) { renderCommit(commit, list); });
@@ -2250,7 +2459,9 @@
       // a repository the user is looking straight at. It is the first thing
       // they see after creating one, so say what is actually true. The tree
       // panel above says the same for the same reason.
-      setError(list, error.status === 404 ? '这个分支还没有提交' : error.message);
+      setError(list, error.status === 404
+        ? (state.commitPath ? '这个分支上没有改动过它' : '这个分支还没有提交')
+        : error.message);
       return [];
     });
   }
@@ -2614,7 +2825,8 @@
       return base + '/issues' + (state.issue ? '/' + state.issue.number : '');
     }
     if (state.view === 'commits') {
-      return base + '/commits/' + encodeRef(state.branch);
+      return base + '/commits/' + encodeRef(state.branch) +
+             (state.commitPath ? '?path=' + encodeURIComponent(state.commitPath) : '');
     }
     if (state.view === 'compare') {
       return base + '/compare/' + encodeRef(state.compareBase) + '/' +
@@ -2622,7 +2834,8 @@
     }
     var target = state.file || state.path;
     return base + (state.file ? '/blob/' : '/tree/') + encodeRef(state.branch) +
-           (target ? '/' + encodePath(target) : '');
+           (target ? '/' + encodePath(target) : '') +
+           (state.file && state.fileLine ? '?line=' + state.fileLine : '');
   }
 
   // Write the current state to the address bar. `replace` is for the first
@@ -2639,8 +2852,37 @@
   //
   // The repository has to be found in a list that is already loaded, so the
   // first call waits for loadRepos — see the bottom of this file.
+  // Everything a route needs to say that is NOT a path segment: which line of a
+  // file, which path a commit list is filtered to.
+  //
+  // A query string rather than more segments, because the last segment of a
+  // blob route is a file path and swallows everything after it -- there is no
+  // segment left to be a marker, and a repository may contain a directory
+  // called anything a marker could be. A raw '?' cannot be part of the path
+  // either: encodePath is encodeURIComponent per segment, which writes a '?' in
+  // a real file name as %3F. So the first raw '?' is unambiguously this.
+  function routeQuery(raw) {
+    var out = {};
+    tostr(raw).split('&').forEach(function (pair) {
+      if (!pair) return;
+      var eq = pair.indexOf('=');
+      var key = eq === -1 ? pair : pair.slice(0, eq);
+      var value = eq === -1 ? '' : pair.slice(eq + 1);
+      try { out[decodeURIComponent(key)] = decodeURIComponent(value); } catch (e) { /* keep the rest */ }
+    });
+    return out;
+  }
+
+  function tostr(v) { return v == null ? '' : String(v); }
+
   function routeApply() {
     var raw = (location.hash || '').replace(/^#\/?/, '');
+    var query = {};
+    var mark = raw.indexOf('?');
+    if (mark !== -1) {
+      query = routeQuery(raw.slice(mark + 1));
+      raw = raw.slice(0, mark);
+    }
     var parts = [];
     raw.split('/').forEach(function (piece) {
       if (piece !== '') parts.push(decodeURIComponent(piece));
@@ -2669,6 +2911,7 @@
     } else if (kind === 'commits') {
       target.view = 'commits';
       target.ref = parts[3];
+      target.commitPath = query.path || '';
     } else if (kind === 'compare') {
       target.view = 'compare';
       target.compareBase = parts[3];
@@ -2676,7 +2919,12 @@
     } else if (kind === 'tree' || kind === 'blob') {
       target.ref = parts[3];
       var rest = parts.slice(4).join('/');
-      if (kind === 'blob') target.file = rest; else target.path = rest;
+      if (kind === 'blob') {
+        target.file = rest;
+        target.line = Math.max(0, Math.floor(Number(query.line)) || 0);
+      } else {
+        target.path = rest;
+      }
     }
     selectRepo(repo, target);
   }
@@ -3049,6 +3297,36 @@
     runSearch(query);
   });
   $('search-close').addEventListener('click', closeSearch);
+  // Changing what the box means re-asks the question that is already typed in
+  // it, rather than leaving the old answer on screen under a new label.
+  $('search-kind').addEventListener('change', function (event) {
+    state.searchKind = event.target.value === 'path' ? 'path' : 'content';
+    $('search-input').placeholder = state.searchKind === 'path'
+      ? '按文件名查找' : '在这个版本里查找';
+    var query = $('search-input').value.trim();
+    if (query && !$('search-panel').hidden) runSearch(query);
+  });
+
+  $('file-history').addEventListener('click', function () {
+    if (state.file) openPathHistory(state.file);
+  });
+  $('commit-filter-clear').addEventListener('click', clearPathHistory);
+
+  // Delegated, because the rows are rebuilt for every file: one listener on the
+  // block outlives them all, and a listener per line on a five-thousand-line
+  // file is five thousand of them.
+  $('file-code').addEventListener('click', function (event) {
+    var button = event.target.closest ? event.target.closest('.code-num') : null;
+    if (!button) return;
+    var row = button.parentNode;
+    var line = Number(row && row.dataset ? row.dataset.line : 0);
+    if (!line) return;
+    // Clicking the line you are already pointing at clears it, which is the
+    // only way back to a URL without one short of editing the address bar.
+    state.fileLine = state.fileLine === line ? 0 : line;
+    markLine(state.fileLine, false);
+    routeWrite();
+  });
 
   // ---------------------------------------------------------------------------
   // Accounts

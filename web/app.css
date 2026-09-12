@@ -376,6 +376,35 @@ h1, h2, h3, p { margin-top: 0; }
 .code-block, .diff-block { margin: 0; padding: 18px; overflow: auto; color: #d5e1ea; background: #0c141d; font: 13px/1.65 var(--mono); tab-size: 2; white-space: pre; }
 .code-block { max-height: 560px; }
 
+/* One row per line, once the block has been numbered. The padding moves from
+   the <pre> to the rows so a highlighted line reaches both edges instead of
+   stopping short of them. */
+.code-block.numbered-block { padding: 12px 0; }
+.code-row { display: flex; align-items: flex-start; min-width: max-content; }
+.code-row.active { background: rgba(141, 168, 255, .13); }
+/* Sticky, so the numbers stay put when a long line scrolls the block sideways,
+   and user-select: none so copying the file does not come with a column of
+   digits down its left edge. */
+.code-num {
+  position: sticky; left: 0; z-index: 1;
+  flex: 0 0 auto; min-width: 52px; padding: 0 14px 0 18px;
+  border: 0; background: #0c141d; color: #4d6076;
+  font: inherit; text-align: right; cursor: pointer;
+  user-select: none; -webkit-user-select: none;
+}
+.code-row:hover .code-num { color: #8da0b3; }
+.code-row.active .code-num { color: var(--accent-2); }
+.code-text { flex: 1 1 auto; padding-right: 18px; }
+:root[data-theme="light"] .code-num { background: #f1f5f9; color: #8da0b3; }
+:root[data-theme="light"] .code-row.active { background: rgba(73, 104, 197, .1); }
+
+/* Only shown while the commit list is filtered to one path -- see loadCommits.
+   A strip that says nothing when there is no filter would be a permanent empty
+   row above the list. */
+.commit-filter { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+.commit-filter code { color: var(--text); font-family: var(--mono); font-size: 12px; }
+
+
 .commit-list { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel); box-shadow: var(--shadow); }
 .commit-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
 .commit-pagination .button:disabled { opacity: .42; cursor: default; border-color: var(--line-soft); }
@@ -599,6 +628,7 @@ h1, h2, h3, p { margin-top: 0; }
 .search-form { display: flex; align-items: center; gap: 7px; }
 .search-form input { width: 190px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; color: var(--text); background: var(--bg); outline: 0; font-size: 13px; }
 .search-form input:focus { border-color: var(--accent-2); }
+.search-form select { border: 1px solid var(--line); border-radius: 8px; padding: 8px 6px; color: var(--muted); background: var(--bg); outline: 0; font-size: 13px; }
 .search-hit { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 4px; text-align: left; }
 .search-line { display: block; overflow: hidden; text-overflow: ellipsis; white-space: pre; color: var(--muted); font: 12px/1.5 var(--mono); }
 

@@ -971,6 +971,29 @@ local INLINE_TYPES = {
     gif  = 'image/gif',
 }
 
+-- GET /api/v1/repos/:owner/:name/paths/:ref?q=&limit=
+--
+-- Its own endpoint rather than a mode on /search, because the two answer
+-- different questions with different shapes -- line hits there, paths here --
+-- and one endpoint replying in two shapes is how a client ends up branching on
+-- a field it did not ask for.
+local function h_paths(req, ctx)
+    local rec, dir = readable_repo(req, ctx)
+    if not rec then return dir end
+
+    local oid, refused = resolve_ref(dir, rec, ctx.params.ref)
+    if not oid then return refused end
+
+    local q = req.query or {}
+    local found, err = browse_paths(dir, oid, q.q, q.limit)
+    if not found then return http_response_error(400, http_safe_error(err)) end
+    return http_response_json(200, {
+        ref = refused, oid = oid, query = tostring(q.q or ''),
+        paths = util_json_array(found.paths),
+        count = found.count, scanned = found.scanned, truncated = found.truncated,
+    })
+end
+
 local function h_raw(req, ctx)
     local rec, dir = readable_repo(req, ctx)
     if not rec then return dir end
@@ -1114,6 +1137,7 @@ function g_exports.api_install()
     http_get('/api/v1/repos/:owner/:name/compare/:base/:head', h_compare)
     http_get('/api/v1/repos/:owner/:name/compare/:base/:head/diff', h_compare_diff)
     http_get('/api/v1/repos/:owner/:name/search', h_search)
+    http_get('/api/v1/repos/:owner/:name/paths/:ref', h_paths)
 
     cfg_log_info('management API installed')
 end

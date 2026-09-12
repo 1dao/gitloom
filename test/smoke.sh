@@ -287,6 +287,27 @@ grep -q 'id="issue-edit-dialog"' "$WORK/web.index" && grep -q 'id="issue-edit"' 
 curl -s "$BASE/app.js" | grep -q 'function openIssueEditDialog' \
     && ok 'the edit form is filled from the issue in hand' || bad 'the edit form is filled from the issue in hand' 'handler missing'
 
+# Reading code is the thing a single-person instance does most, and three of the
+# ways into it were missing: the file panel could not say what had happened to
+# the file, one box could only search contents, and no line had an address.
+grep -q 'id="file-history"' "$WORK/web.index" \
+    && ok 'a file offers its own history' || bad 'a file offers its own history' 'control missing'
+curl -s "$BASE/app.js" | grep -q 'function openPathHistory' \
+    && ok 'the history button filters the commit walk' || bad 'the history button filters the commit walk' 'handler missing'
+grep -q 'id="search-kind"' "$WORK/web.index" \
+    && ok 'the search box can be asked for file names' || bad 'the search box can be asked for file names' 'control missing'
+curl -s "$BASE/app.js" | grep -q 'function runPathSearch' \
+    && ok 'the file finder is wired to its endpoint' || bad 'the file finder is wired to its endpoint' 'handler missing'
+# The numbering runs AFTER the highlighter, because a block comment is one token
+# spanning many lines and colouring line by line would break exactly the
+# constructs that span them.
+curl -s "$BASE/app.js" | grep -q 'function numberLines' \
+    && ok 'source is split into addressable lines' || bad 'source is split into addressable lines' 'gutter missing'
+# A query string on the hash route, because the last segment of a blob URL is a
+# file path and swallows anything put after it.
+curl -s "$BASE/app.js" | grep -q "'?line=' + state.fileLine" \
+    && ok 'a line has an address of its own' || bad 'a line has an address of its own' 'route missing'
+
 # A link destination is a URL, so `[x](my%20docs/a.md)` -- the ordinary way to
 # write a link to a file with a space -- names `my docs/a.md`. Encoding it again
 # without decoding first produces `my%2520docs`, a path no repository has.
@@ -1028,6 +1049,37 @@ curl -s "$DEMO/commits/$root/diff" | grep -q 'src/app.lua' \
 # rejected just like the tree/raw browsing endpoints.
 curl -s "$DEMO/commits/$root/diff?path=README.md" | grep -q '"path":"README.md"' \
     && ok 'commit diff honours a path filter' || bad 'commit diff honours a path filter' "$(curl -s "$DEMO/commits/$root/diff?path=README.md")"
+
+# One file's history. The parameter has been there since the browsing endpoints
+# shipped and nothing sent it until the file panel grew a 历史 button, so the
+# walk it now rests on had no case of its own. src/app.lua arrived in the first
+# commit and was never touched again, while main has two -- so a filtered walk
+# that ignores its path comes back with both.
+filtered=$(curl -s "$DEMO/commits?ref=main&path=src%2Fapp.lua")
+echo "$filtered" | grep -q '"count":1' \
+    && ok 'commit history can be filtered to one path' || bad 'commit history can be filtered to one path' "$filtered"
+echo "$filtered" | grep -q '"path":"src/app.lua"' \
+    && ok 'the filtered walk echoes the path it walked' || bad 'the filtered walk echoes the path it walked' "$filtered"
+
+# Finding a file by NAME, which is the other half of "find it in this revision"
+# -- git grep answers what is in the files, this answers what they are called.
+# The query never reaches a command line: git is asked for the whole path list
+# and the filtering happens in Lua, so a pathspec's mini-language (:(glob), :!,
+# a leading dash) cannot be smuggled in through it.
+found=$(curl -s "$DEMO/paths/main?q=app")
+echo "$found" | grep -q '"src/app.lua"' \
+    && ok 'a file is findable by name' || bad 'a file is findable by name' "$found"
+# Ordering is what makes it usable: a match in the FILE NAME sorts above one in
+# a directory further up. `src/app.lua` and `README.md` both live under a tree
+# that contains neither string, so this asserts the one that does.
+echo "$found" | grep -q '"paths":\["src/app.lua"' \
+    && ok 'a name match leads the file list' || bad 'a name match leads the file list' "$found"
+curl -s "$DEMO/paths/main?q=nothing-is-called-this" | grep -q '"count":0' \
+    && ok 'no matching file name is an empty list' || bad 'no matching file name is an empty list' "$(curl -s "$DEMO/paths/main?q=nothing-is-called-this")"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$DEMO/paths/main")
+check 'the file finder needs something to find' "$code" '400'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$DEMO/paths/no-such-ref?q=a")
+check 'the file finder resolves its ref like everything else' "$code" '404'
 code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/commits/$root/diff?path=%2e%2e%2fgitloom.cfg")
 check 'commit diff rejects a traversal path' "$code" '400'
 
@@ -1205,6 +1257,8 @@ for r in '--output=%2Ftmp%2Fpwned' '-a' '--upload-pack=touch' 'HEAD%40%7B1%7D' '
     # is the command where --output= is a REAL option that writes a file.
     code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/archive/$r")
     check "ref injection refused: archive $r" "$code" '404'
+    code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$DEMO/paths/$r?q=a")
+    check "ref injection refused: paths $r" "$code" '404'
 done
 [ -e "$WORK/pwned" ] && bad 'ref injection had no side effect' 'a file was created' \
                      || ok 'ref injection had no side effect'
@@ -1217,7 +1271,7 @@ for pth in '..%2f..%2fgitloom.cfg' '%2e%2e/%2e%2e/etc/passwd' '.git/config' '-rf
 done
 
 # Browsing obeys the same visibility rule as the transport.
-for ep in branches tags commits tree/main lastcommits/main compare/main/main archive/main; do
+for ep in branches tags commits tree/main lastcommits/main compare/main/main archive/main 'paths/main?q=a'; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/repos/admin/secret/$ep")
     check "private repo hidden from browsing: $ep" "$code" '404'
 done

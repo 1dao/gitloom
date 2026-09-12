@@ -1581,6 +1581,79 @@ opens filled from the issue on screen, saves a new title into both the panel and
 the list row, persists across a reload, and answers a 300-character title with
 「Issue 标题太长了」 in the form rather than the server's English.
 
+### Reading code, which is what a solo instance does most (2026-09-12)
+
+Three more from the same pass, and the same shape as the four before them: the
+server could already answer, and the page had no way to ask. They are grouped
+because they are one activity — finding the code, and then pointing at it.
+
+**A file can be found by its name.** `browse_search` is `git grep`, which
+answers what is IN the files; nothing answered what they are CALLED. On a
+repository past a few directories that is the more common question, because the
+tree loads one level at a time — reaching `app/browse.lua` from the root is four
+clicks and already knowing where it lives. `browse_paths` is one `ls-tree -r -z
+--name-only` and a filter.
+
+The filter is in Lua, and that is the design rather than an implementation
+detail: **the query never becomes argv**. Handing the string to git as a
+pathspec would have been shorter and is exactly what rule 1 of `browse.lua`
+forbids — a pathspec is a mini-language (`:(glob)`, `:!`, a leading dash), so
+caller text in that position is caller text on a command line. A substring match
+against a string we already hold cannot be any of those things. The walk is
+bounded twice, by paths scanned and by matches returned, because a tree has no
+size limit and the answer has to say which bound it hit.
+
+Ordering is what makes it usable rather than merely correct: a match in the FILE
+NAME sorts above one in a directory further up — typing `browse` wants
+`app/browse.lua`, not everything under a directory called `browse` — then the
+shorter path, then the path itself so two calls cannot disagree. In the browser
+it is a mode on the search box rather than a second box: the same question about
+the same revision, asked of names instead of contents.
+
+**A file can show its own history.** `GET .../commits?path=` has taken a path
+filter since the browsing endpoints shipped and nothing ever sent it. The file
+panel has a 历史 button now, the commit list says which path it is walking and
+offers its way out, and the filtered walk is git's rather than a filter over
+what came back — a file touched once in a thousand commits answers in one page
+instead of being hunted across forty of them. The empty case had to be split:
+"this branch has no commits" and "this branch never touched that file" are
+different sentences, and saying the first about the second sends somebody
+looking for a fault in the repository.
+
+**A line has an address.** Source is split into one row per line with a number
+beside it; clicking a number puts it in the URL, and a URL that names one opens
+the file scrolled to that line and marks it. A content-search hit now lands on
+the line it matched, which it always knew and could not say.
+
+The numbering runs AFTER the highlighter and not instead of it. `paint` is
+stateful across lines — a block comment or a multi-line string is one token — so
+colouring line by line would break exactly the constructs that span lines. It
+leaves a flat list of text nodes and single-level spans, which is a shape that
+can be walked: each newline starts a row, and a span whose text crosses one is
+cloned so the class survives on both halves. Past `LINE_LIMIT` lines the block
+is left as one run of text, for the reason the highlighter has its own ceiling.
+The number sits in its own cell, sticky so it survives a horizontal scroll and
+`user-select: none` so copying a file does not come with a column of digits down
+its left edge.
+
+**The route grammar grew a query string**, which is what both of the last two
+rest on. A line number and a path filter are not path segments, and there was
+nowhere to put them: the last segment of a blob route IS a file path and
+swallows everything after it, so no marker can be reserved — a repository may
+contain a directory called anything a marker could be. A `?` cannot be confused
+with content either, because `encodePath` is `encodeURIComponent` per segment
+and writes a `?` in a real file name as `%3F`. So the first raw `?` in the hash
+is unambiguously the start of the query, and `#/o/n/blob/main/app.lua?line=250`
+and `#/o/n/commits/main?path=app%2Fbrowse.lua` are both bookmarkable.
+
+Verified on Windows against the JSON store: `test/smoke.sh` **332**, 19 of them
+new, `test/unit.lua` 216, both browser suites green. Driven in a real browser
+against a repository holding this project's own `app/` and `web/`: `q=app`
+answers `web/app.js` and `src/app.lua` before `app/db.lua`, a 819-line file
+numbers in one pass with its highlighting intact, `?line=250` opens centred and
+marked, 历史 filters 2 commits to the 1 that touched the file and 看全部 puts
+them back, and the filtered URL restores from cold. No console errors.
+
 ## Phase 3 — collaboration
 
 Organisations and teams, then issues (comments, labels, milestones), then pull
