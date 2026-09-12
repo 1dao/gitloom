@@ -364,6 +364,37 @@ local function h_collaborator_delete(req, ctx)
     return http_response_json(200, { removed = username })
 end
 
+local function org_admin(req, ctx)
+    local u, resp = require_user(req); if not u then return nil, resp end
+    local o = org_get(ctx.params.slug); if not o then return nil, http_response_error(404, 'no such organization') end
+    local role = o.members and o.members[u.username]
+    if u.admin or role == 'owner' or role == 'admin' then return o, u end
+    return nil, http_response_error(403, 'organization administrator required')
+end
+local function h_org_list() return http_response_json(200, {organizations=util_json_array(org_list())}) end
+local function h_org_create(req)
+    local u, resp = require_user(req); if not u then return resp end
+    local b, e = body_json(req); if not b then return http_response_error(400,e) end
+    local o, err, st = org_create(u.username, b.slug, b.name); if not o then return http_response_error(st or 400, err) end
+    return http_response_json(201, o)
+end
+local function h_org_member_put(req,ctx)
+    local o, resp = org_admin(req,ctx); if not o then return resp end
+    local b,e=body_json(req); if not b then return http_response_error(400,e) end
+    local out,err,st=org_member_put(ctx.params.slug,ctx.params.username,b.role); if not out then return http_response_error(st or 400,err) end
+    return http_response_json(200,out)
+end
+local function h_org_team_put(req,ctx)
+    local o, resp = org_admin(req,ctx); if not o then return resp end
+    local b,e=body_json(req); if not b then return http_response_error(400,e) end
+    local out,err,st=org_team_put(ctx.params.slug,ctx.params.team,ctx.params.username,b.role); if not out then return http_response_error(st or 400,err) end
+    return http_response_json(200,out)
+end
+local function h_pr_list(req,ctx) local a,resp=identify_optional(req); if resp then return resp end; return http_response_json(200,{pull_requests=util_json_array(pr_list(ctx.params.owner,ctx.params.name))}) end
+local function h_pr_create(req,ctx) local u,resp=require_user(req); if not u then return resp end; local b,e=body_json(req); if not b then return http_response_error(400,e) end; local p,er,st=pr_create(ctx.params.owner,ctx.params.name,u.username,b); if not p then return http_response_error(st or 400,er) end; return http_response_json(201,p) end
+local function h_pr_get(req,ctx) local p=pr_get(ctx.params.owner,ctx.params.name,ctx.params.number); if not p then return http_response_error(404,'no such pull request') end; return http_response_json(200,p) end
+local function h_pr_update(req,ctx) local u,resp=require_user(req); if not u then return resp end; local b,e=body_json(req); if not b then return http_response_error(400,e) end; local p,er,st=pr_update(ctx.params.owner,ctx.params.name,ctx.params.number,b); if not p then return http_response_error(st or 400,er) end; return http_response_json(200,p) end
+
 local function issue_public(issue, with_comments)
     local out = {
         number = issue.number,
@@ -1094,6 +1125,14 @@ end
 
 function g_exports.api_install()
     http_get('/api/v1/version', h_version)
+    http_get('/api/v1/organizations', h_org_list)
+    http_post('/api/v1/organizations', h_org_create)
+    http_put('/api/v1/organizations/:slug/members/:username', h_org_member_put)
+    http_put('/api/v1/organizations/:slug/teams/:team/members/:username', h_org_team_put)
+    http_get('/api/v1/repos/:owner/:name/pulls', h_pr_list)
+    http_post('/api/v1/repos/:owner/:name/pulls', h_pr_create)
+    http_get('/api/v1/repos/:owner/:name/pulls/:number', h_pr_get)
+    http_patch('/api/v1/repos/:owner/:name/pulls/:number', h_pr_update)
 
     http_get('/api/v1/repos', h_repo_list)
     http_post('/api/v1/repos', h_repo_create)
