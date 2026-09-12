@@ -31,3 +31,6 @@ function g_exports.org_team_put(slug, team, user, role)
     local ok,err=save(); if not ok then return nil,err,500 end; return o.teams[team]
 end
 function g_exports.org_member_put(slug,user,role) ensure(); local o=orgs[slug]; if not o then return nil,'organization not found',404 end; if role~='member' and role~='admin' then return nil,'invalid member role',400 end; o.members[user]=role; local ok,err=save(); if not ok then return nil,err,500 end; return o end
+function g_exports.org_member_delete(slug,user) ensure(); local o=orgs[slug]; if not o then return nil,'organization not found',404 end; if o.owner==user then return nil,'cannot remove organization owner',400 end; o.members[user]=nil; for _,t in pairs(o.teams or {}) do t.members[user]=nil end; local ok,e=save(); if not ok then return nil,e,500 end; return o end
+function g_exports.org_teams(slug) ensure(); local o=orgs[slug]; if not o then return nil,'organization not found',404 end; local a={}; for _,t in pairs(o.teams or {}) do a[#a+1]=t end; return a end
+function g_exports.org_team_delete(slug,team) ensure(); local o=orgs[slug]; if not o then return nil,'organization not found',404 end; if not o.teams[team] then return nil,'team not found',404 end; o.teams[team]=nil; local ok,e=save(); if not ok then return nil,e,500 end; return o end
