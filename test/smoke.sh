@@ -977,6 +977,75 @@ curl -s -D- -o /dev/null "$DEMO/raw/main/binary.dat" | grep -qi 'content-type: a
 curl -s -D- -o /dev/null "$DEMO/raw/main/binary.dat" | grep -qi 'x-content-type-options: nosniff' \
     && ok 'raw sends nosniff' || bad 'raw sends nosniff' 'header missing'
 
+# Concurrent requests must each be answered with THEIR OWN git output.
+#
+# The browse path stages git's stdout through scratch files the worker pool
+# names, and those names used to be <time>_<seq> in every worker alike. All
+# workers start seq at 0, so two of them busy in the same second wrote the SAME
+# file and one request was answered from another request's git process. Every
+# check above is sequential and cannot see it; this reads many distinct files at
+# once and checks each body against the one marker that file holds.
+#
+# A repository of its own, not demo: later checks count demo's commits and
+# unpack its archive, and a push here would move both.
+CONC_N=16
+CONC_ROUNDS=3
+curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
+    -d '{"name":"concurrent"}' "$BASE/api/v1/repos" >/dev/null
+(
+    mkdir -p "$WORK/wconc" && cd "$WORK/wconc" && git init -q || exit 1
+    i=1
+    while [ "$i" -le "$CONC_N" ]; do
+        printf 'concurrent-marker-%02d\n' "$i" > "f$i.txt"; i=$((i+1))
+    done
+    git add -A &&
+    git -c user.email=smoke@test -c user.name=smoke commit -qm 'concurrency fixtures' &&
+    $GIT push -q "http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/concurrent.git" HEAD:refs/heads/main
+) 2>"$WORK/econc"
+if [ $? -ne 0 ]; then
+    bad 'concurrent reads each get their own answer' "fixture push failed: $(tail -2 "$WORK/econc")"
+else
+    mkdir -p "$WORK/conc"
+    # Collect the curl PIDs and wait on exactly those: a bare `wait` would also
+    # wait on the gitloom instance this script started in the background.
+    conc_pids=''
+    round=1
+    while [ "$round" -le "$CONC_ROUNDS" ]; do
+        i=1
+        while [ "$i" -le "$CONC_N" ]; do
+            curl -s --max-time 60 -o "$WORK/conc/$round.$i" \
+                "$BASE/api/v1/repos/admin/concurrent/raw/main/f$i.txt" &
+            conc_pids="$conc_pids $!"
+            i=$((i+1))
+        done
+        round=$((round+1))
+    done
+    # shellcheck disable=SC2086
+    wait $conc_pids
+
+    wrong=0; example=''
+    round=1
+    while [ "$round" -le "$CONC_ROUNDS" ]; do
+        i=1
+        while [ "$i" -le "$CONC_N" ]; do
+            want=$(printf 'concurrent-marker-%02d' "$i")
+            got=$(head -c 200 "$WORK/conc/$round.$i" 2>/dev/null | tr -d '\r\n')
+            if [ "$got" != "$want" ]; then
+                wrong=$((wrong+1))
+                [ -z "$example" ] && example="f$i.txt answered '$got'"
+            fi
+            i=$((i+1))
+        done
+        round=$((round+1))
+    done
+    if [ "$wrong" -eq 0 ]; then
+        ok 'concurrent reads each get their own answer'
+    else
+        bad 'concurrent reads each get their own answer' \
+            "$wrong/$((CONC_N * CONC_ROUNDS)) wrong, e.g. $example"
+    fi
+fi
+
 # An archive of one revision as a single file -- what `git clone` is overkill
 # for. Asserted on the headers and on what unpacks out of it, never on the size:
 # a zip's bytes depend on the git version's deflate, its contents do not.

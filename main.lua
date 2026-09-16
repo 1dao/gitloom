@@ -279,6 +279,7 @@ local function __uninit()
     if listen_timer then listen_timer:del(); listen_timer = nil end
     db_stop()
     http_close()
+    proc_shutdown()     -- join the git worker pool while this state is still valid
     xnet.uninit()
     cfg_log_system('gitloom stopped')
 end

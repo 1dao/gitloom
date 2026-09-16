@@ -1,6 +1,6 @@
 -- app/proc.lua — the process pool, and the scratch directory it works in.
 --
--- Exports: proc_setup, proc_exec, proc_selftest,
+-- Exports: proc_setup, proc_exec, proc_selftest, proc_shutdown,
 --          proc_tmp_path, proc_tmp_release, proc_tmp_sweep, proc_tmp_purge
 --
 -- Thin wrapper over scripts/core/server/xproc.lua so the rest of the app never
@@ -35,6 +35,18 @@ end
 
 function g_exports.proc_selftest()
     return xproc.selftest()
+end
+
+-- Join the pool's worker threads. Called from main.lua's __uninit.
+--
+-- The runtime closes the main Lua state -- which owns every worker's ThreadData
+-- -- before it joins whatever threads are left, and a worker still alive in that
+-- gap can tick once more against freed memory and take the process down on the
+-- way out. Joining here is the same join, done while the state is still valid,
+-- so it costs no extra wait: a worker inside a long git command is waited for
+-- either way.
+function g_exports.proc_shutdown()
+    xproc.shutdown()
 end
 
 -- ---------------------------------------------------------------------------
