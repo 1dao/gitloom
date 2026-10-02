@@ -213,7 +213,7 @@ end
 -- through the shell quoting layer at all.
 function g_exports.git_advertise(dir, service, env)
     local verb = service:gsub('^git%-', '')
-    local r = git_exec({ verb, '--stateless-rpc', '--advertise-refs', '.' },
+    local r = git_exec({ '-c', 'transfer.hideRefs=refs/gitloom/', verb, '--stateless-rpc', '--advertise-refs', '.' },
                        { cwd = dir, env = env })
     if not r.ok then
         return nil, string.format('%s --advertise-refs failed: %s %s',
@@ -251,9 +251,10 @@ end
 -- it (routers/private/hook_pre_receive.go).
 local function rpc_argv(verb)
     if verb ~= 'receive-pack' then
-        return { verb, '--stateless-rpc', '.' }
+        return { '-c', 'transfer.hideRefs=refs/gitloom/', verb, '--stateless-rpc', '.' }
     end
-    local argv = { '-c', 'receive.denyDeleteCurrent=refuse' }
+    local argv = { '-c', 'receive.denyDeleteCurrent=refuse',
+        '-c', 'transfer.hideRefs=refs/gitloom/', '-c', 'receive.hideRefs=refs/gitloom/' }
     local hooks = protect_hooks_dir()
     if hooks then
         argv[#argv + 1] = '-c'

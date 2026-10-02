@@ -497,18 +497,82 @@ local function h_repo_team_grant(req, ctx)
     return http_response_json(200, { name = team.name, permission = permission or 'none' })
 end
 
-local function pr_repo(req,ctx,write)
-    local u,bad=require_user(req); if bad then return nil,nil,bad end
-    local r=repo_get(ctx.params.owner,ctx.params.name); if not r or not repo_exists_of(r) or (write and not auth_can_write(r,u)) or (not write and not auth_can_read(r,u)) then return nil,nil,http_response_error(404,'no such repository') end
-    return r,u
+-- Every PR endpoint uses the same repository visibility boundary. Creating
+-- requires push access; discussion requires read access; approval is a separate
+-- administrator decision, never something the submitter can grant themselves.
+local function pr_repo(req, ctx, signed_in)
+    local user, bad
+    if signed_in then user, bad = require_user(req) else user, bad = identify_optional(req) end
+    if bad then return nil, nil, bad end
+    local rec = repo_get(ctx.params.owner, tostring(ctx.params.name):gsub('%.git$', ''))
+    if not rec or not repo_exists_of(rec) or not auth_can_read(rec, user) then
+        return nil, nil, http_response_error(404, 'no such repository')
+    end
+    return rec, user
 end
-local function h_pr_list(req,ctx) local r,u,bad=pr_repo(req,ctx,false); if bad then return bad end; return http_response_json(200,{pull_requests=util_json_array(pr_list(r.owner,r.name))}) end
-local function h_pr_create(req,ctx) local r,u,bad=pr_repo(req,ctx,true); if bad then return bad end; local b,e=body_json(req); if not b then return http_response_error(400,e) end; local p,er,st=pr_create(r.owner,r.name,u.username,b); if not p then return http_response_error(st or 400,er) end; return http_response_json(201,p) end
-local function h_pr_get(req,ctx) local r,u,bad=pr_repo(req,ctx,false); if bad then return bad end; local p=pr_get(r.owner,r.name,ctx.params.number); if not p then return http_response_error(404,'no such pull request') end; return http_response_json(200,p) end
-local function h_pr_update(req,ctx) local r,u,bad=pr_repo(req,ctx,true); if bad then return bad end; local b,e=body_json(req); if not b then return http_response_error(400,e) end; local p=pr_get(r.owner,r.name,ctx.params.number); if not p or (p.author~=u.username and not u.admin) then return http_response_error(403,'pull request author or administrator required') end; local out,er,st=pr_update(r.owner,r.name,ctx.params.number,b); if not out then return http_response_error(st or 400,er) end; return http_response_json(200,out) end
-local function h_pr_merge(req,ctx) local r,u,bad=pr_repo(req,ctx,true); if bad then return bad end; local b,e=body_json(req); if not b then return http_response_error(400,e) end; local p,er,st=pr_merge(r.owner,r.name,ctx.params.number,b.method); if not p then return http_response_error(st or 400,er) end; return http_response_json(200,p) end
-local function h_pr_comment(req,ctx) local r,u,bad=pr_repo(req,ctx,true); if bad then return bad end; local b,e=body_json(req); if not b then return http_response_error(400,e) end; local c,er,st=pr_comment(r.owner,r.name,ctx.params.number,u.username,b.body); if not c then return http_response_error(st or 400,er) end; return http_response_json(201,c) end
-local function h_pr_review(req,ctx) local r,u,bad=pr_repo(req,ctx,true); if bad then return bad end; local b,e=body_json(req); if not b then return http_response_error(400,e) end; local c,er,st=pr_review(r.owner,r.name,ctx.params.number,u.username,b.state,b.body); if not c then return http_response_error(st or 400,er) end; return http_response_json(201,c) end
+local function pr_response(p, rec, user)
+    local out = {}
+    for k, v in pairs(p) do if k ~= 'pending' then out[k] = v end end
+    out.comments = util_json_array(p.comments or {})
+    out.reviews = util_json_array(p.reviews or {})
+    out.merging = p.pending ~= nil
+    out.can_review = user ~= nil and auth_can_manage(rec, user) and p.author ~= user.username and p.state == 'open'
+    out.can_edit = user ~= nil and (p.author == user.username or auth_can_manage(rec, user)) and p.state ~= 'merged'
+    return out
+end
+local function h_pr_list(req, ctx)
+    local rec, user, bad = pr_repo(req, ctx)
+    if bad then return bad end
+    local list, err, status = pr_list(rec, (req.query or {}).state or 'open')
+    if not list then return http_response_error(status, err) end
+    local out = {}
+    for _, p in ipairs(list) do out[#out + 1] = pr_response(p, rec, user) end
+    return http_response_json(200, { pull_requests = util_json_array(out),
+        can_create = auth_can_write(rec, user) and true or false })
+end
+local function h_pr_create(req, ctx)
+    local rec, user, bad = pr_repo(req, ctx, true)
+    if bad then return bad end
+    local body, err = body_json(req)
+    if not body then return http_response_error(400, err) end
+    local p, why, status = pr_create(rec, user, body)
+    if not p then return http_response_error(status or 400, http_safe_error(why)) end
+    return http_response_json(201, pr_response(p, rec, user))
+end
+local function h_pr_get(req, ctx)
+    local rec, user, bad = pr_repo(req, ctx)
+    if bad then return bad end
+    local p, err, status = pr_get(rec, ctx.params.number)
+    if not p then return http_response_error(status, err) end
+    local out = pr_response(p, rec, user)
+    local ends, why = pr_snapshot(rec, p)
+    if ends then out.base_oid, out.head_oid = ends.base_oid, ends.head_oid
+    else out.branch_error = why; out.can_review = false end
+    return http_response_json(200, out)
+end
+local function pr_mutation(action)
+    return function(req, ctx)
+        local rec, user, bad = pr_repo(req, ctx, true)
+        if bad then return bad end
+        local body, err = body_json(req)
+        if not body then return http_response_error(400, err) end
+        local p, why, status = action(rec, ctx.params.number, user, body)
+        if not p then return http_response_error(status or 400, http_safe_error(why)) end
+        return http_response_json(200, pr_response(p, rec, user))
+    end
+end
+local h_pr_update = pr_mutation(pr_update)
+local h_pr_comment = pr_mutation(function(rec, num, user, body) return pr_comment(rec, num, user, body.body) end)
+local h_pr_review = pr_mutation(pr_review)
+-- Older clients must supply the same reviewed OIDs and pass the same approval
+-- checks. There is no second merge path that can bypass review.
+local h_pr_merge = pr_mutation(function(rec, num, user, body)
+    if body.method ~= nil and body.method ~= 'merge' then
+        return nil, 'only reviewed merge commits are supported', 400
+    end
+    body.state = 'approve'
+    return pr_review(rec, num, user, body)
+end)
 
 local function issue_public(issue, with_comments)
     local out = {
@@ -641,8 +705,8 @@ local function h_repo_delete(req, ctx)
         return http_response_error(404, 'no such repository')
     end
 
-    local ok, derr = repo_delete(rec.owner, rec.name)
-    if not ok then return http_response_error(500, http_safe_error(derr)) end
+    local ok, derr, status = repo_delete(rec.owner, rec.name)
+    if not ok then return http_response_error(status or 500, http_safe_error(derr)) end
     return http_response_json(200, { deleted = owner .. '/' .. name })
 end
 

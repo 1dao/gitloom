@@ -677,3 +677,14 @@ h1, h2, h3, p { margin-top: 0; }
 @media (max-width: 620px) {
   .compare-file span.commit-meta { display: none; }
 }
+
+/* Review controls use the same panels, typography and diff renderer as issues. */
+.pull-form { padding: 20px; margin-bottom: 20px; border: 1px solid var(--line); border-radius: 10px; }
+.pull-form label, #pull-detail label { display: grid; gap: 8px; margin: 12px 0; }
+.pull-branches { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.pull-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+#pull-discussion article { border-bottom: 1px solid var(--line); padding: 12px 0; }
+#pull-diff { max-height: 60vh; overflow: auto; }
+#pull-message { white-space: pre-wrap; }
+#pull-list button { text-align: left; margin: 6px 0; width: 100%; }
+@media (max-width: 700px) { .pull-branches { grid-template-columns: 1fr; } }

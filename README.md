@@ -50,7 +50,14 @@ default branch is protected: it cannot be deleted, and it cannot be force-pushed
 over (`PROTECT_DEFAULT_BRANCH`). Issues have a tracker: an issue or a comment is written and rendered as Markdown
 through the same parser the README goes through, and an issue's title and body
 can be corrected from the page as well as closed. Comments cannot be edited.
-Pull requests are not implemented yet — see [docs/ROADMAP.md](docs/ROADMAP.md).
+Pull requests support contributor submission, discussion, change requests and
+approval with automatic merge. Push the source branch to the same repository;
+a repository owner, organisation administrator or site administrator reviews the
+exact source and target commits and approves another user's request. Approval
+creates a two-parent merge commit; changed branches or conflicts require a new
+review. Automatic merging requires Git 2.38+. Squash, rebase and cross-repository
+pull requests remain outside this workflow. Existing branch protection still
+permits ordinary fast-forward pushes; it does not require every push to use a PR.
 
 ## Quick start
 
@@ -386,6 +393,13 @@ missing `/bin/sh`.
 | `GET /api/v1/repos/:owner/:name/issues/:number` | one issue, with its comments |
 | `PATCH /api/v1/repos/:owner/:name/issues/:number` | `{title?, body?, state?}`; the author, a write collaborator, or an administrator |
 | `POST /api/v1/repos/:owner/:name/issues/:number/comments` | `{body}` |
+| `GET /api/v1/repos/:owner/:name/pulls` | `?state=open\|closed\|merged\|all`, default `open`; repository read access |
+| `POST /api/v1/repos/:owner/:name/pulls` | `{title, body?, base, head}`; write access, branches in the same repository |
+| `GET .../pulls/:number` | discussion, review permissions and exact `base_oid` / `head_oid`; reconciles a pending merge |
+| `PATCH .../pulls/:number` | `{title?, body?, state?}`; author or repository administrator; state `open` / `closed`, merged requests are immutable |
+| `POST .../pulls/:number/comments` | `{body}`; signed-in reader |
+| `POST .../pulls/:number/reviews` | `{state: approve\|request_changes, body?, base_oid, head_oid}`; repository administrator, excluding the author; approval merges immediately |
+| `POST .../pulls/:number/merge` | compatibility alias for approval; same permissions and reviewed OIDs, only `method: merge` |
 | `GET /api/v1/user` | the caller's own record: `{username, admin, email, created_at}`. What the browser asks so it does not have to infer the administrator bit from the credential it holds |
 | `GET /api/v1/users` | administrator only |
 | `POST /api/v1/users` | administrator only |

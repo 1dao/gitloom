@@ -1259,7 +1259,7 @@ after=$(curl -s "$BASE/api/v1/repos/admin/prot/branches" | grep -o '"oid":"[0-9a
 check 'the protected branch did not move' "$after" "$before"
 # Only the default branch. Everything else is somebody's own work in progress.
 ( cd "$WORK/wprot" && git branch -f side HEAD && $GIT push -q "$PROT" side ) >/dev/null 2>&1
-( cd "$WORK/wprot" && git commit -q --allow-empty -m 'p side' && git branch -f side HEAD &&
+( cd "$WORK/wprot" && git -c user.email=smoke@test -c user.name=smoke commit -q --amend --allow-empty -m 'p side' && git branch -f side HEAD &&
   $GIT push --force "$PROT" side ) >/dev/null 2>&1 \
     && ok 'another branch may still be force-pushed' || bad 'another branch may still be force-pushed' 'refused'
 
@@ -2117,6 +2117,12 @@ check 'owner can delete' "$code" '200'
 code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" \
     "$BASE/api/v1/repos/admin/demo")
 check 'deleted repository is gone' "$code" '404'
+
+if command -v node >/dev/null 2>&1; then
+    node test/pr.js && ok 'reviewed PR HTTP/Git regressions' || bad 'reviewed PR HTTP/Git regressions' 'see PR output above'
+else
+    skip 'reviewed PR HTTP/Git regressions (node unavailable)'
+fi
 
 printf '\n[smoke] %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

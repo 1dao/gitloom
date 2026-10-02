@@ -61,6 +61,7 @@
               <svg class="tab-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M.9 8h4M11.1 8h4"/></svg>
               提交
             </button>
+            <button class="view-tab" type="button" data-view="pulls">合并请求</button>
             <button class="view-tab" type="button" data-view="compare">
               <svg class="tab-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.4" r="1.6"/><circle cx="4" cy="12.6" r="1.6"/><circle cx="12" cy="12.6" r="1.6"/><path d="M4 5v6M12 11V6.6a2 2 0 0 0-2-2H6.6M8.4 2.6 6 5l2.4 2.4"/></svg>
               比较
@@ -213,6 +214,50 @@
               <div id="compare-diff-meta" class="diff-meta"></div>
               <pre id="compare-diff-content" class="diff-block"></pre>
             </div>
+          </div>
+
+          <div id="pulls-view" class="view-panel" hidden>
+            <div class="toolbar">
+              <span class="toolbar-title">合并请求</span>
+              <label>状态 <select id="pull-state"><option value="open">待处理</option><option value="merged">已合并</option><option value="closed">已关闭</option><option value="all">全部</option></select></label>
+              <div class="toolbar-spacer"></div>
+              <button id="pull-refresh" class="button button-quiet" type="button">刷新</button>
+              <button id="pull-new" class="button button-primary" type="button" hidden>新建合并请求</button>
+            </div>
+            <p id="pull-message" role="status"></p>
+            <form id="pull-create" class="pull-form" hidden>
+              <label>标题<input id="pull-title" required maxlength="200"></label>
+              <div class="pull-branches">
+                <label>合入分支（目标）<input id="pull-base" required placeholder="main"></label>
+                <label>提交分支（来源）<input id="pull-head" required placeholder="feature/my-change"></label>
+              </div>
+              <label>改动说明<textarea id="pull-body" rows="4" maxlength="65536"></textarea></label>
+              <p class="muted">先将提交分支推送到本仓库，再发起请求。管理员批准后会自动合并。</p>
+              <button class="button button-primary" type="submit">提交合并请求</button>
+            </form>
+            <div id="pull-list" class="issue-list"></div>
+            <section id="pull-detail" class="issue-detail" hidden>
+              <h3 id="pull-detail-title"></h3>
+              <p id="pull-meta" class="muted"></p>
+              <p id="pull-description" class="pull-text"></p>
+              <p id="pull-summary"></p>
+              <pre id="pull-diff" class="diff-block"></pre>
+              <h4>讨论与审核</h4>
+              <div id="pull-discussion"></div>
+              <form id="pull-comment-form" hidden>
+                <label>评论<textarea id="pull-comment-body" rows="3" required maxlength="8192"></textarea></label>
+                <button class="button button-quiet" type="submit">发表评论</button>
+              </form>
+              <div id="pull-review" hidden>
+                <label>审核意见<textarea id="pull-review-body" rows="3" maxlength="8192" placeholder="批准时可选；要求修改时必填"></textarea></label>
+                <p class="muted">批准会立即创建合并提交。分支更新或冲突时会停止，需要刷新并重新审核。</p>
+                <div class="dialog-actions">
+                  <button id="pull-request-changes" class="button button-quiet" type="button">要求修改</button>
+                  <button id="pull-approve" class="button button-primary" type="button" disabled>批准并自动合并</button>
+                </div>
+              </div>
+              <button id="pull-toggle" class="button button-quiet" type="button" hidden>关闭请求</button>
+            </section>
           </div>
 
           <div id="issues-view" class="view-panel" hidden>

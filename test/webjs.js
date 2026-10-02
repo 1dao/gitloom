@@ -425,9 +425,77 @@ ok('and the line after it is still code',
 
 // ---------------------------------------------------------------------------
 
-if (failures.length) {
-    failures.forEach((f) => process.stdout.write('FAIL ' + f + '\n'));
-    process.stdout.write('[webjs] ' + passed + ' passed, ' + failures.length + ' failed\n');
-    process.exit(1);
+// Exercise the actual PR controller with delayed fetches and a recording DOM.
+async function testPullController() {
+    const source=fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8');
+    const begin=source.indexOf('  var pullTicket = 0;');
+    const end=source.indexOf('  // ── the address bar',begin);
+    if (begin<0 || end<0) throw new Error('PR controller boundaries missing');
+    const nodes={}, handlers={}, writes=[];
+    const node=id => nodes[id] || (nodes[id]=Object.assign(new Node('div'),{value:'',hidden:false,disabled:false}));
+    let compareResolve, diffResolve, detailResolve, rejectWrites=false, holdDetail=false;
+    let detail={number:1,title:'<img src=x onerror=alert(1)>',body:'<script>evil</script>',
+        author:'bob',base:'main',head:'feature',state:'open',can_review:true,can_edit:true,
+        base_oid:'a'.repeat(40),head_oid:'b'.repeat(40),comments:[],reviews:[]};
+    const ctx={document,Promise,console,
+        state:{repo:{owner:'admin',name:'demo'},view:'pulls',username:'admin',pullNumber:1},
+        seq:{view:1},$:node,$$:()=>[],on:(id,event,fn)=>{handlers[id+':'+event]=fn;},
+        viewIsCurrent:n=>n===ctx.seq.view,repoPath:s=>'/repo'+s,
+        routeWrite:()=>{ctx.routeNumber=ctx.state.pullNumber;},
+        renderDiff:(patch,el)=>{el.textContent=patch;},
+        json:url=>{
+            if (url.includes('/compare/')) return new Promise(resolve=>{compareResolve=resolve;});
+            if (url.includes('?state=')) return Promise.resolve({pull_requests:[],can_create:true});
+            return holdDetail ? new Promise(resolve=>{detailResolve=resolve;}) : Promise.resolve({...detail});
+        },
+        api:(url,options)=>{
+            if (!options) return new Promise(resolve=>{diffResolve=()=>resolve({text:()=>Promise.resolve('safe diff')});});
+            writes.push({url,body:JSON.parse(options.body)});
+            if (rejectWrites) return Promise.reject(Object.assign(new Error('branches changed'),{status:409}));
+            return Promise.resolve({json:()=>Promise.resolve({...detail})});
+        }
+    };
+    vm.createContext(ctx);vm.runInContext(source.slice(begin,end),ctx);
+    const tick=()=>new Promise(resolve=>setImmediate(resolve));
+    const loading=ctx.loadPullDetail(1);await tick();
+    ok('PR approval disabled before diff arrives',node('pull-approve').disabled);
+    compareResolve({ahead:1,files:['f']});await tick();
+    ok('PR approval waits for patch as well as metadata',node('pull-approve').disabled);
+    diffResolve();await loading;
+    ok('PR approval enabled after complete diff',!node('pull-approve').disabled);
+    eq('PR title remains text',node('pull-detail-title').textContent,'#1 '+detail.title);
+    eq('PR description remains text',node('pull-description').textContent,detail.body);
+    rejectWrites=true;
+    await ctx.mutatePull('/reviews','POST',{state:'approve',base_oid:detail.base_oid,head_oid:detail.head_oid},'done');
+    ok('PR stale approval disables retry until refresh',node('pull-approve').disabled);
+    ok('PR stale approval explains refresh',node('pull-message').textContent.includes('刷新'));
+    // The review click must keep the OIDs that produced the displayed patch.
+    const again=ctx.loadPullDetail(1);await tick();compareResolve({ahead:1,files:[]});diffResolve();await again;
+    node('pull-review-body').value='approved';ctx.reviewPull('approve');await tick();
+    eq('PR review submits displayed base OID',writes.at(-1).body.base_oid,detail.base_oid);
+    eq('PR review submits displayed head OID',writes.at(-1).body.head_oid,detail.head_oid);
+    const before=writes.length;
+    node('pull-review-body').value='';ctx.reviewPull('request_changes');await tick();
+    eq('PR empty change request is not sent',writes.length,before);
+    // A late detail response from a page that was left cannot restore its controls.
+    holdDetail=true;const pending=ctx.loadPullDetail(1);await tick();ctx.seq.view++;ctx.state.view='code';
+    detailResolve({...detail});await pending;
+    ok('PR stale page response leaves detail hidden',node('pull-detail').hidden);
+    ok('PR stale page response leaves approval disabled',node('pull-approve').disabled);
+    // A successful close moves the filter and bookmark to the returned request.
+    holdDetail=false;rejectWrites=false;ctx.state.view='pulls';detail={...detail,state:'closed',can_review:false};
+    const closed=ctx.mutatePull('/pulls/1','PATCH',{state:'closed'},'closed');await tick();
+    compareResolve({ahead:1,files:[]});diffResolve();await closed;
+    eq('PR close selects closed list',node('pull-state').value,'closed');
+    eq('PR close keeps bookmark',ctx.routeNumber,1);
+    eq('PR mutation waits for detail before reporting success',node('pull-message').textContent,'closed');
 }
-process.stdout.write('[webjs] ' + passed + ' passed, 0 failed\n');
+(async()=>{
+    try { await testPullController(); } catch(error) { failures.push('PR controller: '+error.stack); }
+    if (failures.length) {
+        failures.forEach(f=>process.stdout.write('FAIL '+f+'\n'));
+        process.stdout.write('[webjs] '+passed+' passed, '+failures.length+' failed\n');
+        process.exitCode=1;return;
+    }
+    process.stdout.write('[webjs] '+passed+' passed, 0 failed\n');
+})();

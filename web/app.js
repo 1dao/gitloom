@@ -17,6 +17,7 @@
     issues: [],
     issue: null,
     issueState: 'open',
+    pullNumber: null,
     // The ref lists loadBranches already fetched, kept so the compare view can
     // fill two more selects without asking for them a second time.
     refNames: { branches: [], tags: [] },
@@ -1145,6 +1146,7 @@
     state.issues = [];
     state.issue = null;
     state.issueState = 'open';
+    state.pullNumber = target.pull || null;
     $('issue-state').value = 'open';
     state.branch = target.ref || repo.default_branch || 'main';
     // Cleared rather than carried: these name refs in the repository being left.
@@ -2792,6 +2794,152 @@
     $('compare-diff-panel').hidden = true;
   });
 
+  // Pull requests: the review payload contains the EXACT OIDs used to render
+  // the diff. Never silently refresh those OIDs on the approval click.
+  var pullTicket = 0;
+  var currentPull = null;
+  var pullBusy = false;
+  var pullDiffReady = false;
+  var pullLabels = {open: '待审核', closed: '已关闭', merged: '已合并',
+    approve: '已批准并合并', request_changes: '要求修改', merging: '正在合并', merge_failed: '合并未完成'};
+  function pullPath(suffix) { return repoPath('/pulls' + (suffix || '')); }
+  function pullError(error) {
+    var msg = error.message || '';
+    if (/branches changed/.test(msg)) return '分支已更新。请刷新并重新查看差异后审核。';
+    if (/merge conflict/.test(msg)) return '存在合并冲突。请提交者在来源分支解决冲突并推送，再重新审核。';
+    if (/source or target branch is missing/.test(msg)) return '来源或目标分支不存在，请先推送分支。';
+    if (/Git 2.38/.test(msg)) return '服务器需要 Git 2.38 或更新版本才能自动合并。';
+    if (/open pull request already/.test(msg)) return '这两个分支已经有待处理的合并请求。';
+    if (/source has no new/.test(msg)) return '来源分支没有需要合入的新提交。';
+    if (/progress|reconciliation/.test(msg)) return '有操作正在完成或需要确认结果，请稍后刷新。';
+    return msg || '操作失败，请刷新后重试。';
+  }
+  function pullWrite(path, method, data) {
+    return api(path, { method: method, headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data) }).then(function (r) { return r.json(); });
+  }
+  function pullControls() {
+    if (!$('pull-approve')) return;
+    $('pull-approve').disabled = pullBusy || !pullDiffReady;
+    $('pull-request-changes').disabled = pullBusy || !pullDiffReady;
+    $('pull-toggle').disabled = pullBusy;
+    $$('#pull-create button, #pull-comment-form button').forEach(function (b) { b.disabled = pullBusy; });
+  }
+  function loadPulls() {
+    if (!$('pull-list')) return;
+    var view = seq.view, repo = state.repo, ticket = ++pullTicket;
+    currentPull = null; pullDiffReady = false;
+    $('pull-detail').hidden = true;
+    $('pull-create').hidden = true;
+    $('pull-new').hidden = true;
+    $('pull-message').textContent = '';
+    $('pull-list').textContent = '正在读取…';
+    function active() { return viewIsCurrent(view) && state.repo === repo && state.view === 'pulls' && ticket === pullTicket; }
+    return json(pullPath('?state=' + $('pull-state').value)).then(function (data) {
+      if (!active()) return;
+      $('pull-new').hidden = !data.can_create;
+      $('pull-list').textContent = '';
+      (data.pull_requests || []).forEach(function (p) {
+        var row = document.createElement('button'); row.type = 'button'; row.className = 'button button-quiet';
+        row.textContent = '#' + p.number + ' ' + p.title + ' · ' + (pullLabels[p.state] || p.state) + ' · ' + p.author;
+        row.addEventListener('click', function () {
+          state.pullNumber = p.number; routeWrite(); loadPullDetail(p.number);
+        });
+        $('pull-list').appendChild(row);
+      });
+      if (!(data.pull_requests || []).length) $('pull-list').textContent = '没有此状态的合并请求。';
+      if (state.pullNumber) return loadPullDetail(state.pullNumber);
+    }).catch(function (error) { if (active()) $('pull-list').textContent = pullError(error); });
+  }
+  function loadPullDetail(num) {
+    var view = seq.view, repo = state.repo, ticket = ++pullTicket;
+    currentPull = null; pullDiffReady = false;
+    $('pull-detail').hidden = true; pullControls();
+    function active() { return viewIsCurrent(view) && state.repo === repo && state.view === 'pulls' && ticket === pullTicket; }
+    return json(pullPath('/' + num)).then(function (p) {
+      if (!active()) return;
+      currentPull = p; state.pullNumber = p.number;
+      $('pull-detail').hidden = false;
+      $('pull-detail-title').textContent = '#' + p.number + ' ' + p.title;
+      $('pull-meta').textContent = p.author + ' · ' + p.head + ' → ' + p.base + ' · ' + pullLabels[p.state] +
+        (p.merge_oid ? ' · ' + p.merged_by + ' 合并于 ' + p.merge_oid.slice(0, 12) : '');
+      $('pull-description').textContent = p.body;
+      $('pull-summary').textContent = p.branch_error || '正在读取差异…';
+      $('pull-diff').textContent = '';
+      $('pull-review').hidden = !p.can_review || p.merging;
+      $('pull-review-body').value = '';
+      $('pull-comment-body').value = '';
+      $('pull-comment-form').hidden = !state.username || p.merging;
+      $('pull-toggle').hidden = !p.can_edit || p.merging;
+      $('pull-toggle').textContent = p.state === 'closed' ? '重新打开' : '关闭请求';
+      var discussion = $('pull-discussion'); discussion.textContent = '';
+      (p.comments || []).concat(p.reviews || []).sort(function (a,b) {return a.created_at-b.created_at;}).forEach(function (entry) {
+        var article = document.createElement('article'), label = document.createElement('strong'), body = document.createElement('p');
+        label.textContent = entry.author + (entry.state ? ' · ' + (pullLabels[entry.state] || entry.state) : '') +
+          (entry.head_oid && (entry.head_oid !== p.head_oid || entry.base_oid !== p.base_oid) ? ' · 较早版本' : '');
+        body.className = 'pull-text'; body.textContent = entry.body;
+        article.appendChild(label); article.appendChild(body); discussion.appendChild(article);
+      });
+      if (p.branch_error || !p.base_oid || !p.head_oid) return;
+      var compare = repoPath('/compare/' + p.base_oid + '/' + p.head_oid);
+      return Promise.all([json(compare), api(compare + '/diff').then(function(r) {return r.text();})]).then(function (parts) {
+        if (!active()) return;
+        $('pull-summary').textContent = (parts[0].ahead || 0) + ' 个新提交 · ' + (parts[0].files || []).length + ' 个文件 · ' +
+          p.base_oid.slice(0, 12) + ' ← ' + p.head_oid.slice(0, 12);
+        renderDiff(parts[1], $('pull-diff'));
+        pullDiffReady = true; pullControls();
+      });
+    }).catch(function (error) {
+      if (active()) { $('pull-message').textContent = pullError(error); pullDiffReady = false; pullControls(); }
+    });
+  }
+  function mutatePull(path, method, body, success) {
+    if (pullBusy) return;
+    var view = seq.view, repo = state.repo, number = state.pullNumber;
+    pullBusy = true; pullControls(); $('pull-message').textContent = '正在处理…';
+    return pullWrite(path, method, body).then(function(p) {
+      if (!viewIsCurrent(view) || state.repo !== repo || state.view !== 'pulls' || state.pullNumber !== number) return;
+      state.pullNumber = p.number; routeWrite();
+      $('pull-state').value = p.state;
+      return loadPulls().then(function() { if (state.repo === repo && state.view === 'pulls') $('pull-message').textContent = success; });
+    }).catch(function(error) {
+      if (viewIsCurrent(view) && state.repo === repo && state.view === 'pulls') {
+        $('pull-message').textContent = pullError(error);
+        if (error.status === 409 || error.status >= 500) pullDiffReady = false;
+      }
+    }).finally(function() { pullBusy = false; pullControls(); });
+  }
+  on('pull-refresh', 'click', loadPulls);
+  on('pull-state', 'change', function() { state.pullNumber = null; routeWrite(); loadPulls(); });
+  on('pull-new', 'click', function() {
+    $('pull-create').hidden = !$('pull-create').hidden;
+    $('pull-base').value = state.repo.default_branch || 'main';
+    $('pull-head').value = state.branch === $('pull-base').value ? '' : state.branch;
+    $('pull-title').focus();
+  });
+  on('pull-create', 'submit', function(event) {
+    event.preventDefault();
+    mutatePull(pullPath(''), 'POST', {title: $('pull-title').value.trim(), body: $('pull-body').value,
+      base: $('pull-base').value.trim(), head: $('pull-head').value.trim()}, '已提交，等待管理员审核。');
+  });
+  on('pull-comment-form', 'submit', function(event) {
+    event.preventDefault(); if (!currentPull) return;
+    mutatePull(pullPath('/' + currentPull.number + '/comments'), 'POST', {body: $('pull-comment-body').value}, '评论已保存。');
+  });
+  function reviewPull(stateName) {
+    if (!currentPull || !pullDiffReady) return;
+    var body = $('pull-review-body').value;
+    if (stateName === 'request_changes' && !body.trim()) { $('pull-message').textContent = '请填写需要修改的内容。'; return; }
+    mutatePull(pullPath('/' + currentPull.number + '/reviews'), 'POST', {state: stateName, body: body,
+      base_oid: currentPull.base_oid, head_oid: currentPull.head_oid}, stateName === 'approve' ? '已批准并自动合并。' : '已要求修改，等待提交者更新分支。');
+  }
+  on('pull-approve', 'click', function() { reviewPull('approve'); });
+  on('pull-request-changes', 'click', function() { reviewPull('request_changes'); });
+  on('pull-toggle', 'click', function() {
+    if (!currentPull) return;
+    mutatePull(pullPath('/' + currentPull.number), 'PATCH', {state: currentPull.state === 'open' ? 'closed' : 'open'}, '状态已更新。');
+  });
+
   // ── the address bar ────────────────────────────────────────────────────────
   //
   // The page had no URL state at all: whatever you were looking at, the address
@@ -2824,6 +2972,7 @@
     if (state.view === 'issues') {
       return base + '/issues' + (state.issue ? '/' + state.issue.number : '');
     }
+    if (state.view === 'pulls') return base + '/pulls' + (state.pullNumber ? '/' + state.pullNumber : '');
     if (state.view === 'commits') {
       return base + '/commits/' + encodeRef(state.branch) +
              (state.commitPath ? '?path=' + encodeURIComponent(state.commitPath) : '');
@@ -2905,7 +3054,10 @@
 
     var kind = parts[2];
     var target = { view: 'code' };
-    if (kind === 'issues') {
+    if (kind === 'pulls') {
+      target.view = 'pulls';
+      target.pull = parts[3] ? Number(parts[3]) : null;
+    } else if (kind === 'issues') {
       target.view = 'issues';
       target.issue = parts[3] ? Number(parts[3]) : null;
     } else if (kind === 'commits') {
@@ -2937,6 +3089,8 @@
     var compare = $('compare-view');
     if (compare) compare.hidden = view !== 'compare';
     $('issues-view').hidden = view !== 'issues';
+    if ($('pulls-view')) $('pulls-view').hidden = view !== 'pulls';
+    if (view === 'pulls' && state.repo) loadPulls();
     syncCodeLayout();
     if (view === 'issues' && state.repo) loadIssues(seq.view);
     // Only once the ref lists are in. On a tab click they already are; on a

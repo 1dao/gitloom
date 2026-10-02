@@ -392,7 +392,7 @@ end
 -- move last, because a repository whose issues did not follow is still a
 -- repository, while an index that points at a directory that is not there is
 -- not one.
-function g_exports.repo_rename(owner, name, new_name)
+local function rename(owner, name, new_name)
     if not repo_name_ok(owner) or not repo_name_ok(name) then
         return nil, 'bad repository name', 400
     end
@@ -649,7 +649,7 @@ end
 -- recursive delete through the shell — the one operation here with no undo, so
 -- it re-validates the names right before building the command rather than
 -- trusting that whoever called us did.
-function g_exports.repo_delete(owner, name)
+local function delete(owner, name)
     if not repo_name_ok(owner) or not repo_name_ok(name) then
         return nil, 'bad repository name'
     end
@@ -703,4 +703,22 @@ function g_exports.repo_delete(owner, name)
     end
     cfg_log_system('deleted repository %s/%s', owner, name)
     return true
+end
+
+function g_exports.repo_rename(owner, name, new_name)
+    if not repo_name_ok(owner) or not repo_name_ok(name) or not repo_name_ok(new_name) then
+        return nil, 'bad repository name', 400
+    end
+    if type(pr_repo_change) == 'function' then
+        return pr_repo_change(owner, name, new_name, function() return rename(owner, name, new_name) end)
+    end
+    return rename(owner, name, new_name)
+end
+
+function g_exports.repo_delete(owner, name)
+    if not repo_name_ok(owner) or not repo_name_ok(name) then return nil, 'bad repository name', 400 end
+    if type(pr_repo_change) == 'function' then
+        return pr_repo_change(owner, name, nil, function() return delete(owner, name) end)
+    end
+    return delete(owner, name)
 end

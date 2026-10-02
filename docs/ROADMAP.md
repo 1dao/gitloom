@@ -1667,14 +1667,20 @@ cheaper than expected: a hook's stderr is already relayed as `remote:` lines, so
 branch protection above needed no sideband work of its own. What is left of this
 is the "open a pull request at ..." line, which arrives with pull requests.
 
-PRs are the heavy part. Their READING half is done and shipped as the compare
-view above — merge base, ahead/behind, the commits and the files one branch
-would add — so what is left is the writing half: conflict detection, three merge
-strategies, and a review state machine. A pull request on top of this is a
-record with a state, two refs and a discussion; the question "what would this
-merge" is already answered.
+The same-repository PR writing workflow is implemented (2026-10-02): source
+branch submission, exact-OID diff review, comments, request-changes, close/reopen,
+and approval that creates a merge commit in a bare repository. Authors cannot
+approve themselves. A changed source or target rejects approval; conflicts leave
+refs untouched. The target and private recovery marker update atomically, and a
+pending journal is reconciled when the PR detail is read after a restart.
+Repository rename/delete serialize with PR mutations and carry/remove the history.
 
-Estimate: 6–10 weeks.
+`node test/pr.js` drives an isolated server with real HTTP and Git, including
+permission refusals, stale reviews, concurrent approvals, conflicts, restart
+persistence and both pending recovery states. It is included in `test/smoke.sh`
+when Node is available. Automatic merging requires Git 2.38+. Squash/rebase,
+cross-repository PRs and configurable required-review push policy remain future
+work. The existing fast-forward branch protection is unchanged.
 
 ## Phase 4 — the rest of the surface
 

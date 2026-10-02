@@ -166,6 +166,7 @@ local function boot_async()
     if not repo_index_load() then xthread.stop(1); return end
     if not issue_index_load() then xthread.stop(1); return end
     if not org_index_load() then xthread.stop(1); return end
+    if not pr_index_load() then xthread.stop(1); return end
     if not auth_load() then xthread.stop(1); return end
     auth_bootstrap()
     cfg_log_system('store: %s', store_describe())
