@@ -741,6 +741,16 @@ local function h_user_list(req, _ctx)
     return http_response_json(200, { users = auth_user_list() })
 end
 
+local function h_user_update(req, ctx)
+    local user, denied = require_admin(req)
+    if not user then return denied end
+    local body, err = body_json(req)
+    if not body then return http_response_error(400, err) end
+    local updated, why, status = auth_user_disable(user, ctx.params.username, body.disabled)
+    if not updated then return http_response_error(status or 500, why) end
+    return http_response_json(200, updated)
+end
+
 local function h_user_register(req, ctx)
     if not cfg_bool('AUTH_ALLOW_REGISTRATION', false) then
         return http_response_error(403, 'account registration is disabled')
@@ -1341,6 +1351,7 @@ function g_exports.api_install()
     http_get('/api/v1/user', h_user_self)
     http_get('/api/v1/users', h_user_list)
     http_post('/api/v1/users', h_user_create)
+    http_patch('/api/v1/users/:username', h_user_update)
     http_post('/api/v1/user/register', h_user_register)
     http_post('/api/v1/user/password', h_password_change)
     -- No credentials on this one, by design: see h_password_reset.

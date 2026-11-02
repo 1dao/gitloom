@@ -454,3 +454,16 @@ on a short allowlist, and always carry `nosniff` and a sandbox CSP. A repository
 can contain an `.html` or `.svg` file, and serving that inline would make the
 gitloom origin attacker-controlled script — GitHub uses a separate domain for
 raw content for the same reason; gitloom has one origin, so it refuses instead.
+
+## Disable an account
+
+Administrators can disable or enable accounts in the browser's account dialog,
+or use `PATCH /api/v1/users/:username` with `{"disabled":true}` or
+`{"disabled":false}`. Disabling rejects password and token authentication for
+both the API and Git, clears the account's tokens, and invalidates cached
+credentials. Enabling does not restore tokens. Administrators cannot disable
+themselves or the last active administrator. Repositories and collaboration
+history are retained. Anonymous access to public repositories follows `ANON_READ`;
+set `ANON_READ=0` for an internal instance requiring authentication.
+Already running Git subprocesses are not terminated by this operation.
+MySQL migration 6 adds `gl_users.is_disabled`; older JSON accounts remain enabled.

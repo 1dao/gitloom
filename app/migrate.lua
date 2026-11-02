@@ -178,6 +178,12 @@ local MIGRATIONS = {
     },
 }
 
+MIGRATIONS[#MIGRATIONS + 1] = {
+    id = 6,
+    name = 'disabled accounts',
+    up = { function() return add_column('gl_users', 'is_disabled', 'TINYINT NOT NULL DEFAULT 0') end },
+}
+
 function g_exports.migrate_latest()
     local top = 0
     for _, m in ipairs(MIGRATIONS) do

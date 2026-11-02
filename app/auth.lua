@@ -33,6 +33,7 @@ local xutils = require('xutils')
 
 local users = nil          -- username -> record
 local creating = {}        -- names currently being hashed; closes concurrent races
+local saving = {}
 -- Verification cache. The VALUE carries the verdict, not just an expiry:
 -- 'ok' for a credential that verified, 'bad' for one that did not. Storing an
 -- expiry alone and treating any live entry as success — which is what a plain
@@ -216,7 +217,12 @@ end
 -- Persist ONE account the caller has already changed in `users`. Under the file
 -- backend that still rewrites the whole file; under MySQL it is a single row.
 local function auth_save(u)
-    return store_user_put(u)
+    if saving[u.username] then return nil, 'account update in progress; retry' end
+    saving[u.username] = true
+    local ok, saved, err = pcall(store_user_put, u)
+    saving[u.username] = nil
+    if not ok then return nil, 'could not save account' end
+    return saved, err
 end
 
 local function auth_user_get(username)
@@ -227,6 +233,32 @@ end
 function g_exports.auth_user_exists(username)
     if not have_users() then return nil, 'the account store is unavailable' end
     return users[tostring(username or '')] ~= nil
+end
+
+function g_exports.auth_user_disable(actor, username, disabled)
+    if not actor or actor.disabled or not actor.admin then return nil, 'administrator required', 403 end
+    if type(disabled) ~= 'boolean' then return nil, 'disabled must be a boolean', 400 end
+    local u = auth_user_get(username)
+    if not u then return nil, 'no such user', 404 end
+    if disabled and actor.username == username then return nil, 'cannot disable your own account', 409 end
+    if saving[username] then return nil, 'account update in progress; retry', 409 end
+    if disabled and u.admin then
+        local active = 0
+        for _, account in pairs(users) do
+            if account.admin and not account.disabled then active = active + 1 end
+        end
+        if active <= 1 then return nil, 'cannot disable the last active administrator', 409 end
+    end
+    local old_disabled, old_tokens = u.disabled, u.tokens
+    u.disabled = disabled
+    if disabled then u.tokens = {} end
+    verify_cache = {}
+    local ok, err = auth_save(u)
+    if not ok then
+        u.disabled, u.tokens = old_disabled, old_tokens
+        return nil, err, 500
+    end
+    return { username = username, disabled = disabled }
 end
 
 function g_exports.auth_namespace_exists(name)
@@ -319,7 +351,7 @@ end
 -- COROUTINE-ONLY.
 function g_exports.auth_password_change(username, old_password, new_password)
     local u = auth_user_get(username)
-    if not u then return nil, 'no such user' end
+    if not u or u.disabled then return nil, 'account unavailable' end
     if type(new_password) ~= 'string' or #new_password < cfg_int('AUTH_MIN_PASSWORD', 8) then
         return nil, string.format('password must be at least %d characters',
             cfg_int('AUTH_MIN_PASSWORD', 8))
@@ -328,14 +360,17 @@ function g_exports.auth_password_change(username, old_password, new_password)
         return nil, 'the current password is not correct'
     end
 
-    local old_hash, old_tokens = u.pwhash, u.tokens
-    u.pwhash = password_hash(new_password)
-    u.tokens = {}
-    local code = nil
-    if not u.recovery then
+    local new_hash = password_hash(new_password)
+    local code, recovery = nil, u.recovery
+    if not recovery then
         code = gen_code()
-        u.recovery = password_hash(code)
+        recovery = password_hash(code)
     end
+    if u.disabled then return nil, 'account unavailable' end
+    local old_hash, old_tokens = u.pwhash, u.tokens
+    u.pwhash = new_hash
+    u.tokens = {}
+    u.recovery = recovery
 
     local ok, err = auth_save(u)
     if not ok then
@@ -368,7 +403,7 @@ function g_exports.auth_password_reset(username, code, new_password)
     -- One answer for "no such account" and "wrong code". This endpoint is
     -- reachable without credentials, and telling the two apart turns it into a
     -- way to enumerate accounts.
-    if not u or canon == '' then
+    if not u or u.disabled or canon == '' then
         return nil, 'invalid account or recovery code', 'rejected'
     end
     if not u.recovery then
@@ -382,10 +417,11 @@ function g_exports.auth_password_reset(username, code, new_password)
         return nil, 'invalid account or recovery code', 'rejected'
     end
 
-    local old_hash, old_recovery, old_tokens = u.pwhash, u.recovery, u.tokens
     local fresh = gen_code()
-    u.pwhash = password_hash(new_password)
-    u.recovery = password_hash(fresh)
+    local new_hash, new_recovery = password_hash(new_password), password_hash(fresh)
+    if u.disabled then return nil, 'invalid account or recovery code', 'rejected' end
+    local old_hash, old_recovery, old_tokens = u.pwhash, u.recovery, u.tokens
+    u.pwhash, u.recovery = new_hash, new_recovery
     u.tokens = {}      -- as with a change: whoever held the old password is out
 
     local ok, err = auth_save(u)
@@ -402,7 +438,7 @@ function g_exports.auth_user_list()
     local out = {}
     for _, u in pairs(users) do
         out[#out + 1] = { username = u.username, admin = u.admin or false,
-                          email = u.email, created_at = u.created_at,
+                          email = u.email, created_at = u.created_at, disabled = u.disabled or false,
                           token_count = live_token_count(u) }
     end
     table.sort(out, function(a, b) return a.username < b.username end)
@@ -458,7 +494,7 @@ end
 -- and revocable in a way the password behind it is not.
 function g_exports.auth_token_create(username, label, ttl_sec)
     local u = auth_user_get(username)
-    if not u then return nil, 'no such user' end
+    if not u or u.disabled then return nil, 'account unavailable' end
     ttl_sec = tonumber(ttl_sec)
     if ttl_sec ~= nil and ttl_sec <= 0 then return nil, 'ttl_seconds must be positive' end
 
@@ -652,6 +688,7 @@ function g_exports.auth_identify(req)
     -- credential we have already verified.
     local k = cache_key(username, secret)
     local u = auth_user_get(username)
+    if u and u.disabled then return nil, 'bad credentials' end
     local cached = cache_lookup(k)
     if cached == 'ok' and u then return u end
     -- A cached failure is answered without touching the rate limiter: it has
@@ -682,6 +719,7 @@ function g_exports.auth_identify(req)
     end
     if not ok then ok = password_verify(secret, u.pwhash) end
 
+    if u.disabled then return nil, 'bad credentials' end
     if not ok then
         -- Cache the failure too, for a shorter time than a success. git re-sends
         -- the same wrong credential on every request of a clone, so without this
@@ -741,12 +779,13 @@ local function collaborator_level(rec, user)
 end
 
 function g_exports.auth_can_manage(rec, user)
-    if not rec or not user then return false end
+    if not rec or not user or user.disabled then return false end
     return user.admin or rec.owner == user.username or org_repo_permission(rec, user) == 'admin'
 end
 
 function g_exports.auth_can_read(rec, user)
     if not rec then return false end
+    if user and user.disabled then return false end
     if not rec.private then
         -- A public repository is readable anonymously only when the instance
         -- allows it; otherwise "public" just means "visible to any account".
@@ -762,7 +801,7 @@ function g_exports.auth_can_read(rec, user)
 end
 
 function g_exports.auth_can_write(rec, user)
-    if not rec or not user then return false end
+    if not rec or not user or user.disabled then return false end
     if user.admin then return true end
     if rec.owner == user.username then return true end
     local team = org_repo_permission(rec, user)

@@ -2105,6 +2105,43 @@ CNF
     fi
 fi
 
+# Disabled accounts lose cached passwords, tokens and Git access immediately.
+curl -s -u "admin:$ADMIN_PW" -H 'Content-Type: application/json' \
+    -d '{"username":"offboard","password":"offboard-password-1"}' "$BASE/api/v1/users" > "$WORK/offboard.json"
+OFF_TOKEN=$(curl -s -u offboard:offboard-password-1 -H 'Content-Type: application/json' \
+    -d '{"label":"offboarding"}' "$BASE/api/v1/user/tokens" | tr ',' '\n' | grep -o '"token":"[0-9a-f]*"' | cut -d'"' -f4)
+for credential in offboard-password-1 "$OFF_TOKEN"; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -u "offboard:$credential" "$BASE/api/v1/user")
+    check 'offboarding credential works before disable' "$code" '200'
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -u offboard:offboard-password-1 -X PATCH \
+    -H 'Content-Type: application/json' -d '{"disabled":true}' "$BASE/api/v1/users/admin")
+check 'ordinary accounts cannot disable users' "$code" '403'
+for payload in '{"disabled":"yes"}' '{}'; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+        -H 'Content-Type: application/json' -d "$payload" "$BASE/api/v1/users/offboard")
+    check 'disabled status requires a boolean' "$code" '400'
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"disabled":true}' "$BASE/api/v1/users/admin")
+check 'administrators cannot disable themselves' "$code" '409'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"disabled":true}' "$BASE/api/v1/users/offboard")
+check 'administrator disables account' "$code" '200'
+for credential in offboard-password-1 "$OFF_TOKEN"; do
+    for endpoint in api/v1/user 'admin/demo.git/info/refs?service=git-upload-pack' 'admin/demo.git/info/refs?service=git-receive-pack'; do
+        code=$(curl -s -o /dev/null -w '%{http_code}' -u "offboard:$credential" "$BASE/$endpoint")
+        check 'disabled cached credentials cannot access API or Git' "$code" '401'
+    done
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"disabled":false}' "$BASE/api/v1/users/offboard")
+check 'administrator enables account' "$code" '200'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "offboard:$OFF_TOKEN" "$BASE/api/v1/user")
+check 'enabling account never restores revoked tokens' "$code" '401'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u offboard:offboard-password-1 "$BASE/api/v1/user")
+check 'enabled account can authenticate with its password' "$code" '200'
+
 # == Delete ==================================================================
 code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X DELETE \
     "$BASE/api/v1/repos/admin/demo")

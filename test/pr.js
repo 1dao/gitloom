@@ -185,6 +185,13 @@ async function main() {
     await api('GET','repos/admin/private/pulls',undefined,null,404);
     await api('GET','repos/admin/private/pulls',undefined,'bob',404);
     count++;console.log('PASS PR private repository visibility');
+    await api('PATCH','users/bob',{disabled:true});
+    await stop(); await start();
+    await api('GET','user',undefined,'bob',401);
+    const accounts=await api('GET','users');
+    check('disabled account survives restart',()=>assert.equal(accounts.users.find(u=>u.username==='bob').disabled,true));
+    await api('PATCH','users/bob',{disabled:false});
+    await api('GET','user',undefined,'bob');
     console.log('[pr] '+count+' passed, 0 failed');
 }
 main().catch(error=>{

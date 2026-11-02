@@ -779,6 +779,16 @@ do
        http_dispatch({ method = 'PUT', path = '/unit/head-probe', headers = {} }, {}).status, 404)
 end
 
+do
+    local account = { username = 'owner', admin = true, disabled = true }
+    local rec = { owner = 'owner', name = 'example', private = true }
+    eq('disabled owner cannot manage a private repository', auth_can_manage(rec, account), false)
+    eq('disabled administrator cannot read a private repository', auth_can_read(rec, account), false)
+    eq('disabled owner cannot push', auth_can_write(rec, account), false)
+    rec.private = false
+    eq('disabled identity cannot read even a public repository', auth_can_read(rec, account), false)
+end
+
 out(string.format('\n[unit] %s (%d checks, %d failure(s))\n',
     fails == 0 and 'ALL PASS' or 'FAILED', total, fails))
 

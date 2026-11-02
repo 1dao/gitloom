@@ -3553,10 +3553,27 @@
       if (user.email) parts.push(user.email);
       parts.push('创建于 ' + formatDate(user.created_at));
       parts.push((user.token_count || 0) + ' 个有效令牌');
+      if (user.disabled) parts.push('已禁用');
       meta.textContent = parts.join(' · ');
       who.appendChild(meta);
 
       row.appendChild(who);
+      if (user.username !== state.username) {
+        var toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'button button-quiet';
+        toggle.textContent = user.disabled ? '启用' : '禁用';
+        toggle.addEventListener('click', function () {
+          toggle.disabled = true;
+          api('/api/v1/users/' + encodeURIComponent(user.username), {
+            method: 'PATCH', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({disabled: !user.disabled})
+          }).then(function () { return loadUsers(); }).catch(function (error) {
+            $('users-message').textContent = error.message;
+          }).finally(function () { toggle.disabled = false; });
+        });
+        row.appendChild(toggle);
+      }
       list.appendChild(row);
     });
   }
