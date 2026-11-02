@@ -802,6 +802,34 @@ do
     eq('policy rejects a scalar allowlist', protect_policy_check({ merge_users = 'owner' }), nil)
 end
 
+do
+    local patch = 'diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n-old\n+new\n keep\n'
+    local rows = pr_diff_lines(patch)
+    eq('deleted diff line anchors old version', rows[5].old_line, 1)
+    eq('deleted diff line has no new anchor', rows[5].new_line, nil)
+    eq('added diff line anchors new version', rows[6].new_line, 1)
+    eq('context diff line anchors both versions', rows[7].old_line, rows[7].new_line)
+    eq('diff anchor retains exact path', rows[6].new_path, 'file.txt')
+    local quoted = pr_diff_lines([=[diff --git "a/old\042name.txt" "b/new\042name.txt"
+--- "a/old\042name.txt"
++++ "b/new\042name.txt"
+@@ -1 +1 @@
+-old
++new
+]=])
+    eq('renamed diff retains quoted old path', quoted[5].old_path, 'old"name.txt')
+    eq('renamed diff retains quoted new path', quoted[6].new_path, 'new"name.txt')
+    local tabbed = pr_diff_lines('--- "a/old name"\t\n+++ "b/new name"\t\n@@ -1 +1 @@\n-old\n+new\n')
+    eq('quoted diff header permits Git tab suffix', tabbed[4].old_path, 'old name')
+    eq('new quoted diff header permits Git tab suffix', tabbed[5].new_path, 'new name')
+    local tricky = pr_diff_lines('diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n--- not a header\n+++ not a header\n')
+    eq('header-shaped deletion remains an anchored line', tricky[5].old_line, 1)
+    eq('header-shaped addition remains an anchored line', tricky[6].new_line, 1)
+    eq('oversized PR diff is refused', pr_diff_lines(string.rep('meta\n', 20001)), nil)
+    eq('exact PR diff line limit is accepted', #pr_diff_lines(string.rep('meta\n', 20000)), 20000)
+    eq('empty PR diff has no synthetic line', #pr_diff_lines(''), 0)
+end
+
 out(string.format('\n[unit] %s (%d checks, %d failure(s))\n',
     fails == 0 and 'ALL PASS' or 'FAILED', total, fails))
 

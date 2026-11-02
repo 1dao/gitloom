@@ -2802,8 +2802,9 @@
   var currentPull = null;
   var pullBusy = false;
   var pullDiffReady = false;
+  var pullAnchor = null;
   var pullLabels = {open: '待审核', closed: '已关闭', merged: '已合并',
-    approve: '已批准并合并', request_changes: '要求修改', merging: '正在合并', merge_failed: '合并未完成'};
+    approve: '已批准', request_changes: '要求修改', merging: '正在合并', merge_failed: '合并未完成'};
   function pullPath(suffix) { return repoPath('/pulls' + (suffix || '')); }
   function pullError(error) {
     var msg = error.message || '';
@@ -2814,6 +2815,9 @@
     if (/open pull request already/.test(msg)) return '这两个分支已经有待处理的合并请求。';
     if (/source has no new/.test(msg)) return '来源分支没有需要合入的新提交。';
     if (/progress|reconciliation/.test(msg)) return '有操作正在完成或需要确认结果，请稍后刷新。';
+    if (/independent approval/.test(msg)) return '当前版本尚未得到其他管理者批准，请先完成评审。';
+    if (/unresolved line/.test(msg)) return '请先解决所有逐行讨论，包括较早版本的讨论。';
+    if (/requested changes/.test(msg)) return '提出修改要求的评审者需要重新批准后才能合并。';
     return msg || '操作失败，请刷新后重试。';
   }
   function pullWrite(path, method, data) {
@@ -2822,15 +2826,83 @@
   }
   function pullControls() {
     if (!$('pull-approve')) return;
-    $('pull-approve').disabled = pullBusy || !pullDiffReady || !currentPull || !currentPull.can_merge;
-    $('pull-request-changes').disabled = pullBusy || !pullDiffReady;
+    $('pull-approve').disabled = pullBusy || !pullDiffReady || !currentPull || !currentPull.can_review;
+    $('pull-request-changes').disabled = pullBusy || !pullDiffReady || !currentPull || !currentPull.can_review;
+    if ($('pull-merge')) $('pull-merge').disabled = pullBusy || !pullDiffReady || !currentPull ||
+      !currentPull.can_merge || !currentPull.review_status || !currentPull.review_status.mergeable;
     $('pull-toggle').disabled = pullBusy;
     $$('#pull-create button, #pull-comment-form button').forEach(function (b) { b.disabled = pullBusy; });
+    $$('#pull-line-form button, #pull-threads button, #pull-threads textarea').forEach(function (b) { b.disabled = pullBusy; });
+  }
+  function renderPullDiff(lines, p) {
+    var container = $('pull-diff'); container.textContent = '';
+    lines.forEach(function (line) {
+      var row = document.createElement('span'); row.className = 'pull-diff-row';
+      ['old', 'new'].forEach(function (side) {
+        var path = line[side + '_path'], number = line[side + '_line'];
+        var clickable = path && number && p.can_comment_lines && p.state === 'open';
+        var cell = document.createElement(clickable ? 'button' : 'span');
+        cell.className = 'pull-line-number'; cell.textContent = number || '';
+        if (clickable) {
+          cell.type = 'button'; cell.title = (side === 'old' ? '旧版本' : '新版本') + ' ' + path + ':' + number + ' 发起讨论';
+          cell.addEventListener('click', function () {
+            if (pullBusy || !pullDiffReady || currentPull !== p) return;
+            pullAnchor = {path: path, side: side, line: number, base_oid: p.base_oid, head_oid: p.head_oid};
+            $('pull-line-anchor').textContent = path + ':' + number + (side === 'old' ? '（旧版本）' : '（新版本）');
+            $('pull-line-body').value = ''; $('pull-line-form').hidden = false; $('pull-line-body').focus();
+          });
+        }
+        row.appendChild(cell);
+      });
+      var code = document.createElement('span'); code.className = 'diff-' + line.kind;
+      code.textContent = line.text; row.appendChild(code); container.appendChild(row);
+    });
+  }
+  function renderPullThreads(p) {
+    var container = $('pull-threads'); if (!container) return;
+    container.textContent = '';
+    (p.threads || []).forEach(function (thread) {
+      var article = document.createElement('article'); article.className = 'pull-thread';
+      var title = document.createElement('strong');
+      title.textContent = thread.path + ':' + thread.line + (thread.side === 'old' ? '（旧版本）' : '（新版本）') +
+        ' · ' + (thread.resolved ? '已解决' : '未解决') + (thread.outdated ? ' · 较早版本' : '') +
+        ' · ' + thread.head_oid.slice(0, 12);
+      article.appendChild(title);
+      if (thread.code) { var code = document.createElement('pre'); code.textContent = thread.code; article.appendChild(code); }
+      (thread.comments || []).forEach(function (comment) {
+        var label = document.createElement('strong'), text = document.createElement('p');
+        label.textContent = comment.author; text.textContent = comment.body; text.className = 'pull-text';
+        article.appendChild(label); article.appendChild(text);
+      });
+      if (thread.can_resolve) {
+        var resolve = document.createElement('button'); resolve.type = 'button'; resolve.className = 'button button-quiet';
+        resolve.textContent = thread.resolved ? '重新打开讨论' : '标记已解决';
+        resolve.addEventListener('click', function () {
+          if (currentPull !== p) return;
+          mutatePull(pullPath('/' + p.number + '/threads/' + thread.id), 'PATCH', {resolved: !thread.resolved}, '讨论状态已更新。');
+        });
+        article.appendChild(resolve);
+      }
+      if (state.username && !p.merging) {
+        var form = document.createElement('form'), reply = document.createElement('textarea'), submit = document.createElement('button');
+        reply.rows = 2; reply.maxLength = 8192; reply.required = true;
+        reply.setAttribute('aria-label', '回复 ' + thread.path + ':' + thread.line);
+        submit.type = 'submit'; submit.className = 'button button-quiet'; submit.textContent = '回复';
+        form.appendChild(reply); form.appendChild(submit);
+        form.addEventListener('submit', function (event) {
+          event.preventDefault(); if (currentPull !== p || !reply.value.trim()) return;
+          mutatePull(pullPath('/' + p.number + '/threads/' + thread.id + '/comments'), 'POST', {body: reply.value}, '回复已保存。');
+        });
+        article.appendChild(form);
+      }
+      container.appendChild(article);
+    });
+    if (!(p.threads || []).length) container.textContent = p.can_comment_lines ? '点击 Diff 的旧版或新版行号发起讨论。' : '暂无逐行讨论。';
   }
   function loadPulls() {
     if (!$('pull-list')) return;
     var view = seq.view, repo = state.repo, ticket = ++pullTicket;
-    currentPull = null; pullDiffReady = false;
+    currentPull = null; pullDiffReady = false; pullAnchor = null;
     $('pull-detail').hidden = true;
     $('pull-create').hidden = true;
     $('pull-new').hidden = true;
@@ -2855,7 +2927,8 @@
   }
   function loadPullDetail(num) {
     var view = seq.view, repo = state.repo, ticket = ++pullTicket;
-    currentPull = null; pullDiffReady = false;
+    currentPull = null; pullDiffReady = false; pullAnchor = null;
+    if ($('pull-line-form')) $('pull-line-form').hidden = true;
     $('pull-detail').hidden = true; pullControls();
     function active() { return viewIsCurrent(view) && state.repo === repo && state.view === 'pulls' && ticket === pullTicket; }
     return json(pullPath('/' + num)).then(function (p) {
@@ -2869,6 +2942,13 @@
       $('pull-summary').textContent = p.branch_error || '正在读取差异…';
       $('pull-diff').textContent = '';
       $('pull-review').hidden = !p.can_review || p.merging;
+      if ($('pull-merge')) $('pull-merge').hidden = !p.can_merge || p.merging;
+      if ($('pull-review-status')) {
+        var status = p.review_status || {};
+        $('pull-review-status').textContent = (status.approved ? '当前版本已批准：' + (status.approved_by || []).join(', ') : '当前版本尚未批准') +
+          (status.changes_requested ? ' · 有待处理的修改要求' : '') + ' · 未解决讨论 ' + (status.unresolved || 0);
+      }
+      renderPullThreads(p);
       $('pull-review-body').value = '';
       $('pull-comment-body').value = '';
       $('pull-comment-form').hidden = !state.username || p.merging;
@@ -2883,12 +2963,14 @@
         article.appendChild(label); article.appendChild(body); discussion.appendChild(article);
       });
       if (p.branch_error || !p.base_oid || !p.head_oid) return;
-      var compare = repoPath('/compare/' + p.base_oid + '/' + p.head_oid);
-      return Promise.all([json(compare), api(compare + '/diff').then(function(r) {return r.text();})]).then(function (parts) {
+      return json(pullPath('/' + p.number + '/diff?base_oid=' + p.base_oid + '&head_oid=' + p.head_oid)).then(function (diff) {
         if (!active()) return;
-        $('pull-summary').textContent = (parts[0].ahead || 0) + ' 个新提交 · ' + (parts[0].files || []).length + ' 个文件 · ' +
+        if (diff.base_oid !== p.base_oid || diff.head_oid !== p.head_oid) throw new Error('branches changed; refresh');
+        var files = new Set();
+        (diff.lines || []).forEach(function (line) { if (line.new_path || line.old_path) files.add(line.new_path || line.old_path); });
+        $('pull-summary').textContent = files.size + ' 个文件 · ' +
           p.base_oid.slice(0, 12) + ' ← ' + p.head_oid.slice(0, 12);
-        renderDiff(parts[1], $('pull-diff'));
+        renderPullDiff(diff.lines || [], p);
         pullDiffReady = true; pullControls();
       });
     }).catch(function (error) {
@@ -2930,14 +3012,25 @@
   });
   function reviewPull(stateName) {
     if (!currentPull || !pullDiffReady) return;
-    if (stateName === 'approve' && !currentPull.can_merge) return;
+    if (!currentPull.can_review) return;
     var body = $('pull-review-body').value;
     if (stateName === 'request_changes' && !body.trim()) { $('pull-message').textContent = '请填写需要修改的内容。'; return; }
     mutatePull(pullPath('/' + currentPull.number + '/reviews'), 'POST', {state: stateName, body: body,
-      base_oid: currentPull.base_oid, head_oid: currentPull.head_oid}, stateName === 'approve' ? '已批准并自动合并。' : '已要求修改，等待提交者更新分支。');
+      base_oid: currentPull.base_oid, head_oid: currentPull.head_oid}, stateName === 'approve' ? '已批准当前版本，尚未合并。' : '已要求修改，等待提交者更新分支。');
   }
   on('pull-approve', 'click', function() { reviewPull('approve'); });
   on('pull-request-changes', 'click', function() { reviewPull('request_changes'); });
+  on('pull-merge', 'click', function () {
+    if (!currentPull || !pullDiffReady || !currentPull.can_merge || !currentPull.review_status || !currentPull.review_status.mergeable) return;
+    mutatePull(pullPath('/' + currentPull.number + '/merge'), 'POST',
+      {base_oid: currentPull.base_oid, head_oid: currentPull.head_oid}, '已合并。');
+  });
+  on('pull-line-form', 'submit', function (event) {
+    event.preventDefault(); if (!currentPull || !pullDiffReady || !pullAnchor) return;
+    mutatePull(pullPath('/' + currentPull.number + '/threads'), 'POST',
+      Object.assign({}, pullAnchor, {body: $('pull-line-body').value}), '逐行讨论已保存。');
+  });
+  on('pull-line-cancel', 'click', function () { pullAnchor = null; $('pull-line-form').hidden = true; });
   on('pull-toggle', 'click', function() {
     if (!currentPull) return;
     mutatePull(pullPath('/' + currentPull.number), 'PATCH', {state: currentPull.state === 'open' ? 'closed' : 'open'}, '状态已更新。');

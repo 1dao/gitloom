@@ -232,7 +232,7 @@
                 <label>提交分支（来源）<input id="pull-head" required placeholder="feature/my-change"></label>
               </div>
               <label>改动说明<textarea id="pull-body" rows="4" maxlength="65536"></textarea></label>
-              <p class="muted">先将提交分支推送到本仓库，再发起请求。管理员批准后会自动合并。</p>
+              <p class="muted">先将提交分支推送到本仓库，再发起请求。批准只记录评审结论，合并需要单独操作。</p>
               <button class="button button-primary" type="submit">提交合并请求</button>
             </form>
             <div id="pull-list" class="issue-list"></div>
@@ -241,8 +241,17 @@
               <p id="pull-meta" class="muted"></p>
               <p id="pull-description" class="pull-text"></p>
               <p id="pull-summary"></p>
-              <pre id="pull-diff" class="diff-block"></pre>
+              <div id="pull-diff" class="diff-block"></div>
+              <form id="pull-line-form" class="pull-thread" hidden>
+                <strong id="pull-line-anchor"></strong>
+                <label>逐行评论<textarea id="pull-line-body" rows="3" required maxlength="8192"></textarea></label>
+                <button class="button button-primary" type="submit">发起讨论</button>
+                <button id="pull-line-cancel" class="button button-quiet" type="button">取消</button>
+              </form>
+              <h4>逐行讨论</h4>
+              <div id="pull-threads"></div>
               <h4>讨论与审核</h4>
+              <p id="pull-review-status" class="muted"></p>
               <div id="pull-discussion"></div>
               <form id="pull-comment-form" hidden>
                 <label>评论<textarea id="pull-comment-body" rows="3" required maxlength="8192"></textarea></label>
@@ -250,12 +259,13 @@
               </form>
               <div id="pull-review" hidden>
                 <label>审核意见<textarea id="pull-review-body" rows="3" maxlength="8192" placeholder="批准时可选；要求修改时必填"></textarea></label>
-                <p class="muted">批准会立即创建合并提交。分支更新或冲突时会停止，需要刷新并重新审核。</p>
+                <p class="muted">批准仅对当前提交版本有效。来源或目标分支更新后，需要重新批准；未解决的讨论和修改要求会阻止合并。</p>
                 <div class="dialog-actions">
                   <button id="pull-request-changes" class="button button-quiet" type="button">要求修改</button>
-                  <button id="pull-approve" class="button button-primary" type="button" disabled>批准并自动合并</button>
+                  <button id="pull-approve" class="button button-primary" type="button" disabled>批准当前版本</button>
                 </div>
               </div>
+              <button id="pull-merge" class="button button-primary" type="button" hidden disabled>合并已批准的改动</button>
               <button id="pull-toggle" class="button button-quiet" type="button" hidden>关闭请求</button>
             </section>
           </div>

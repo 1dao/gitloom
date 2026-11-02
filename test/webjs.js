@@ -433,9 +433,10 @@ async function testPullController() {
     if (begin<0 || end<0) throw new Error('PR controller boundaries missing');
     const nodes={}, handlers={}, writes=[];
     const node=id => nodes[id] || (nodes[id]=Object.assign(new Node('div'),{value:'',hidden:false,disabled:false}));
-    let compareResolve, diffResolve, detailResolve, rejectWrites=false, holdDetail=false;
+    let diffResolve, detailResolve, rejectWrites=true, holdDetail=false;
     let detail={number:1,title:'<img src=x onerror=alert(1)>',body:'<script>evil</script>',
-        author:'bob',base:'main',head:'feature',state:'open',can_review:true,can_merge:true,can_edit:true,
+        author:'bob',base:'main',head:'feature',state:'open',can_review:true,can_merge:true,can_edit:true,can_comment_lines:true,
+        review_status:{approved:false,approved_by:[],unresolved:0,mergeable:false},
         base_oid:'a'.repeat(40),head_oid:'b'.repeat(40),comments:[],reviews:[]};
     const ctx={document,Promise,console,
         state:{repo:{owner:'admin',name:'demo'},view:'pulls',username:'admin',pullNumber:1},
@@ -444,7 +445,7 @@ async function testPullController() {
         routeWrite:()=>{ctx.routeNumber=ctx.state.pullNumber;},
         renderDiff:(patch,el)=>{el.textContent=patch;},
         json:url=>{
-            if (url.includes('/compare/')) return new Promise(resolve=>{compareResolve=resolve;});
+            if (url.includes('/diff?')) return new Promise(resolve=>{diffResolve=resolve;});
             if (url.includes('?state=')) return Promise.resolve({pull_requests:[],can_create:true});
             return holdDetail ? new Promise(resolve=>{detailResolve=resolve;}) : Promise.resolve({...detail});
         },
@@ -455,42 +456,62 @@ async function testPullController() {
             return Promise.resolve({json:()=>Promise.resolve({...detail})});
         }
     };
+    Node.prototype.addEventListener=function(type,fn){(this.listeners ||= {})[type]=fn;};
+    Node.prototype.focus=function(){};
     vm.createContext(ctx);vm.runInContext(source.slice(begin,end),ctx);
     const tick=()=>new Promise(resolve=>setImmediate(resolve));
+    function patch() { return {base_oid:detail.base_oid,head_oid:detail.head_oid,
+        lines:[{kind:'add',text:'+<script>literal</script>',new_path:'feature.txt',new_line:1}]}; }
+    async function show() { const loaded=ctx.loadPullDetail(1);await tick();diffResolve(patch());await loaded; }
     const loading=ctx.loadPullDetail(1);await tick();
     ok('PR approval disabled before diff arrives',node('pull-approve').disabled);
-    compareResolve({ahead:1,files:['f']});await tick();
-    ok('PR approval waits for patch as well as metadata',node('pull-approve').disabled);
-    diffResolve();await loading;
+    diffResolve(patch());await loading;
     ok('PR approval enabled after complete diff',!node('pull-approve').disabled);
+    ok('PR merge disabled without approval',node('pull-merge').disabled);
     ctx.currentPull.can_merge=false;ctx.pullControls();
-    ok('PR approval disabled for a manager outside the merge allowlist',node('pull-approve').disabled);
-    const deniedWrites=writes.length;ctx.reviewPull('approve');await tick();
-    eq('PR excluded manager cannot submit approval',writes.length,deniedWrites);
+    ok('manager outside merge allowlist may still approve',!node('pull-approve').disabled);
+    ok('manager outside merge allowlist cannot merge',node('pull-merge').disabled);
     ctx.currentPull.can_merge=true;ctx.pullControls();
     eq('PR title remains text',node('pull-detail-title').textContent,'#1 '+detail.title);
     eq('PR description remains text',node('pull-description').textContent,detail.body);
-    rejectWrites=true;
-    await ctx.mutatePull('/reviews','POST',{state:'approve',base_oid:detail.base_oid,head_oid:detail.head_oid},'done');
-    ok('PR stale approval disables retry until refresh',node('pull-approve').disabled);
-    ok('PR stale approval explains refresh',node('pull-message').textContent.includes('刷新'));
-    // The review click must keep the OIDs that produced the displayed patch.
-    const again=ctx.loadPullDetail(1);await tick();compareResolve({ahead:1,files:[]});diffResolve();await again;
-    node('pull-review-body').value='approved';ctx.reviewPull('approve');await tick();
+    eq('PR diff content remains text',node('pull-diff').childNodes[0].childNodes[2].textContent,'+<script>literal</script>');
+    node('pull-diff').childNodes[0].childNodes[1].listeners.click();
+    ok('clicking a diff number opens a line discussion',!node('pull-line-form').hidden);
+    node('pull-line-body').value='Review this line';handlers['pull-line-form:submit']({preventDefault(){}});await tick();
+    eq('line comment uses its exact path',writes.at(-1).body.path,'feature.txt');
+    eq('line comment uses displayed source OID',writes.at(-1).body.head_oid,detail.head_oid);
+    eq('line comment names the new side',writes.at(-1).body.side,'new');
+    ok('stale line comment disables writes until refresh',node('pull-approve').disabled);
+    await show();node('pull-review-body').value='approved';ctx.reviewPull('approve');await tick();
+    ok('approval sends review rather than merge',writes.at(-1).url.endsWith('/reviews'));
     eq('PR review submits displayed base OID',writes.at(-1).body.base_oid,detail.base_oid);
     eq('PR review submits displayed head OID',writes.at(-1).body.head_oid,detail.head_oid);
-    const before=writes.length;
-    node('pull-review-body').value='';ctx.reviewPull('request_changes');await tick();
-    eq('PR empty change request is not sent',writes.length,before);
-    // A late detail response from a page that was left cannot restore its controls.
+    ok('PR stale approval explains refresh',node('pull-message').textContent.includes('刷新'));
+    detail={...detail,review_status:{approved:true,approved_by:['reviewer'],unresolved:0,mergeable:true},threads:[{
+        id:1,path:'feature.txt',side:'new',line:1,head_oid:detail.head_oid,outdated:true,resolved:false,can_resolve:true,
+        code:'<script>literal code</script>',comments:[{author:'bob',body:'<img src=x>'}]}]};
+    await show();ok('separate merge enabled after an approval',!node('pull-merge').disabled);
+    ok('old line discussions are marked outdated',node('pull-threads').textContent.includes('较早版本'));
+    const thread=node('pull-threads').childNodes[0];
+    eq('thread code is rendered as text',thread.childNodes[1].textContent,'<script>literal code</script>');
+    const reply=thread.childNodes.at(-1);reply.childNodes[0].value='Reply safely';reply.listeners.submit({preventDefault(){}});await tick();
+    ok('reply addresses the stored thread',writes.at(-1).url.endsWith('/threads/1/comments'));
+    await show();const resolve=node('pull-threads').childNodes[0].childNodes.find(n=>n.tagName==='BUTTON');
+    resolve.listeners.click();await tick();eq('resolve sends explicit status',writes.at(-1).body.resolved,true);
+    await show();handlers['pull-merge:click']();await tick();
+    ok('merge is a separate explicit request',writes.at(-1).url.endsWith('/merge'));
+    eq('merge uses the displayed target OID',writes.at(-1).body.base_oid,detail.base_oid);
+    await show();ctx.currentPull.can_review=false;ctx.pullControls();
+    ok('author cannot approve their own request',node('pull-approve').disabled);
+    ok('author may merge after independent approval',!node('pull-merge').disabled);
+    const before=writes.length;node('pull-review-body').value='';ctx.reviewPull('request_changes');await tick();
+    eq('invalid change request is not sent',writes.length,before);
     holdDetail=true;const pending=ctx.loadPullDetail(1);await tick();ctx.seq.view++;ctx.state.view='code';
     detailResolve({...detail});await pending;
     ok('PR stale page response leaves detail hidden',node('pull-detail').hidden);
     ok('PR stale page response leaves approval disabled',node('pull-approve').disabled);
-    // A successful close moves the filter and bookmark to the returned request.
-    holdDetail=false;rejectWrites=false;ctx.state.view='pulls';detail={...detail,state:'closed',can_review:false};
-    const closed=ctx.mutatePull('/pulls/1','PATCH',{state:'closed'},'closed');await tick();
-    compareResolve({ahead:1,files:[]});diffResolve();await closed;
+    holdDetail=false;rejectWrites=false;ctx.state.view='pulls';detail={...detail,state:'closed',can_review:false,can_merge:false};
+    const closed=ctx.mutatePull('/pulls/1','PATCH',{state:'closed'},'closed');await tick();diffResolve(patch());await closed;
     eq('PR close selects closed list',node('pull-state').value,'closed');
     eq('PR close keeps bookmark',ctx.routeNumber,1);
     eq('PR mutation waits for detail before reporting success',node('pull-message').textContent,'closed');

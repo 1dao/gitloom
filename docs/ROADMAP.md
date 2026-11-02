@@ -1669,14 +1669,14 @@ is the "open a pull request at ..." line, which arrives with pull requests.
 
 The same-repository PR writing workflow is implemented (2026-10-02): source
 branch submission, exact-OID diff review, comments, request-changes, close/reopen,
-and approval that creates a merge commit in a bare repository. Authors cannot
-approve themselves. A changed source or target rejects approval; conflicts leave
+and server-side merge commits in a bare repository. Approval and merge are now
+separate operations. Authors cannot approve themselves. A changed source or target invalidates approval; conflicts leave
 refs untouched. The target and private recovery marker update atomically, and a
 pending journal is reconciled when the PR detail is read after a restart.
 Repository rename/delete serialize with PR mutations and carry/remove the history.
 
 `node test/pr.js` drives an isolated server with real HTTP and Git, including
-permission refusals, stale reviews, concurrent approvals, conflicts, restart
+permission refusals, stale reviews, concurrent merges, conflicts, restart
 persistence and both pending recovery states. It is included in `test/smoke.sh`
 when Node is available. Automatic merging requires Git 2.38+. Squash/rebase,
 cross-repository PRs remain future work. Required-PR default-branch policies and

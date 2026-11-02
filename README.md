@@ -50,14 +50,16 @@ default branch is protected: it cannot be deleted, and it cannot be force-pushed
 over (`PROTECT_DEFAULT_BRANCH`). Issues have a tracker: an issue or a comment is written and rendered as Markdown
 through the same parser the README goes through, and an issue's title and body
 can be corrected from the page as well as closed. Comments cannot be edited.
-Pull requests support contributor submission, discussion, change requests and
-approval with automatic merge. Push the source branch to the same repository;
+Pull requests support contributor submission, line discussions, change requests,
+independent approval and explicit merging. Push the source branch to the same repository;
 a repository owner, organisation administrator or site administrator reviews the
 exact source and target commits and approves another user's request. Approval
-creates a two-parent merge commit; changed branches or conflicts require a new
-review. Automatic merging requires Git 2.38+. Squash, rebase and cross-repository
+records the conclusion without moving Git refs. A separate merge action creates
+a two-parent merge commit after checking current approval and resolved discussions.
+Changed branches require fresh approval. Server-side merging requires Git 2.38+.
+Squash, rebase and cross-repository
 pull requests remain outside this workflow. Repositories can additionally require
-PR merges for the default branch and restrict which managers may approve a merge.
+PR merges for the default branch and restrict which managers may execute a merge.
 Without that policy, history protection permits ordinary fast-forward pushes.
 
 ## Quick start
@@ -399,8 +401,12 @@ missing `/bin/sh`.
 | `GET .../pulls/:number` | discussion, review permissions and exact `base_oid` / `head_oid`; reconciles a pending merge |
 | `PATCH .../pulls/:number` | `{title?, body?, state?}`; author or repository administrator; state `open` / `closed`, merged requests are immutable |
 | `POST .../pulls/:number/comments` | `{body}`; signed-in reader |
-| `POST .../pulls/:number/reviews` | `{state: approve\|request_changes, body?, base_oid, head_oid}`; repository administrator, excluding the author; approval merges immediately |
-| `POST .../pulls/:number/merge` | compatibility alias for approval; same permissions and reviewed OIDs, only `method: merge` |
+| `GET .../pulls/:number/diff` | JSON diff lines with exact old/new paths and line numbers; optional `base_oid` and `head_oid` must match the current PR version |
+| `POST .../pulls/:number/threads` | `{body, path, side: old\|new, line, base_oid, head_oid}`; writer; anchor must appear in the reviewed diff |
+| `POST .../pulls/:number/threads/:id/comments` | `{body}`; signed-in reader; reply to a saved line discussion |
+| `PATCH .../pulls/:number/threads/:id` | `{resolved: boolean}`; discussion author, PR author or repository administrator |
+| `POST .../pulls/:number/reviews` | `{state: approve\|request_changes, body?, base_oid, head_oid}`; repository administrator excluding the author; records a review without merging |
+| `POST .../pulls/:number/merge` | `{base_oid, head_oid, method?: merge}`; permitted merger; requires current independent approval and resolved discussions |
 | `GET /api/v1/user` | the caller's own record: `{username, admin, email, created_at}`. What the browser asks so it does not have to infer the administrator bit from the credential it holds |
 | `GET /api/v1/users` | administrator only |
 | `POST /api/v1/users` | administrator only |
@@ -536,8 +542,8 @@ Only the reviewed PR merge path may advance an existing protected default branch
 The existing exact-OID checks, self-approval refusal and conflict handling still
 apply. `merge_users` is an optional array of existing account names: listed users
 must also be repository managers. An empty list permits all repository managers.
-The allowlist restricts approval/merge; other managers may still request changes.
-Approval continues to create a merge commit immediately.
+The allowlist restricts execution of a merge. Other managers may approve or
+request changes. Approval and merging are separate operations.
 
 Set `REQUIRE_PR_DEFAULT_BRANCH=1` to require PRs by default for repositories with
 no explicit override. The shipped value is 0 to preserve existing workflows.
@@ -553,3 +559,43 @@ This policy covers HTTP Git access through Gitloom. Administrators with direct
 filesystem access can change bare repositories and must use separate host-level
 access controls. Multi-reviewer thresholds, CI status gates and protection of
 additional branch patterns are not part of this policy.
+
+## Line review and explicit PR merging
+
+Click an old or new line number in a PR diff to start a discussion. Writers can
+start discussions; signed-in readers can reply. A discussion records the exact
+base/head commit IDs, file path, side and line, plus a bounded line preview.
+Renames retain separate old/new paths. Binary files have no line anchors.
+Discussions remain visible after a push and are marked as belonging to an older
+version. The discussion author, PR author or a repository manager can resolve
+or reopen a discussion while the PR is not merged. All unresolved discussions,
+including older versions, block merging.
+
+Approval does not change refs or close the PR. The merge button requires a
+current approval from another active repository manager, no unresolved line
+discussions, and no outstanding change request from an active manager. Each
+reviewer's latest conclusion applies: another person's approval cannot override
+a request for changes, and closing/reopening does not clear that request.
+Reopening a closed PR requires fresh approval. A change
+to either source or target commit invalidates the previous approval. Permission
+revocation is rechecked when merging. The PR author may execute the merge after
+someone else approves, if the author has merge permission.
+
+For API clients, approval and merging require two requests:
+
+```text
+POST /api/v1/repos/company/project/pulls/1/reviews
+{"state":"approve","base_oid":"<reviewed target OID>","head_oid":"<reviewed source OID>"}
+
+POST /api/v1/repos/company/project/pulls/1/merge
+{"base_oid":"<reviewed target OID>","head_oid":"<reviewed source OID>"}
+```
+
+The merge endpoint no longer doubles as an approval endpoint. Existing clients
+must submit an approval first. Detail responses include `review_status`,
+`can_review`, `can_merge`, and versioned `threads`; `can_merge` describes the
+caller's permission while `review_status.mergeable` describes review readiness.
+The diff endpoint refuses more than 20,000 displayed lines or the existing
+`MAX_DIFF_MB` limit. Each PR permits at most 500 line discussions and 1,000 total
+line messages, each up to 8,192 bytes. Existing JSON/MySQL collaboration documents
+load without a schema migration; old merge recovery journals remain readable.

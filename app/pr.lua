@@ -48,10 +48,12 @@ function g_exports.pr_index_load()
                type(p.author) ~= 'string' or
                (p.state ~= 'open' and p.state ~= 'closed' and p.state ~= 'merged') then return nil end
             if p.comments ~= nil and type(p.comments) ~= 'table' or
-               p.reviews ~= nil and type(p.reviews) ~= 'table' then return nil end
+               p.reviews ~= nil and type(p.reviews) ~= 'table' or
+               p.threads ~= nil and type(p.threads) ~= 'table' then return nil end
             p.number = tonumber(p.number)
             p.comments = p.comments or {}
             p.reviews = p.reviews or {}
+            p.threads = p.threads or {}
             target[number(p.number)] = p
         end
         normalized[repo:lower()] = target
@@ -117,10 +119,10 @@ local function reconcile(rec, original)
         p.base_oid, p.head_oid = p.pending.base_oid, p.pending.head_oid
         p.merge_method = 'merge'
         local review = p.reviews[#p.reviews]
-        if review then review.state = 'approve' end
+        if review and not p.pending.independent then review.state = 'approve' end
     elseif r.exit_code == 1 then
         local review = p.reviews[#p.reviews]
-        if review then review.state = 'merge_failed' end
+        if review and not p.pending.independent then review.state = 'merge_failed' end
     else
         return nil, 'merge result is pending reconciliation; retry', 503
     end
@@ -211,6 +213,9 @@ function g_exports.pr_update(rec, num, user, body)
             end
         end
         local p = copy(old)
+        if body.state == 'open' and old.state == 'closed' then
+            p.review_round = (p.review_round or 0) + 1
+        end
         for _, field in ipairs({ 'state', 'title', 'body' }) do
             if body[field] ~= nil then p[field] = body[field] end
         end
@@ -233,7 +238,186 @@ function g_exports.pr_comment(rec, num, user, body)
     end)
 end
 
-local function approve(rec, p, user, ends)
+function g_exports.pr_review_status(rec, p, ends)
+    local status = { approved_by = {}, changes_requested = false, unresolved = 0 }
+    local seen = {}
+    for i = #(p.reviews or {}), 1, -1 do
+        local review = p.reviews[i]
+        if not seen[review.author] then
+            seen[review.author] = true
+            if review.author ~= p.author and auth_can_review(rec, review.author) then
+                if review.state == 'request_changes' then status.changes_requested = true end
+                if review.state == 'approve' and (review.round or 0) == (p.review_round or 0) and
+                   ends and review.base_oid == ends.base_oid and
+                   review.head_oid == ends.head_oid then
+                    status.approved_by[#status.approved_by + 1] = review.author
+                end
+            end
+        end
+    end
+    for _, thread in ipairs(p.threads or {}) do
+        if not thread.resolved then status.unresolved = status.unresolved + 1 end
+    end
+    status.approved = #status.approved_by > 0
+    status.mergeable = p.state == 'open' and not p.pending and status.approved and
+        not status.changes_requested and status.unresolved == 0
+    return status
+end
+
+local function diff_path(header)
+    local value = header:gsub('\t.*$', '')
+    if value:sub(1, 1) == '"' then
+        if value:sub(-1) ~= '"' then return nil end
+        value = value:sub(2, -2)
+        local out, i = {}, 1
+        local escapes = { a = '\a', b = '\b', t = '\t', n = '\n', v = '\v', f = '\f', r = '\r', ['\\'] = '\\', ['"'] = '"' }
+        while i <= #value do
+            local c = value:sub(i, i)
+            if c == '\\' then
+                local octal = value:sub(i + 1):match('^([0-7][0-7]?[0-7]?)')
+                if octal then
+                    local byte = tonumber(octal, 8)
+                    if byte > 255 then return nil end
+                    out[#out + 1] = string.char(byte); i = i + #octal + 1
+                else
+                    c = escapes[value:sub(i + 1, i + 1)]
+                    if not c then return nil end
+                    out[#out + 1] = c; i = i + 2
+                end
+            else out[#out + 1] = c; i = i + 1 end
+        end
+        value = table.concat(out)
+    end
+    if value == '/dev/null' then return nil end
+    if value:sub(1, 2) ~= 'a/' and value:sub(1, 2) ~= 'b/' then return nil end
+    value = value:sub(3)
+    return value ~= '' and browse_path_ok(value) and value or nil
+end
+
+function g_exports.pr_diff_lines(patch)
+    if patch == '' then return {} end
+    local rows, old_path, new_path = {}, nil, nil
+    local old_line, new_line, old_left, new_left = 0, 0, 0, 0
+    if patch:sub(-1) == '\n' then patch = patch:sub(1, -2) end
+    for line in (patch .. '\n'):gmatch('(.-)\n') do
+        if #rows >= 20000 then return nil, 'PR diff exceeds 20000 displayed lines' end
+        local row = { text = line, kind = 'meta' }
+        local prefix = line:sub(1, 1)
+        if line:sub(1, 11) == 'diff --git ' then
+            old_path, new_path, old_left, new_left = nil, nil, 0, 0
+            row.kind = 'file'
+        elseif (old_left > 0 or new_left > 0) and (prefix == '+' or prefix == '-' or prefix == ' ') then
+            row.kind = prefix == '+' and 'add' or prefix == '-' and 'del' or 'context'
+            if prefix ~= '+' and old_left > 0 then
+                row.old_path, row.old_line = old_path, old_line
+                old_line, old_left = old_line + 1, old_left - 1
+            end
+            if prefix ~= '-' and new_left > 0 then
+                row.new_path, row.new_line = new_path, new_line
+                new_line, new_left = new_line + 1, new_left - 1
+            end
+        elseif line:sub(1, 4) == '--- ' then old_path = diff_path(line:sub(5)); row.kind = 'file'
+        elseif line:sub(1, 4) == '+++ ' then new_path = diff_path(line:sub(5)); row.kind = 'file'
+        elseif line:sub(1, 2) == '@@' then
+            local a, ac, b, bc = line:match('^@@ %-(%d+)(,?%d*) %+(%d+)(,?%d*) @@')
+            if a then
+                old_line, new_line = tonumber(a), tonumber(b)
+                old_left, new_left = tonumber(ac:sub(2)) or 1, tonumber(bc:sub(2)) or 1
+            end
+            row.kind = 'hunk'
+        end
+        rows[#rows + 1] = row
+    end
+    return rows
+end
+
+function g_exports.pr_diff(rec, p, expected)
+    local ends, err, code = pr_snapshot(rec, p)
+    if not ends then return nil, err, code end
+    if expected and (expected.base_oid ~= ends.base_oid or expected.head_oid ~= ends.head_oid) then
+        return nil, 'branches changed; refresh the diff', 409
+    end
+    local base, why = browse_merge_base(repo_dir_of(rec), ends.base_oid, ends.head_oid)
+    if not base then return nil, why or 'branches have no common ancestor', 409 end
+    local patch, perr = browse_compare_diff(repo_dir_of(rec), base, ends.head_oid)
+    if not patch then return nil, perr, 400 end
+    local lines, lerr = pr_diff_lines(patch)
+    if not lines then return nil, lerr, 400 end
+    return { base_oid = ends.base_oid, head_oid = ends.head_oid, merge_base = base, lines = lines }
+end
+
+local function thread_message_count(p)
+    local count = 0
+    for _, thread in ipairs(p.threads or {}) do count = count + #(thread.comments or {}) end
+    return count
+end
+
+function g_exports.pr_thread_create(rec, num, user, body)
+    return locked(function()
+        local old = get(rec, num)
+        if not old then return nil, 'no such pull request', 404 end
+        if old.state ~= 'open' or old.pending then return nil, 'pull request is not open', 409 end
+        if not auth_can_write(rec, user) then return nil, 'repository write access required', 403 end
+        if not text_ok(body.body, 8192, true) or type(body.path) ~= 'string' or
+           body.path == '' or not browse_path_ok(body.path) or
+           (body.side ~= 'old' and body.side ~= 'new') or not number(body.line) or
+           not oid(body.base_oid) or not oid(body.head_oid) then return nil, 'invalid line comment anchor or body', 400 end
+        if #(old.threads or {}) >= 500 then return nil, 'line discussion limit reached', 400 end
+        if thread_message_count(old) >= 1000 then return nil, 'line comment limit reached', 400 end
+        local diff, err, code = pr_diff(rec, old, body)
+        if not diff then return nil, err, code end
+        local found = nil
+        for _, row in ipairs(diff.lines) do
+            if row[body.side .. '_path'] == body.path and row[body.side .. '_line'] == tonumber(body.line) then
+                found = row.text; break
+            end
+        end
+        if not found then return nil, 'line is not present in the reviewed diff', 400 end
+        if not auth_can_write(rec, user) then return nil, 'repository write access required', 403 end
+        local p = copy(old)
+        p.threads = p.threads or {}
+        p.threads[#p.threads + 1] = { id = #p.threads + 1, path = body.path, side = body.side,
+            line = tonumber(body.line), base_oid = diff.base_oid, head_oid = diff.head_oid,
+            code = #found <= 4096 and found or '(line preview exceeds 4096 bytes)',
+            author = user.username, created_at = os.time(), resolved = false,
+            comments = { { author = user.username, body = body.body, created_at = os.time() } } }
+        p.updated_at = os.time()
+        return put(rec, p)
+    end)
+end
+
+function g_exports.pr_thread_update(rec, num, thread_id, user, body, reply)
+    return locked(function()
+        local old = get(rec, num)
+        if not old then return nil, 'no such pull request', 404 end
+        if old.pending then return nil, 'merge reconciliation required; refresh', 409 end
+        local id = tonumber(number(thread_id))
+        local thread = id and (old.threads or {})[id]
+        if not thread then return nil, 'no such line discussion', 404 end
+        if not auth_can_read(rec, user) then return nil, 'repository read access required', 403 end
+        if reply then
+            if not text_ok(body.body, 8192, true) then return nil, 'invalid reply body', 400 end
+            if thread_message_count(old) >= 1000 then return nil, 'line comment limit reached', 400 end
+        else
+            if old.state == 'merged' then return nil, 'merged discussions cannot be reopened', 409 end
+            if user.username ~= thread.author and user.username ~= old.author and not auth_can_manage(rec, user) then
+                return nil, 'discussion author, PR author or repository administrator required', 403
+            end
+            if type(body.resolved) ~= 'boolean' then return nil, 'resolved must be a boolean', 400 end
+        end
+        local p = copy(old)
+        thread = p.threads[id]
+        if reply then thread.comments[#thread.comments + 1] = { author = user.username, body = body.body, created_at = os.time() }
+        else
+            thread.resolved, thread.resolved_by = body.resolved, user.username
+            thread.resolved_at = os.time()
+        end
+        p.updated_at = os.time()
+        return put(rec, p)
+    end)
+end
+
+local function perform_merge(rec, p, user, ends)
     local included = run(rec, { 'merge-base', '--is-ancestor', ends.head_oid, ends.base_oid })
     if included.ok then return nil, 'source has no new commits', 409 end
     if included.exit_code ~= 1 then return nil, 'could not compare branches', 500 end
@@ -257,10 +441,11 @@ local function approve(rec, p, user, ends)
         '-m', 'Merge pull request #' .. p.number .. ': ' .. p.title }, { env = identity })
     local merged = util_str_trim(commit.stdout or '')
     if not commit.ok or not oid(merged) then return nil, 'could not create merge commit', 500 end
-    if not protect_can_merge(rec, user) then return nil, 'merge permission was revoked', 403 end
+    if not protect_can_merge(rec, user) or not pr_review_status(rec, p, ends).mergeable then
+        return nil, 'merge or review permission was revoked', 403
+    end
     p.pending = { oid = merged, actor = user.username, at = os.time(),
-        base_oid = ends.base_oid, head_oid = ends.head_oid }
-    p.reviews[#p.reviews].state = 'merging'
+        base_oid = ends.base_oid, head_oid = ends.head_oid, independent = true }
     local saved, err, status = put(rec, p)
     if not saved then return nil, err, status end
     -- The source and target must still be exactly what the reviewer saw.
@@ -272,7 +457,9 @@ local function approve(rec, p, user, ends)
     local wrote = util_file_write(input, commands)
     if not wrote then return nil, 'could not stage ref transaction; refresh to reconcile', 500 end
     -- Recheck after the persistence RPC as it may have yielded to a revocation.
-    if not protect_can_merge(rec, user) then
+    local current_review = pr_review_status(rec, p, ends)
+    if not protect_can_merge(rec, user) or not current_review.approved or
+       current_review.changes_requested or current_review.unresolved > 0 then
         proc_tmp_release(input)
         reconcile(rec, p)
         return nil, 'review permission was revoked', 403
@@ -289,6 +476,27 @@ local function approve(rec, p, user, ends)
     return result
 end
 
+function g_exports.pr_merge(rec, num, user, body)
+    return locked(function()
+        local old = get(rec, num)
+        if not old then return nil, 'no such pull request', 404 end
+        if old.state ~= 'open' or old.pending then return nil, 'pull request is not open', 409 end
+        if not protect_can_merge(rec, user) then return nil, 'account is not allowed to merge this repository', 403 end
+        if body.method ~= nil and body.method ~= 'merge' then return nil, 'only merge commits are supported', 400 end
+        if not oid(body.base_oid) or not oid(body.head_oid) then return nil, 'reviewed head_oid and base_oid are required', 400 end
+        local ends, err, code = snapshot(rec, old)
+        if not ends then return nil, err, code end
+        if body.base_oid ~= ends.base_oid or body.head_oid ~= ends.head_oid then
+            return nil, 'branches changed; refresh and review again', 409
+        end
+        local status = pr_review_status(rec, old, ends)
+        if status.unresolved > 0 then return nil, 'unresolved line discussions must be resolved before merging', 409 end
+        if status.changes_requested then return nil, 'requested changes require a new approval from the reviewer', 409 end
+        if not status.approved then return nil, 'current commits require an independent approval', 409 end
+        return perform_merge(rec, copy(old), user, ends)
+    end)
+end
+
 function g_exports.pr_review(rec, num, user, body)
     return locked(function()
         local old = get(rec, num)
@@ -298,9 +506,6 @@ function g_exports.pr_review(rec, num, user, body)
         if not auth_can_manage(rec, user) then return nil, 'repository administrator review required', 403 end
         if old.author == user.username then return nil, 'authors cannot approve their own pull requests', 403 end
         if body.state ~= 'approve' and body.state ~= 'request_changes' then return nil, 'invalid review state', 400 end
-        if body.state == 'approve' and not protect_can_merge(rec, user) then
-            return nil, 'account is not allowed to merge this repository', 403
-        end
         if not text_ok(body.body or '', 8192, body.state == 'request_changes') then return nil, 'invalid review body', 400 end
         if #old.reviews >= 1000 then return nil, 'review limit reached', 400 end
         if not oid(body.head_oid) or not oid(body.base_oid) then return nil, 'reviewed head_oid and base_oid are required', 400 end
@@ -309,11 +514,11 @@ function g_exports.pr_review(rec, num, user, body)
         if ends.head_oid ~= body.head_oid or ends.base_oid ~= body.base_oid then
             return nil, 'branches changed during review; refresh and review again', 409
         end
+        if not auth_can_manage(rec, user) then return nil, 'review permission was revoked', 403 end
         local p = copy(old)
         p.reviews[#p.reviews + 1] = { author = user.username, state = body.state, body = body.body or '',
-            head_oid = ends.head_oid, base_oid = ends.base_oid, created_at = os.time() }
+            head_oid = ends.head_oid, base_oid = ends.base_oid, created_at = os.time(), round = p.review_round or 0 }
         p.updated_at = os.time()
-        if body.state == 'approve' then return approve(rec, p, user, ends) end
         return put(rec, p)
     end)
 end

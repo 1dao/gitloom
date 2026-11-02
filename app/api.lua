@@ -522,9 +522,20 @@ local function pr_response(p, rec, user)
     for k, v in pairs(p) do if k ~= 'pending' then out[k] = v end end
     out.comments = util_json_array(p.comments or {})
     out.reviews = util_json_array(p.reviews or {})
+    local threads = {}
+    for _, thread in ipairs(p.threads or {}) do
+        local public = {}
+        for field, value in pairs(thread) do public[field] = value end
+        public.comments = util_json_array(thread.comments or {})
+        public.can_resolve = user ~= nil and p.state ~= 'merged' and not p.pending and
+            (thread.author == user.username or p.author == user.username or auth_can_manage(rec, user))
+        threads[#threads + 1] = public
+    end
+    out.threads = util_json_array(threads)
     out.merging = p.pending ~= nil
     out.can_review = user ~= nil and auth_can_manage(rec, user) and p.author ~= user.username and p.state == 'open'
-    out.can_merge = out.can_review and protect_can_merge(rec, user)
+    out.can_merge = user ~= nil and p.state == 'open' and protect_can_merge(rec, user)
+    out.can_comment_lines = p.state == 'open' and user ~= nil and auth_can_write(rec, user)
     out.can_edit = user ~= nil and (p.author == user.username or auth_can_manage(rec, user)) and p.state ~= 'merged'
     return out
 end
@@ -554,9 +565,27 @@ local function h_pr_get(req, ctx)
     if not p then return http_response_error(status, err) end
     local out = pr_response(p, rec, user)
     local ends, why = pr_snapshot(rec, p)
-    if ends then out.base_oid, out.head_oid = ends.base_oid, ends.head_oid
+    if ends then
+        out.base_oid, out.head_oid = ends.base_oid, ends.head_oid
+        out.review_status = pr_review_status(rec, p, ends)
+        out.review_status.approved_by = util_json_array(out.review_status.approved_by)
+        for i, thread in ipairs(p.threads or {}) do
+            out.threads[i].outdated = thread.base_oid ~= ends.base_oid or thread.head_oid ~= ends.head_oid
+        end
     else out.branch_error = why; out.can_review = false; out.can_merge = false end
     return http_response_json(200, out)
+end
+local function h_pr_diff(req, ctx)
+    local rec, _, bad = pr_repo(req, ctx)
+    if bad then return bad end
+    local p, err, status = pr_get(rec, ctx.params.number)
+    if not p then return http_response_error(status or 400, err) end
+    local query = req.query or {}
+    local expected = (query.base_oid or query.head_oid) and query or nil
+    local diff, why, code = pr_diff(rec, p, expected)
+    if not diff then return http_response_error(code or 400, http_safe_error(why)) end
+    diff.lines = util_json_array(diff.lines)
+    return http_response_json(200, diff)
 end
 local function pr_mutation(action)
     return function(req, ctx)
@@ -572,15 +601,17 @@ end
 local h_pr_update = pr_mutation(pr_update)
 local h_pr_comment = pr_mutation(function(rec, num, user, body) return pr_comment(rec, num, user, body.body) end)
 local h_pr_review = pr_mutation(pr_review)
--- Older clients must supply the same reviewed OIDs and pass the same approval
--- checks. There is no second merge path that can bypass review.
-local h_pr_merge = pr_mutation(function(rec, num, user, body)
-    if body.method ~= nil and body.method ~= 'merge' then
-        return nil, 'only reviewed merge commits are supported', 400
+local h_pr_merge = pr_mutation(pr_merge)
+local h_pr_thread_create = pr_mutation(pr_thread_create)
+local function thread_mutation(reply)
+    return function(req, ctx)
+        return pr_mutation(function(rec, num, user, body)
+            return pr_thread_update(rec, num, ctx.params.thread, user, body, reply)
+        end)(req, ctx)
     end
-    body.state = 'approve'
-    return pr_review(rec, num, user, body)
-end)
+end
+local h_pr_thread_reply = thread_mutation(true)
+local h_pr_thread_update = thread_mutation(false)
 
 local function issue_public(issue, with_comments)
     local out = {
@@ -1334,10 +1365,14 @@ function g_exports.api_install()
     http_get('/api/v1/repos/:owner/:name/pulls', h_pr_list)
     http_post('/api/v1/repos/:owner/:name/pulls', h_pr_create)
     http_get('/api/v1/repos/:owner/:name/pulls/:number', h_pr_get)
+    http_get('/api/v1/repos/:owner/:name/pulls/:number/diff', h_pr_diff)
     http_patch('/api/v1/repos/:owner/:name/pulls/:number', h_pr_update)
     http_post('/api/v1/repos/:owner/:name/pulls/:number/merge', h_pr_merge)
     http_post('/api/v1/repos/:owner/:name/pulls/:number/comments', h_pr_comment)
     http_post('/api/v1/repos/:owner/:name/pulls/:number/reviews', h_pr_review)
+    http_post('/api/v1/repos/:owner/:name/pulls/:number/threads', h_pr_thread_create)
+    http_patch('/api/v1/repos/:owner/:name/pulls/:number/threads/:thread', h_pr_thread_update)
+    http_post('/api/v1/repos/:owner/:name/pulls/:number/threads/:thread/comments', h_pr_thread_reply)
 
     http_get('/api/v1/repos', h_repo_list)
     http_post('/api/v1/repos', h_repo_create)

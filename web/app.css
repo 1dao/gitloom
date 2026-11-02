@@ -683,6 +683,14 @@ h1, h2, h3, p { margin-top: 0; }
 .pull-form label, #pull-detail label { display: grid; gap: 8px; margin: 12px 0; }
 .pull-branches { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .pull-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pull-diff-row { display: flex; min-height: 24px; white-space: pre; }
+.pull-line-number { display: inline-block; flex: 0 0 4.5em; padding: 0 8px; border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--muted); font: inherit; text-align: right; }
+button.pull-line-number { cursor: pointer; }
+button.pull-line-number:hover, button.pull-line-number:focus-visible { background: var(--panel-3); color: var(--text); }
+.pull-diff-row > span:last-child { padding-left: 10px; }
+.pull-thread { margin: 12px 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
+.pull-thread pre { overflow: auto; white-space: pre; }
+.pull-thread textarea { display: block; width: 100%; margin: 8px 0; }
 #pull-discussion article { border-bottom: 1px solid var(--line); padding: 12px 0; }
 #pull-diff { max-height: 60vh; overflow: auto; }
 #pull-message { white-space: pre-wrap; }

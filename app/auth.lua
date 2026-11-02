@@ -235,6 +235,11 @@ function g_exports.auth_user_exists(username)
     return users[tostring(username or '')] ~= nil
 end
 
+function g_exports.auth_can_review(rec, username)
+    local user = auth_user_get(username)
+    return user ~= nil and not user.disabled and auth_can_manage(rec, user)
+end
+
 function g_exports.auth_user_disable(actor, username, disabled)
     if not actor or actor.disabled or not actor.admin then return nil, 'administrator required', 403 end
     if type(disabled) ~= 'boolean' then return nil, 'disabled must be a boolean', 400 end

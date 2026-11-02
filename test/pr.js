@@ -128,11 +128,15 @@ async function main() {
         await api('POST',pr+'/reviews',{...review,head_oid:newHead},'admin',500);
         check('failed journal write leaves target unchanged',()=>assert.equal(git(['rev-parse','main'],bare),first));
     } finally { fs.rmSync(blocked,{recursive:true,force:true}); }
-    const attempts=await Promise.all([0,1].map(()=>api('POST',pr+'/reviews',
-        {...review,head_oid:newHead},'admin',[200,409])));
+    const approved=await api('POST',pr+'/reviews',{...review,head_oid:newHead});
+    check('approval records a conclusion without merging',()=>{
+        assert.equal(approved.state,'open');assert.equal(git(['rev-parse','main'],bare),first);
+    });
+    const attempts=await Promise.all([0,1].map(()=>api('POST',pr+'/merge',
+        {base_oid:first,head_oid:newHead},'admin',[200,409])));
     const merged=attempts.find(p=>p.state==='merged');
-    check('concurrent approvals merge exactly once',()=>assert.equal(attempts.filter(p=>p.state==='merged').length,1));
-    check('approval creates real two-parent merge',()=>{
+    check('concurrent merge operations update exactly once',()=>assert.equal(attempts.filter(p=>p.state==='merged').length,1));
+    check('explicit merge creates real two-parent merge',()=>{
         assert.equal(merged.state,'merged'); assert.equal(git(['rev-parse','main'],bare),merged.merge_oid);
         assert.equal(git(['show','-s','--format=%P',merged.merge_oid],bare),first+' '+newHead);
         assert.equal(git(['show','main:feature.txt'],bare),'updated');
@@ -155,7 +159,8 @@ async function main() {
     git(['add','.'],local);git(['commit','-m','source conflict'],local);const conflictHead=git(['rev-parse','HEAD'],local);
     git(['push',remote,'conflict-base','conflict-head'],local);
     await api('POST',pulls,{title:'Conflict',base:'conflict-base',head:'conflict-head'},'bob',201);
-    await api('POST',pulls+'/2/reviews',{state:'approve',base_oid:conflictBase,head_oid:conflictHead},'admin',409);
+    await api('POST',pulls+'/2/reviews',{state:'approve',base_oid:conflictBase,head_oid:conflictHead});
+    await api('POST',pulls+'/2/merge',{base_oid:conflictBase,head_oid:conflictHead},'admin',409);
     check('conflict cannot update the target',()=>assert.equal(git(['rev-parse','conflict-base'],bare),conflictBase));
     // A target update invalidates a review even if the source remains unchanged.
     git(['checkout','conflict-base'],local);fs.writeFileSync(path.join(local,'other.txt'),'new target\n');
@@ -171,7 +176,8 @@ async function main() {
     git(['update-ref','refs/heads/external-head',newHead],bare);
     await api('POST',pulls,{title:'External merge',base:'external-base',head:'external-head'},'bob',201);
     git(['update-ref','refs/heads/external-base',newHead],bare);
-    await api('POST',pulls+'/4/reviews',{state:'approve',base_oid:newHead,head_oid:newHead},'admin',409);
+    await api('POST',pulls+'/4/reviews',{state:'approve',base_oid:newHead,head_oid:newHead});
+    await api('POST',pulls+'/4/merge',{base_oid:newHead,head_oid:newHead},'admin',409);
     check('already included source cannot create redundant merge',()=>assert.equal(git(['rev-parse','external-base'],bare),newHead));
     // Reconcile both crash windows from durable pending records on restart.
     await stop();
@@ -291,13 +297,14 @@ for mode in ('checksum','traversal'):
     git(['push',bobRemote,'feature:refs/heads/extra'],local);
     check('PR policy leaves source branches writable',()=>assert.equal(git(['rev-parse','extra'],path.join(repos,'company','snapshot.git')),newHead));
     const reviewBody={state:'approve',base_oid:restoredPr.base_oid,head_oid:restoredPr.head_oid};
-    await api('POST',protectedRepo+'/pulls/1/reviews',reviewBody,'admin',403);
+    await api('POST',protectedRepo+'/pulls/1/reviews',reviewBody);
+    await api('POST',protectedRepo+'/pulls/1/merge',reviewBody,'admin',403);
     await api('PATCH',protectedRepo,{merge_users:['admin']});
     await stop();await start(['PROTECT_DEFAULT_BRANCH=0']);
     const policy=await api('GET',protectedRepo);
     check('required PR and merge allowlist survive restart',()=>{assert.equal(policy.require_pr,true);assert.deepEqual(policy.merge_users,['admin']);});
     refusedPush(savedRemote,'feature:main');
-    const gatedMerge=await api('POST',protectedRepo+'/pulls/1/reviews',reviewBody);
+    const gatedMerge=await api('POST',protectedRepo+'/pulls/1/merge',reviewBody);
     check('approved PR updates protected main',()=>assert.equal(git(['rev-parse','main'],path.join(repos,'company','snapshot.git')),gatedMerge.merge_oid));
     git(['fetch',savedRemote,'main'],local);git(['checkout','-B','direct','FETCH_HEAD'],local);
     fs.writeFileSync(path.join(local,'direct.txt'),'direct push\n');git(['add','.'],local);git(['commit','-m','direct'],local);
@@ -326,6 +333,124 @@ for mode in ('checksum','traversal'):
     const overridden=await api('GET','repos/company/inherited');
     check('explicit false overrides global policy after restart',()=>assert.equal(overridden.require_pr,false));
     git(['push',inheritedRemote,'feature:main'],local);
+    // Versioned line discussions and independent approval/merge on real Git diffs.
+    await api('POST','users',{username:'reviewer',password,admin:true},'admin',201);
+    await api('POST','users',{username:'approver',password,admin:true},'admin',201);
+    await api('POST','repos',{name:'review-lines',private:true,require_pr:false},'admin',201);
+    const lineRepo='repos/admin/review-lines', linePull=lineRepo+'/pulls/1';
+    await api('PUT',lineRepo+'/collaborators/bob',{permission:'write'});
+    await api('PUT',lineRepo+'/collaborators/reader',{permission:'read'});
+    await api('PATCH','users/reader',{disabled:false});
+    const oldPath='old name 文.txt', newPath='new name 文.txt';
+    git(['checkout','-B','line-base',first],local);
+    fs.writeFileSync(path.join(local,oldPath),'alpha\nbravo\ncharlie\ndelta\necho\n');
+    fs.writeFileSync(path.join(local,'deleted.txt'),'remove this\n');
+    fs.writeFileSync(path.join(local,'binary.dat'),Buffer.from([0,1,2,3]));
+    git(['add','.'],local);git(['commit','-m','line review base'],local);
+    git(['checkout','-B','line-topic'],local);git(['mv',oldPath,newPath],local);
+    fs.writeFileSync(path.join(local,newPath),'alpha\nbravo\nupdated\ndelta\necho\n');
+    fs.unlinkSync(path.join(local,'deleted.txt'));
+    fs.writeFileSync(path.join(local,'added.txt'),'new file\n');
+    fs.writeFileSync(path.join(local,'binary.dat'),Buffer.from([0,9,8,7]));
+    git(['add','.'],local);git(['commit','-m','line review change'],local);
+    const lineRemote=base.replace('http://','http://admin:'+password+'@')+'/admin/review-lines.git';
+    git(['push',lineRemote,'line-base:main','line-topic'],local);
+    await api('POST',lineRepo+'/pulls',{title:'Review individual lines',base:'main',head:'line-topic'},'admin',201);
+    let lineDetail=await api('GET',linePull);
+    let lineEnds={base_oid:lineDetail.base_oid,head_oid:lineDetail.head_oid};
+    await api('GET',linePull+'/diff',undefined,null,404);
+    const lineDiff=await api('GET',linePull+'/diff?base_oid='+lineEnds.base_oid+'&head_oid='+lineEnds.head_oid);
+    function anchor(pathName,side) {
+        const row=lineDiff.lines.find(row=>row[side+'_path']===pathName && row[side+'_line']);
+        assert(row,'missing anchor '+pathName+' '+side);
+        return {path:pathName,side,line:row[side+'_line'],...lineEnds,body:'Please check this line'};
+    }
+    check('quoted renamed paths retain old and new anchors',()=>{
+        assert(lineDiff.lines.some(row=>row.old_path===oldPath));
+        assert(lineDiff.lines.some(row=>row.new_path===newPath));
+        assert(!lineDiff.lines.some(row=>row.new_path==='binary.dat' && row.new_line));
+    });
+    const newAnchor=anchor(newPath,'new');
+    await api('POST',linePull+'/threads',newAnchor,null,401);
+    await api('POST',linePull+'/threads',newAnchor,'reader',403);
+    await api('POST',linePull+'/threads',{...newAnchor,path:'../escape'},'bob',400);
+    await api('POST',linePull+'/threads',{...newAnchor,line:9999},'bob',400);
+    await api('POST',linePull+'/threads',{...newAnchor,side:'invalid'},'bob',400);
+    await api('POST',linePull+'/threads',{...newAnchor,path:'binary.dat'},'bob',400);
+    await api('POST',linePull+'/threads',newAnchor,'bob');
+    await api('POST',linePull+'/threads',anchor(oldPath,'old'));
+    await api('POST',linePull+'/threads',anchor('deleted.txt','old'));
+    await api('POST',linePull+'/threads',anchor('added.txt','new'));
+    await api('POST',linePull+'/threads/1/comments',{body:'Reader reply'},'reader');
+    await api('PATCH',linePull+'/threads/1',{resolved:true},'reader',403);
+    await api('PATCH',linePull+'/threads/1',{resolved:'yes'},'bob',400);
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    await api('POST',linePull+'/reviews',{...lineEnds,state:'approve'},'admin',403);
+    const lineApproved=await api('POST',linePull+'/reviews',{...lineEnds,state:'approve'},'reviewer');
+    check('approving leaves Git and PR state unchanged',()=>{
+        assert.equal(lineApproved.state,'open');
+        assert.equal(git(['rev-parse','main'],path.join(repos,'admin','review-lines.git')),lineEnds.base_oid);
+    });
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    for (const id of [1,2,3,4]) await api('PATCH',linePull+'/threads/'+id,{resolved:true});
+    await stop();await start();
+    lineDetail=await api('GET',linePull);
+    check('line comments, replies, resolutions and approval survive restart',()=>{
+        assert.equal(lineDetail.threads.length,4);assert.equal(lineDetail.threads[0].comments[1].body,'Reader reply');
+        assert(lineDetail.threads.every(t=>t.resolved));assert.equal(lineDetail.review_status.mergeable,true);
+    });
+    git(['checkout','line-topic'],local);fs.writeFileSync(path.join(local,'advance.txt'),'source advance\n');
+    git(['add','.'],local);git(['commit','-m','source advance'],local);git(['push',lineRemote,'line-topic'],local);
+    await api('POST',linePull+'/threads',newAnchor,'bob',409);
+    await api('GET',linePull+'/diff?base_oid='+lineEnds.base_oid+'&head_oid='+lineEnds.head_oid,undefined,'admin',409);
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    lineDetail=await api('GET',linePull);lineEnds={base_oid:lineDetail.base_oid,head_oid:lineDetail.head_oid};
+    check('source update makes approvals stale and retains old discussions',()=>{
+        assert.equal(lineDetail.review_status.approved,false);assert(lineDetail.threads.every(t=>t.outdated));
+    });
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    await api('POST',linePull+'/reviews',{...lineEnds,state:'approve'},'reviewer');
+    git(['checkout','line-base'],local);fs.writeFileSync(path.join(local,'target.txt'),'target advance\n');
+    git(['add','.'],local);git(['commit','-m','target advance'],local);git(['push',lineRemote,'line-base:main'],local);
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    lineDetail=await api('GET',linePull);lineEnds={base_oid:lineDetail.base_oid,head_oid:lineDetail.head_oid};
+    check('target update invalidates the previous approval',()=>assert.equal(lineDetail.review_status.approved,false));
+    await api('POST',linePull+'/reviews',{...lineEnds,state:'request_changes',body:'Please fix this'},'reviewer');
+    await api('POST',linePull+'/reviews',{...lineEnds,state:'approve'},'approver');
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    await api('PATCH',linePull,{state:'closed'});await api('PATCH',linePull,{state:'open'});
+    await api('POST',linePull+'/reviews',{...lineEnds,state:'approve'},'approver');
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    await api('POST',linePull+'/reviews',{...lineEnds,state:'approve'},'reviewer');
+    await api('PATCH','users/reviewer',{disabled:true});await api('PATCH','users/approver',{disabled:true});
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    await api('PATCH','users/reviewer',{disabled:false});
+    await api('PATCH',lineRepo,{merge_users:['admin']});
+    await api('POST',linePull+'/reviews',{...lineEnds,state:'approve'},'reviewer');
+    await api('POST',linePull+'/merge',lineEnds,'reviewer',403);
+    await api('PATCH',linePull+'/threads/1',{resolved:false},'bob');
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    await api('PATCH',linePull+'/threads/1',{resolved:true});
+    await api('PATCH',linePull,{state:'closed'});await api('PATCH',linePull,{state:'open'});
+    await api('POST',linePull+'/merge',lineEnds,'admin',409);
+    await api('POST',linePull+'/reviews',{...lineEnds,state:'approve'},'reviewer');
+    await stop();
+    const journalFile=path.join(data,'pull_requests.json'), journal=JSON.parse(fs.readFileSync(journalFile,'utf8'));
+    journal['admin/review-lines']['1'].pending={oid:lineEnds.head_oid,actor:'admin',at:1,...lineEnds,independent:true};
+    fs.writeFileSync(journalFile,JSON.stringify(journal));await start();
+    const recoveredLine=await api('GET',linePull);
+    check('failed independent merge recovery preserves the approval',()=>{
+        assert.equal(recoveredLine.state,'open');assert.equal(recoveredLine.reviews.at(-1).state,'approve');
+        assert.equal(recoveredLine.review_status.mergeable,true);
+    });
+    const explicitMerge=await api('POST',linePull+'/merge',lineEnds);
+    check('PR author may explicitly merge after another reviewer approves',()=>{
+        assert.equal(explicitMerge.state,'merged');assert.equal(explicitMerge.merged_by,'admin');
+        assert.equal(explicitMerge.reviews.at(-1).author,'reviewer');assert.equal(explicitMerge.reviews.at(-1).state,'approve');
+    });
+    await api('POST',linePull+'/threads',newAnchor,'bob',409);
+    await api('PATCH',linePull+'/threads/1',{resolved:false},'bob',409);
+    await api('POST',linePull+'/threads/1/comments',{body:'Post-merge reply'},'reader');
     await stop();
     await assert.rejects(start(['PROTECT_DEFAULT_BRANCH=0','HOOKS_DIR='+path.join(work,'missing-hooks')]),/exited|timeout/);
     count++;console.log('PASS required PR policy refuses boot without its hook');
