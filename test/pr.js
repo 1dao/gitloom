@@ -9,7 +9,8 @@ const net = require('node:net');
 const {spawn, execFileSync} = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gitloom-pr-'));
-const repos = path.join(work, 'repos'), data = path.join(work, 'data'), tmp = path.join(work, 'tmp');
+let repos = path.join(work, 'repos'), data = path.join(work, 'data');
+const tmp = path.join(work, 'tmp');
 [repos, data, tmp].forEach(p => fs.mkdirSync(p));
 const runtime = path.join(root, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
 let server, base, port, count = 0;
@@ -52,6 +53,18 @@ async function stop() {
     if (!server || server.exitCode !== null) return;
     const stopped = new Promise(resolve => server.once('exit',resolve));
     server.kill(); await stopped;
+}
+function snapshot(command, archive, repoRoot = repos, dataRoot = data, expected = 0) {
+    const args = [path.join(root, 'deploy/backup.py'), command, archive, '--offline',
+        '-D', 'LISTEN_HOST=127.0.0.1', '-D', 'LISTEN_PORT='+port,
+        '-D', 'REPO_ROOT='+repoRoot, '-D', 'DATA_DIR='+dataRoot,
+        '-D', 'USERS_FILE='+path.join(dataRoot,'users.json'), '-D', 'DB_DRIVER=none'];
+    const {spawnSync} = require('node:child_process');
+    const result = spawnSync(process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'),
+        args, {cwd:root, encoding:'utf8', windowsHide:true});
+    assert.equal(result.status, expected, result.stderr || result.error?.message);
+    count++; console.log('PASS snapshot '+command+' -> '+expected);
+    return result;
 }
 async function main() {
     const socket = net.createServer();
@@ -192,6 +205,64 @@ async function main() {
     check('disabled account survives restart',()=>assert.equal(accounts.users.find(u=>u.username==='bob').disabled,true));
     await api('PATCH','users/bob',{disabled:false});
     await api('GET','user',undefined,'bob');
+    await api('POST','organizations',{slug:'company',name:'Internal team'},'admin',201);
+    await api('PUT','organizations/company/members/bob',{role:'member'});
+    await api('POST','organizations/company/teams',{name:'developers'},'admin',201);
+    await api('PUT','organizations/company/teams/developers/members/bob',{role:'member'});
+    await api('POST','repos',{owner:'company',name:'snapshot',private:true},'admin',201);
+    await api('PUT','repos/company/snapshot/teams/developers',{permission:'write'});
+    const savedRemote=base.replace('http://','http://admin:'+password+'@')+'/company/snapshot.git';
+    git(['push',savedRemote,'main','feature'],local);
+    await api('POST','repos/company/snapshot/issues',{title:'Preserve this issue',body:'Backup discussion'},'bob',201);
+    await api('POST','repos/company/snapshot/pulls',{title:'Preserve this PR',base:'main',head:'feature'},'bob',201);
+    await api('PATCH','users/reader',{disabled:true});
+    const archive=path.join(work,'snapshot.zip');
+    check('snapshot refuses an active server',()=>assert.match(snapshot('backup',archive,repos,data,1).stderr,/listener is active/));
+    await stop();
+    snapshot('backup',archive);
+    check('snapshot never overwrites an archive',()=>assert.match(snapshot('backup',archive,repos,data,1).stderr,/exist/i));
+    snapshot('restore',archive,repos,data,1);
+    const restoreRoot=path.join(work,'restored');
+    const newRepos=path.join(restoreRoot,'repos'), newData=path.join(restoreRoot,'data');
+    const python=process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+    execFileSync(python,['-c',`
+import hashlib,json,sys,zipfile
+with zipfile.ZipFile(sys.argv[1]) as source:
+    entries={name:source.read(name) for name in source.namelist()}
+for mode in ('checksum','traversal'):
+    changed=dict(entries)
+    if mode=='checksum':
+        changed['accounts.json']=b'corrupt account data'
+    else:
+        changed['../escaped.txt']=b'escape'
+        manifest=json.loads(changed['manifest.json'])
+        manifest['files']['../escaped.txt']={'size':6,'sha256':hashlib.sha256(b'escape').hexdigest()}
+        changed['manifest.json']=json.dumps(manifest).encode()
+    with zipfile.ZipFile(sys.argv[1]+'.'+mode,'w') as output:
+        for name,body in changed.items(): output.writestr(name,body)
+`,archive],{windowsHide:true});
+    for (const mode of ['checksum','traversal']) {
+        const rejected=snapshot('restore',archive+'.'+mode,newRepos,newData,1);
+        check('restore rejects '+mode+' before writing',()=>{
+            assert.match(rejected.stderr,/checksum mismatch|unsafe snapshot entry/);
+            assert.equal(fs.existsSync(newRepos),false);assert.equal(fs.existsSync(newData),false);
+            assert.equal(fs.existsSync(path.join(work,'escaped.txt')),false);
+        });
+    }
+    snapshot('restore',archive,newRepos,newData);
+    git(['fsck','--full'],path.join(newRepos,'company','snapshot.git'));
+    git(['fsck','--full'],path.join(newRepos,'admin','renamed.git'));
+    check('restore preserves empty bare repositories',()=>assert.equal(git(['rev-parse','--is-bare-repository'],path.join(newRepos,'admin','renamed.git')),'true'));
+    check('restored branch objects match',()=>assert.equal(git(['rev-parse','feature'],path.join(newRepos,'company','snapshot.git')),newHead));
+    repos=newRepos;data=newData;await start();
+    await api('GET','user',undefined,'reader',401);
+    await api('GET','repos/company/snapshot',undefined,'bob');
+    const restoredIssue=await api('GET','repos/company/snapshot/issues/1',undefined,'bob');
+    check('restore preserves issues',()=>assert.equal(restoredIssue.title,'Preserve this issue'));
+    const restoredPr=await api('GET','repos/company/snapshot/pulls/1',undefined,'bob');
+    check('restore preserves pull requests',()=>assert.equal(restoredPr.title,'Preserve this PR'));
+    const restoredTeams=await api('GET','organizations/company/teams');
+    check('restore preserves team membership',()=>assert.equal(restoredTeams.teams[0].members.bob,'member'));
     console.log('[pr] '+count+' passed, 0 failed');
 }
 main().catch(error=>{

@@ -38,18 +38,33 @@ handshake, and a pooled `USE` would only move whichever connection ran it.
 
 ## Backups
 
-`repos/` **is the data.** Everything else can be rebuilt; the bare repositories
-cannot. What to keep:
+Back up both the Git repositories and the account/collaboration stores. What to keep:
 
 | | JSON backend (default) | `DB_DRIVER=mysql` |
 |---|---|---|
 | repositories | `repos/` | `repos/` |
 | accounts | `data/users.json` | the database |
 | issues | `data/issues.json` | the database |
+| organisations and teams | `data/organizations.json` | the database |
+| PRs, reviews and recovery journals | `data/pull_requests.json` | the database |
 | repository index | `repos/index.json` | the database |
 | secrets | `gitloom.local.cfg` | `gitloom.local.cfg` |
 
 `tmp/` and `logs/` are not data. Do not restore them.
+
+Use the [offline snapshot tool](../README.md#offline-backup-and-restore) for a
+single archive with a complete file manifest and checksums:
+
+```bash
+sudo systemctl stop gitloom
+cd /opt/gitloom
+python3 deploy/backup.py backup /backup/gitloom.zip --offline
+sudo systemctl start gitloom
+```
+
+Disable automatic restarts and wait for remaining workers before the snapshot.
+Keep configuration and TLS keys separately. Restore into empty destinations and
+verify the restored instance before replacing production data.
 
 ### Copying repos/ while the service runs is not safe
 
@@ -89,9 +104,11 @@ mysqldump --single-transaction gitloom > /backup/gitloom-$(date +%F).sql
 
 ### Restoring
 
-Put the files back, make sure `gitloom` owns them, and start. Nothing else is
-needed: the schema migrates itself, and `repos/index.json` (or the database)
-already names every repository.
+Keep the service stopped. Restore the snapshot into empty destinations, make
+sure `gitloom` owns the files, and run `git fsck --full` on every bare repository.
+Start an isolated instance and check login, permissions, Issue/PR history and
+clone/fetch before switching the production paths. Keep the original data until
+those checks pass. The database backend must match the snapshot.
 
 ## Logs
 

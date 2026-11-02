@@ -467,3 +467,49 @@ history are retained. Anonymous access to public repositories follows `ANON_READ
 set `ANON_READ=0` for an internal instance requiring authentication.
 Already running Git subprocesses are not terminated by this operation.
 MySQL migration 6 adds `gl_users.is_disabled`; older JSON accounts remain enabled.
+
+## Offline backup and restore
+
+Run `deploy/backup.py` with Python 3.9+ from the installation directory. It reads
+`gitloom.local.cfg` before `gitloom.cfg`; repeat `-D KEY=VALUE` to supply the same
+path, listener and database overrides used by the server. Command-line overrides
+win. Stop the service, disable automatic restarts, and wait for all Git workers
+and direct repository writers to exit before either command. `--offline` confirms
+that prerequisite; the tool also refuses an active configured listener. A closed
+port alone does not prove that background workers have finished.
+
+```sh
+python deploy/backup.py backup /backups/gitloom.zip --offline
+python deploy/backup.py restore /backups/gitloom.zip --offline \
+  -D REPO_ROOT=/srv/gitloom-restored/repos \
+  -D DATA_DIR=/srv/gitloom-restored/data \
+  -D USERS_FILE=/srv/gitloom-restored/data/users.json
+```
+
+A snapshot contains all files under `REPO_ROOT` and `DATA_DIR`, plus `USERS_FILE`
+for JSON storage or a MySQL SQL dump. This includes Git objects, refs, the
+repository index, account status and token hashes, organisation/team grants,
+issues, PR reviews and recovery journals. Archives are created exclusively with
+private file permissions on POSIX; existing archives are never overwritten.
+Linked files/directories and external Git object alternates are refused.
+
+For MySQL, install `mysqldump` and `mysql` (or select the executables with
+`--mysqldump` / `--mysql`). Credentials come from the same configuration and are
+passed through the child environment, never command-line arguments. Restore
+requires an existing **empty** database with `DB_DRIVER=mysql` and the target
+connection overrides. It does not create or drop databases. Keep other database
+writers stopped throughout backup and restore.
+
+Restore verifies the complete file manifest and SHA-256 checksums before writing,
+rejects unsafe archive paths, and requires empty repository/data destinations
+and an absent account file. The backend must match the snapshot. On a disk or
+SQL import failure, keep the service stopped; restore again into fresh empty
+targets rather than reusing a partial restore. Checksums detect corruption; use
+archives from a trusted source and protect them as account data.
+
+Restore to a separate location first. Run `git --git-dir=<repo> fsck --full` for
+each repository, then start an isolated instance against the restored paths and
+verify login, permissions, issues and PR history before switching production.
+Keep the original installation until acceptance is complete. Configuration,
+TLS keys, runtime binaries and files outside the configured data paths must be
+backed up separately. This is an offline workflow, not a live snapshot mechanism.
