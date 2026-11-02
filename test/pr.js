@@ -34,12 +34,12 @@ async function api(method, suffix, body, user = 'admin', expected = 200) {
     count++; console.log('PASS PR ' + method + ' ' + suffix + ' -> ' + expected);
     return response.status >= 400 ? text : JSON.parse(text);
 }
-async function start() {
+async function start(extra = []) {
     const fd = fs.openSync(path.join(work, 'server.log'), 'a');
     server = spawn(runtime, ['main.lua', 'LISTEN_PORT='+port, 'REPO_ROOT='+repos,
         'DATA_DIR='+data, 'TMP_DIR='+tmp, 'USERS_FILE='+path.join(data,'users.json'),
         'ADMIN_USER=admin', 'ADMIN_PASSWORD='+password, 'DB_DRIVER=', 'GIT_STREAM=off',
-        'AUTH_ALLOW_REGISTRATION=0', 'ANON_READ=1', 'LOG_DIR='+path.join(work,'logs')],
+        'AUTH_ALLOW_REGISTRATION=0', 'ANON_READ=1', 'LOG_DIR='+path.join(work,'logs'), ...extra],
         {cwd: root, stdio: ['ignore',fd,fd], windowsHide:true});
     fs.closeSync(fd);
     for (let i=0;i<100;i++) {
@@ -263,6 +263,72 @@ for mode in ('checksum','traversal'):
     check('restore preserves pull requests',()=>assert.equal(restoredPr.title,'Preserve this PR'));
     const restoredTeams=await api('GET','organizations/company/teams');
     check('restore preserves team membership',()=>assert.equal(restoredTeams.teams[0].members.bob,'member'));
+    const protectedRepo='repos/company/snapshot';
+    const indexFile=path.join(repos,'index.json');
+    fs.renameSync(indexFile,indexFile+'.saved');fs.mkdirSync(indexFile);
+    await api('PATCH',protectedRepo,{require_pr:true,merge_users:['bob']},'admin',500);
+    const unchangedPolicy=await api('GET',protectedRepo);
+    check('failed policy persistence never publishes permissions',()=>{
+        assert.equal(unchangedPolicy.require_pr,false);assert.deepEqual(unchangedPolicy.merge_users,[]);
+    });
+    fs.rmdirSync(indexFile);fs.renameSync(indexFile+'.saved',indexFile);
+    await api('PATCH',protectedRepo,{require_pr:'yes'},'admin',400);
+    await api('PATCH',protectedRepo,{merge_users:['missing-account']},'admin',400);
+    await api('PATCH',protectedRepo,{require_pr:true},'bob',403);
+    await api('PATCH',protectedRepo,{require_pr:true,merge_users:['bob']});
+    function refusedPush(remoteUrl, refspec) {
+        assert.throws(()=>git(['push',remoteUrl,refspec],local),error=>{
+            assert.match(String(error.stderr),/requires an approved pull request|deletion of the current branch prohibited/);
+            return true;
+        });
+        count++;console.log('PASS policy refuses direct push '+refspec);
+    }
+    refusedPush(savedRemote,'feature:main');
+    const bobRemote=base.replace('http://','http://bob:'+password+'@')+'/company/snapshot.git';
+    refusedPush(bobRemote,'feature:main');
+    refusedPush(savedRemote,'+feature:main');
+    refusedPush(savedRemote,':main');
+    git(['push',bobRemote,'feature:refs/heads/extra'],local);
+    check('PR policy leaves source branches writable',()=>assert.equal(git(['rev-parse','extra'],path.join(repos,'company','snapshot.git')),newHead));
+    const reviewBody={state:'approve',base_oid:restoredPr.base_oid,head_oid:restoredPr.head_oid};
+    await api('POST',protectedRepo+'/pulls/1/reviews',reviewBody,'admin',403);
+    await api('PATCH',protectedRepo,{merge_users:['admin']});
+    await stop();await start(['PROTECT_DEFAULT_BRANCH=0']);
+    const policy=await api('GET',protectedRepo);
+    check('required PR and merge allowlist survive restart',()=>{assert.equal(policy.require_pr,true);assert.deepEqual(policy.merge_users,['admin']);});
+    refusedPush(savedRemote,'feature:main');
+    const gatedMerge=await api('POST',protectedRepo+'/pulls/1/reviews',reviewBody);
+    check('approved PR updates protected main',()=>assert.equal(git(['rev-parse','main'],path.join(repos,'company','snapshot.git')),gatedMerge.merge_oid));
+    git(['fetch',savedRemote,'main'],local);git(['checkout','-B','direct','FETCH_HEAD'],local);
+    fs.writeFileSync(path.join(local,'direct.txt'),'direct push\n');git(['add','.'],local);git(['commit','-m','direct'],local);
+    refusedPush(savedRemote,'direct:main');
+    await api('PATCH',protectedRepo,{require_pr:false,merge_users:[]});
+    git(['push',savedRemote,'direct:main'],local);
+    check('explicitly disabling PR policy restores fast-forward pushes',()=>assert.equal(git(['rev-parse','main'],path.join(repos,'company','snapshot.git')),git(['rev-parse','direct'],local)));
+    await api('POST','repos',{owner:'company',name:'seed',require_pr:true},'admin',201);
+    await api('PUT','repos/company/seed/teams/developers',{permission:'write'});
+    const seedRemote=base.replace('http://','http://admin:'+password+'@')+'/company/seed.git';
+    const seedBob=base.replace('http://','http://bob:'+password+'@')+'/company/seed.git';
+    refusedPush(seedBob,'main:main');
+    git(['push',seedBob,'feature:refs/heads/topic'],local);
+    const unseeded=await api('GET','repos/company/seed');
+    check('a feature push cannot replace the protected default branch',()=>assert.equal(unseeded.default_branch,'main'));
+    git(['push',seedRemote,'main:main'],local);
+    refusedPush(seedRemote,'feature:main');
+    await stop();await start(['REQUIRE_PR_DEFAULT_BRANCH=1','PROTECT_DEFAULT_BRANCH=0']);
+    const inherited=await api('POST','repos',{owner:'company',name:'inherited'},'admin',201);
+    check('new repository inherits required PR default',()=>assert.equal(inherited.require_pr,true));
+    const inheritedRemote=base.replace('http://','http://admin:'+password+'@')+'/company/inherited.git';
+    git(['push',inheritedRemote,'main:main'],local);
+    refusedPush(inheritedRemote,'feature:main');
+    await api('PATCH','repos/company/inherited',{require_pr:false});
+    await stop();await start(['REQUIRE_PR_DEFAULT_BRANCH=1','PROTECT_DEFAULT_BRANCH=0']);
+    const overridden=await api('GET','repos/company/inherited');
+    check('explicit false overrides global policy after restart',()=>assert.equal(overridden.require_pr,false));
+    git(['push',inheritedRemote,'feature:main'],local);
+    await stop();
+    await assert.rejects(start(['PROTECT_DEFAULT_BRANCH=0','HOOKS_DIR='+path.join(work,'missing-hooks')]),/exited|timeout/);
+    count++;console.log('PASS required PR policy refuses boot without its hook');
     console.log('[pr] '+count+' passed, 0 failed');
 }
 main().catch(error=>{

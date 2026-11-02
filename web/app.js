@@ -523,6 +523,8 @@
     $('edit-name').value = state.repo.name;
     $('edit-description').value = state.repo.description || '';
     $('edit-private').checked = !!state.repo.private;
+    $('edit-require-pr').checked = !!state.repo.require_pr;
+    $('edit-merge-users').value = (state.repo.merge_users || []).join(', ');
     $('edit-dialog').showModal();
     $('edit-name').focus();
   }
@@ -2820,7 +2822,7 @@
   }
   function pullControls() {
     if (!$('pull-approve')) return;
-    $('pull-approve').disabled = pullBusy || !pullDiffReady;
+    $('pull-approve').disabled = pullBusy || !pullDiffReady || !currentPull || !currentPull.can_merge;
     $('pull-request-changes').disabled = pullBusy || !pullDiffReady;
     $('pull-toggle').disabled = pullBusy;
     $$('#pull-create button, #pull-comment-form button').forEach(function (b) { b.disabled = pullBusy; });
@@ -2928,6 +2930,7 @@
   });
   function reviewPull(stateName) {
     if (!currentPull || !pullDiffReady) return;
+    if (stateName === 'approve' && !currentPull.can_merge) return;
     var body = $('pull-review-body').value;
     if (stateName === 'request_changes' && !body.trim()) { $('pull-message').textContent = '请填写需要修改的内容。'; return; }
     mutatePull(pullPath('/' + currentPull.number + '/reviews'), 'POST', {state: stateName, body: body,
@@ -3306,6 +3309,8 @@
     var changes = {
       description: $('edit-description').value.trim(),
       private: $('edit-private').checked,
+      require_pr: $('edit-require-pr').checked,
+      merge_users: $('edit-merge-users').value.split(',').map(function (name) { return name.trim(); }).filter(Boolean),
     };
     // Only sent when it actually changed. A PATCH that names the name it
     // already has is a no-op the server would still have to move a directory

@@ -38,6 +38,7 @@ local xutils = require('xutils')
 local users_map = nil
 local repos_map = nil
 local issues_map = nil
+local repo_writes = {}
 
 function g_exports.store_backend()
     return db_enabled() and 'mysql' or 'json'
@@ -288,6 +289,8 @@ local function db_user_put(u)
 end
 
 local function row_to_repo(row)
+    local require_pr = nil
+    if row.require_pr ~= nil then require_pr = db_boolean(row.require_pr) end
     return {
         owner          = db_text(row.owner, ''),
         name           = db_text(row.name, ''),
@@ -297,12 +300,14 @@ local function row_to_repo(row)
         created_at     = db_number(row.created_at, 0),
         pushed_at      = db_number(row.pushed_at, 0),
         collaborators  = decode_sub(row.collaborators),
+        require_pr     = require_pr,
+        merge_users    = decode_sub(row.merge_users),
     }
 end
 
 local function db_repos_load()
     local rows, err = db_query('SELECT owner, name, description, is_private, ' ..
-        'default_branch, created_at, pushed_at, collaborators FROM gl_repos')
+        'default_branch, created_at, pushed_at, collaborators, require_pr, merge_users FROM gl_repos')
     if not rows then return nil, 'could not read the repository index: ' .. tostring(err) end
     local map = {}
     for _, row in ipairs(rows) do
@@ -321,20 +326,24 @@ end
 local function db_repo_put(r)
     local collab, cerr = encode_sub(r.collaborators, 'collaborator list')
     if cerr then return nil, cerr end
+    local mergers, merr = encode_sub(r.merge_users, 'merge account list')
+    if merr then return nil, merr end
 
     local ok, err = db_exec(string.format(
         'INSERT INTO gl_repos (owner_key, name_key, owner, name, description, ' ..
-        'is_private, default_branch, created_at, pushed_at, collaborators) ' ..
-        'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ' ..
+        'is_private, default_branch, created_at, pushed_at, collaborators, require_pr, merge_users) ' ..
+        'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ' ..
         'ON DUPLICATE KEY UPDATE owner=VALUES(owner), name=VALUES(name), ' ..
         'description=VALUES(description), is_private=VALUES(is_private), ' ..
         'default_branch=VALUES(default_branch), created_at=VALUES(created_at), ' ..
-        'pushed_at=VALUES(pushed_at), collaborators=VALUES(collaborators)',
+        'pushed_at=VALUES(pushed_at), collaborators=VALUES(collaborators), ' ..
+        'require_pr=VALUES(require_pr), merge_users=VALUES(merge_users)',
         db_quote(r.owner:lower()), db_quote(r.name:lower()),
         db_quote(r.owner), db_quote(r.name),
         db_quote(r.description or ''), db_quote(r.private and true or false),
         db_quote(r.default_branch or cfg_get('DEFAULT_BRANCH', 'main')),
-        db_quote(r.created_at or 0), db_quote(r.pushed_at or 0), db_quote(collab)))
+        db_quote(r.created_at or 0), db_quote(r.pushed_at or 0), db_quote(collab),
+        db_quote(r.require_pr), db_quote(mergers)))
     if not ok then return nil, 'could not save the repository: ' .. tostring(err) end
     return true
 end
@@ -462,8 +471,23 @@ function g_exports.store_repos_load()
 end
 
 function g_exports.store_repo_put(r)
-    if db_enabled() then return db_repo_put(r) end
-    return file_repos_save()
+    local key = repo_key(r.owner, r.name)
+    if repo_writes[key] then return nil, 'repository update in progress; retry' end
+    repo_writes[key] = true
+    local ok, saved, err
+    if db_enabled() then
+        ok, saved, err = pcall(db_repo_put, r)
+    else
+        -- File writes do not yield. Temporarily substitute a staged record so
+        -- policy changes are published only after persistence succeeds.
+        local previous = repos_map and repos_map[key]
+        if repos_map then repos_map[key] = r end
+        ok, saved, err = pcall(file_repos_save)
+        if repos_map then repos_map[key] = previous end
+    end
+    repo_writes[key] = nil
+    if not ok then return nil, 'could not persist repository' end
+    return saved, err
 end
 
 function g_exports.store_repo_delete(owner, name)

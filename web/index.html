@@ -441,6 +441,9 @@
       <p class="dialog-note">改名后旧地址立即失效，已经克隆的本地仓库需要执行 <code>git remote set-url</code> 才能继续推送。</p>
       <label>描述（可选）<textarea id="edit-description" rows="3"></textarea></label>
       <label class="checkbox-label"><input id="edit-private" type="checkbox"> 私有仓库</label>
+      <label class="checkbox-label"><input id="edit-require-pr" type="checkbox"> 默认分支必须通过 PR 合并</label>
+      <p class="dialog-copy">开启后，已有默认分支拒绝所有直接推送，包括管理员推送。空仓库只允许管理者首次初始化。</p>
+      <label>允许合并的管理者（可选，逗号分隔）<input id="edit-merge-users" type="text" autocomplete="off" placeholder="留空允许所有仓库管理者"></label>
       <p id="edit-message" class="form-message" role="alert"></p>
       <div class="dialog-actions">
         <button class="button button-quiet" data-dialog-close="edit-dialog" type="button">取消</button>

@@ -184,6 +184,15 @@ MIGRATIONS[#MIGRATIONS + 1] = {
     up = { function() return add_column('gl_users', 'is_disabled', 'TINYINT NOT NULL DEFAULT 0') end },
 }
 
+MIGRATIONS[#MIGRATIONS + 1] = {
+    id = 7,
+    name = 'required pull request policies',
+    up = {
+        function() return add_column('gl_repos', 'require_pr', 'TINYINT NULL DEFAULT NULL') end,
+        function() return add_column('gl_repos', 'merge_users', 'TEXT NULL') end,
+    },
+}
+
 function g_exports.migrate_latest()
     local top = 0
     for _, m in ipairs(MIGRATIONS) do

@@ -109,6 +109,8 @@ local function repo_public(rec, req, ctx)
         description    = rec.description or '',
         private        = rec.private and true or false,
         default_branch = rec.default_branch,
+        require_pr     = protect_pr_required(rec),
+        merge_users    = util_json_array(rec.merge_users or {}),
         created_at     = rec.created_at,
         -- 0, never nil: the file backend has no key at all for a repository
         -- nobody has pushed to, and a field that is sometimes absent is a field
@@ -227,6 +229,8 @@ local function h_repo_create(req, ctx)
         description    = b.description,
         private        = b.private,
         default_branch = b.default_branch,
+        require_pr     = b.require_pr,
+        merge_users    = b.merge_users,
     })
     if not rec then return http_response_error(400, http_safe_error(cerr)) end
     return http_response_json(201, repo_public(rec, req, ctx))
@@ -302,11 +306,14 @@ local function h_repo_update(req, ctx)
     -- as "nothing happened". A PATCH carrying nothing at all still has to be
     -- that 400 -- the short-circuit is for a rename that succeeded, not for an
     -- empty body.
-    if b.name ~= nil and b.description == nil and b.private == nil then
+    if b.name ~= nil and b.description == nil and b.private == nil and
+       b.require_pr == nil and b.merge_users == nil then
         return http_response_json(200, repo_public(rec_now, req, ctx))
     end
 
-    local updated, uerr, status = repo_update(owner, name, b)
+    local updated, uerr, status = pr_repo_change(owner, name, name, function()
+        return repo_update(owner, name, b)
+    end)
     if not updated then return http_response_error(status or 400, http_safe_error(uerr)) end
     return http_response_json(200, repo_public(updated, req, ctx))
 end
@@ -517,6 +524,7 @@ local function pr_response(p, rec, user)
     out.reviews = util_json_array(p.reviews or {})
     out.merging = p.pending ~= nil
     out.can_review = user ~= nil and auth_can_manage(rec, user) and p.author ~= user.username and p.state == 'open'
+    out.can_merge = out.can_review and protect_can_merge(rec, user)
     out.can_edit = user ~= nil and (p.author == user.username or auth_can_manage(rec, user)) and p.state ~= 'merged'
     return out
 end
@@ -547,7 +555,7 @@ local function h_pr_get(req, ctx)
     local out = pr_response(p, rec, user)
     local ends, why = pr_snapshot(rec, p)
     if ends then out.base_oid, out.head_oid = ends.base_oid, ends.head_oid
-    else out.branch_error = why; out.can_review = false end
+    else out.branch_error = why; out.can_review = false; out.can_merge = false end
     return http_response_json(200, out)
 end
 local function pr_mutation(action)

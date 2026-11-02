@@ -33,7 +33,24 @@ ref="$1"
 old="$2"
 new="$3"
 
-[ -n "$GITLOOM_PROTECT_REFS" ] || exit 0
+# Creation is the only direct write allowed by a required-PR policy. Gitloom
+# limits it to repository managers so a contributor cannot initialise the trunk.
+case " ${GITLOOM_REQUIRE_PR_REFS:-} " in
+    *" $ref "*)
+        case "$old" in
+            *[!0]*|'') ;;
+            *)
+                case "$new" in
+                    *[!0]*) [ "${GITLOOM_CAN_INITIALIZE:-0}" = 1 ] && exit 0 ;;
+                esac
+                ;;
+        esac
+        echo "gitloom: $ref requires an approved pull request; direct pushes are refused." >&2
+        exit 1
+        ;;
+esac
+
+[ -n "${GITLOOM_PROTECT_REFS:-}" ] || exit 0
 
 # Word-boundary match with spaces on both sides, so `refs/heads/main` in the
 # list cannot be matched by a ref merely ending in it.

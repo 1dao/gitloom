@@ -71,16 +71,66 @@ function g_exports.protect_setup()
     if not util_file_exists(script) then
         return nil, 'no hook at ' .. script
     end
+    if package.config:sub(1, 1) ~= '\\' then
+        local executable = proc_exec({ argv = { 'test', '-x', script },
+            capture_stdout = true, capture_stderr = true, timeout_ms = 5000 })
+        if not executable.ok then return nil, 'protection hook is not executable: ' .. script end
+    end
 
     hooks_abs = dir
     return true
 end
 
--- Where receive-pack should look for hooks, or nil when nothing is protected
--- and git should be left with its own default.
+-- The shared hook directory. Per-repository environment values select policies.
 function g_exports.protect_hooks_dir()
-    if not cfg_bool('PROTECT_DEFAULT_BRANCH', true) then return nil end
     return hooks_abs
+end
+
+function g_exports.protect_pr_required(rec)
+    if rec and rec.require_pr ~= nil then return rec.require_pr == true end
+    return cfg_bool('REQUIRE_PR_DEFAULT_BRANCH', false)
+end
+
+function g_exports.protect_policy_check(opts)
+    if opts.require_pr ~= nil and type(opts.require_pr) ~= 'boolean' then
+        return nil, 'require_pr must be a boolean'
+    end
+    if opts.merge_users ~= nil then
+        if type(opts.merge_users) ~= 'table' then return nil, 'merge_users must be an array' end
+        local seen, count = {}, 0
+        for i, username in pairs(opts.merge_users) do
+            count = count + 1
+            if type(i) ~= 'number' or i < 1 or i ~= math.floor(i) or
+               type(username) ~= 'string' or not repo_name_ok(username) or seen[username] then
+                return nil, 'merge_users must contain unique account names'
+            end
+            local exists, err = auth_user_exists(username)
+            if not exists then return nil, err or 'merge account does not exist' end
+            seen[username] = true
+        end
+        if count > 64 or count ~= #opts.merge_users then return nil, 'invalid merge_users array' end
+    end
+    if (opts.require_pr == true or opts.require_pr == nil and protect_pr_required(opts)) and not hooks_abs then
+        local ok, err = protect_setup()
+        if not ok then return nil, err end
+    end
+    return true
+end
+
+function g_exports.protect_can_merge(rec, user)
+    if not auth_can_manage(rec, user) then return false end
+    if not rec.merge_users or #rec.merge_users == 0 then return true end
+    for _, username in ipairs(rec.merge_users) do
+        if username == user.username then return true end
+    end
+    return false
+end
+
+function g_exports.protect_pr_ref(rec)
+    if not protect_pr_required(rec) then return nil end
+    local branch = rec and rec.default_branch
+    if type(branch) ~= 'string' or branch == '' or branch:find('%s') then return nil end
+    return 'refs/heads/' .. branch
 end
 
 -- The refs `rec` guards, space-separated, or nil for none.

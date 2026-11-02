@@ -257,7 +257,7 @@ local function approve(rec, p, user, ends)
         '-m', 'Merge pull request #' .. p.number .. ': ' .. p.title }, { env = identity })
     local merged = util_str_trim(commit.stdout or '')
     if not commit.ok or not oid(merged) then return nil, 'could not create merge commit', 500 end
-    if not auth_can_manage(rec, user) then return nil, 'review permission was revoked', 403 end
+    if not protect_can_merge(rec, user) then return nil, 'merge permission was revoked', 403 end
     p.pending = { oid = merged, actor = user.username, at = os.time(),
         base_oid = ends.base_oid, head_oid = ends.head_oid }
     p.reviews[#p.reviews].state = 'merging'
@@ -272,7 +272,7 @@ local function approve(rec, p, user, ends)
     local wrote = util_file_write(input, commands)
     if not wrote then return nil, 'could not stage ref transaction; refresh to reconcile', 500 end
     -- Recheck after the persistence RPC as it may have yielded to a revocation.
-    if not auth_can_manage(rec, user) then
+    if not protect_can_merge(rec, user) then
         proc_tmp_release(input)
         reconcile(rec, p)
         return nil, 'review permission was revoked', 403
@@ -298,6 +298,9 @@ function g_exports.pr_review(rec, num, user, body)
         if not auth_can_manage(rec, user) then return nil, 'repository administrator review required', 403 end
         if old.author == user.username then return nil, 'authors cannot approve their own pull requests', 403 end
         if body.state ~= 'approve' and body.state ~= 'request_changes' then return nil, 'invalid review state', 400 end
+        if body.state == 'approve' and not protect_can_merge(rec, user) then
+            return nil, 'account is not allowed to merge this repository', 403
+        end
         if not text_ok(body.body or '', 8192, body.state == 'request_changes') then return nil, 'invalid review body', 400 end
         if #old.reviews >= 1000 then return nil, 'review limit reached', 400 end
         if not oid(body.head_oid) or not oid(body.base_oid) then return nil, 'reviewed head_oid and base_oid are required', 400 end

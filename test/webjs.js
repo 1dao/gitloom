@@ -435,7 +435,7 @@ async function testPullController() {
     const node=id => nodes[id] || (nodes[id]=Object.assign(new Node('div'),{value:'',hidden:false,disabled:false}));
     let compareResolve, diffResolve, detailResolve, rejectWrites=false, holdDetail=false;
     let detail={number:1,title:'<img src=x onerror=alert(1)>',body:'<script>evil</script>',
-        author:'bob',base:'main',head:'feature',state:'open',can_review:true,can_edit:true,
+        author:'bob',base:'main',head:'feature',state:'open',can_review:true,can_merge:true,can_edit:true,
         base_oid:'a'.repeat(40),head_oid:'b'.repeat(40),comments:[],reviews:[]};
     const ctx={document,Promise,console,
         state:{repo:{owner:'admin',name:'demo'},view:'pulls',username:'admin',pullNumber:1},
@@ -463,6 +463,11 @@ async function testPullController() {
     ok('PR approval waits for patch as well as metadata',node('pull-approve').disabled);
     diffResolve();await loading;
     ok('PR approval enabled after complete diff',!node('pull-approve').disabled);
+    ctx.currentPull.can_merge=false;ctx.pullControls();
+    ok('PR approval disabled for a manager outside the merge allowlist',node('pull-approve').disabled);
+    const deniedWrites=writes.length;ctx.reviewPull('approve');await tick();
+    eq('PR excluded manager cannot submit approval',writes.length,deniedWrites);
+    ctx.currentPull.can_merge=true;ctx.pullControls();
     eq('PR title remains text',node('pull-detail-title').textContent,'#1 '+detail.title);
     eq('PR description remains text',node('pull-description').textContent,detail.body);
     rejectWrites=true;

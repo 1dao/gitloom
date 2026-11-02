@@ -262,6 +262,8 @@ end
 -- opts = { description, private, default_branch }
 function g_exports.repo_create(owner, name, opts)
     opts = opts or {}
+    local policy_ok, policy_err = protect_policy_check(opts)
+    if not policy_ok then return nil, policy_err end
     if not repo_name_ok(owner) then return nil, 'bad owner name' end
     if not repo_name_ok(name)  then return nil, 'bad repository name' end
     if not have_index() then return nil, 'the repository index is unavailable' end
@@ -298,6 +300,8 @@ function g_exports.repo_create(owner, name, opts)
         description = description,
         private = opts.private and true or false,
         default_branch = branch,
+        require_pr = opts.require_pr,
+        merge_users = opts.merge_users,
         created_at = os.time(),
     }
     index[repo_key(owner, name)] = rec
@@ -318,9 +322,8 @@ function g_exports.repo_create(owner, name, opts)
 end
 
 -- Update mutable repository metadata without changing its on-disk git data.
--- opts may contain description and/or private. The record is changed in memory
--- first so every caller sees one coherent value, then persisted; a failed
--- store rolls the record back before returning the error.
+-- Persist a staged copy before publishing metadata or protection policies.
+-- A failed write must never temporarily grant a push or merge permission.
 function g_exports.repo_update(owner, name, opts)
     if not repo_name_ok(owner) or not repo_name_ok(name) then
         return nil, 'bad repository name', 400
@@ -331,7 +334,8 @@ function g_exports.repo_update(owner, name, opts)
 
     local has_description = opts.description ~= nil
     local has_private = opts.private ~= nil
-    if not has_description and not has_private then
+    local has_policy = opts.require_pr ~= nil or opts.merge_users ~= nil
+    if not has_description and not has_private and not has_policy then
         return nil, 'no repository fields to update', 400
     end
     if has_description and type(opts.description) ~= 'string' then
@@ -343,18 +347,26 @@ function g_exports.repo_update(owner, name, opts)
     if has_private and type(opts.private) ~= 'boolean' then
         return nil, 'private must be a boolean', 400
     end
+    local policy_ok, policy_err = protect_policy_check(opts)
+    if not policy_ok then return nil, policy_err, 400 end
 
     local rec = index[repo_key(owner, name)]
     if not rec or not repo_exists_of(rec) then return nil, 'no such repository', 404 end
 
-    local old_description, old_private = rec.description, rec.private
-    if has_description then rec.description = opts.description end
-    if has_private then rec.private = opts.private end
-    local sok, serr = store_repo_put(rec)
+    local staged = {}
+    for key, value in pairs(rec) do staged[key] = value end
+    if has_description then staged.description = opts.description end
+    if has_private then staged.private = opts.private end
+    if opts.require_pr ~= nil then staged.require_pr = opts.require_pr end
+    if opts.merge_users ~= nil then staged.merge_users = opts.merge_users end
+    local sok, serr = store_repo_put(staged)
     if not sok then
-        rec.description, rec.private = old_description, old_private
         return nil, 'could not persist repository changes: ' .. tostring(serr), 500
     end
+    if has_description then rec.description = staged.description end
+    if has_private then rec.private = staged.private end
+    if opts.require_pr ~= nil then rec.require_pr = staged.require_pr end
+    if opts.merge_users ~= nil then rec.merge_users = staged.merge_users end
     return rec
 end
 
@@ -567,6 +579,8 @@ end
 --
 -- Coroutine-only.
 function g_exports.repo_sync_head(rec)
+    -- Adopting a contributor's first feature branch would move the PR boundary.
+    if protect_pr_required(rec) then return false end
     local dir = repo_dir_of(rec)
 
     -- Does HEAD point at something that exists?

@@ -1679,8 +1679,10 @@ Repository rename/delete serialize with PR mutations and carry/remove the histor
 permission refusals, stale reviews, concurrent approvals, conflicts, restart
 persistence and both pending recovery states. It is included in `test/smoke.sh`
 when Node is available. Automatic merging requires Git 2.38+. Squash/rebase,
-cross-repository PRs and configurable required-review push policy remain future
-work. The existing fast-forward branch protection is unchanged.
+cross-repository PRs remain future work. Required-PR default-branch policies and
+merge-account allowlists are now configurable per repository. They reject direct
+updates even by administrators; repository managers may initialise an empty
+default branch once. `REQUIRE_PR_DEFAULT_BRANCH` supplies the instance default.
 
 ## Phase 4 — the rest of the surface
 

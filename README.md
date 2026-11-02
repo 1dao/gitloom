@@ -56,8 +56,9 @@ a repository owner, organisation administrator or site administrator reviews the
 exact source and target commits and approves another user's request. Approval
 creates a two-parent merge commit; changed branches or conflicts require a new
 review. Automatic merging requires Git 2.38+. Squash, rebase and cross-repository
-pull requests remain outside this workflow. Existing branch protection still
-permits ordinary fast-forward pushes; it does not require every push to use a PR.
+pull requests remain outside this workflow. Repositories can additionally require
+PR merges for the default branch and restrict which managers may approve a merge.
+Without that policy, history protection permits ordinary fast-forward pushes.
 
 ## Quick start
 
@@ -513,3 +514,42 @@ verify login, permissions, issues and PR history before switching production.
 Keep the original installation until acceptance is complete. Configuration,
 TLS keys, runtime binaries and files outside the configured data paths must be
 backed up separately. This is an offline workflow, not a live snapshot mechanism.
+
+## Require reviewed changes on the default branch
+
+In the repository settings dialog, enable **default branch must merge through PR**,
+or use the owner/administrator API:
+
+```sh
+curl -u admin:YOUR_PASSWORD -X PATCH -H 'Content-Type: application/json' \
+  -d '{"require_pr":true,"merge_users":["admin"]}' \
+  http://127.0.0.1:8686/api/v1/repos/company/project
+```
+
+Once enabled, Git's update hook refuses every direct update to the existing
+default branch, including fast-forward, force and administrator pushes. Source
+branches remain writable. A repository manager may initialise the configured
+default branch in an empty repository; contributors cannot initialise it, and
+pushing another branch does not change the protected default branch.
+
+Only the reviewed PR merge path may advance an existing protected default branch.
+The existing exact-OID checks, self-approval refusal and conflict handling still
+apply. `merge_users` is an optional array of existing account names: listed users
+must also be repository managers. An empty list permits all repository managers.
+The allowlist restricts approval/merge; other managers may still request changes.
+Approval continues to create a merge commit immediately.
+
+Set `REQUIRE_PR_DEFAULT_BRANCH=1` to require PRs by default for repositories with
+no explicit override. The shipped value is 0 to preserve existing workflows.
+An explicit per-repository `require_pr:false` overrides the instance default and
+survives restarts. Policies are included in backups. MySQL migration 7 adds the
+nullable override and merge-account list. Required-PR enforcement is independent
+of `PROTECT_DEFAULT_BRANCH`: turning history protection off does not disable it.
+A configured required-PR policy refuses startup if its hook cannot be armed.
+Policy changes apply to newly admitted push operations; wait for active pushes
+before enabling a policy during a maintenance window.
+
+This policy covers HTTP Git access through Gitloom. Administrators with direct
+filesystem access can change bare repositories and must use separate host-level
+access controls. Multi-reviewer thresholds, CI status gates and protection of
+additional branch patterns are not part of this policy.

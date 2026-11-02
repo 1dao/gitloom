@@ -34,6 +34,7 @@ boot.load_script('app/pkt.lua')
 boot.load_script('app/repo.lua')
 boot.load_script('app/org.lua')
 boot.load_script('app/pr.lua')
+boot.load_script('app/protect.lua')
 boot.load_script('app/git.lua')
 boot.load_script('app/auth_ratelimit.lua')   -- before auth.lua; see main.lua
 boot.load_script('app/auth.lua')
@@ -787,6 +788,18 @@ do
     eq('disabled owner cannot push', auth_can_write(rec, account), false)
     rec.private = false
     eq('disabled identity cannot read even a public repository', auth_can_read(rec, account), false)
+end
+
+do
+    local rec = { owner = 'owner', name = 'example', require_pr = true, merge_users = { 'owner' } }
+    eq('required PR policy identifies the default ref', protect_pr_ref({ default_branch = 'main', require_pr = true }), 'refs/heads/main')
+    eq('explicit false disables required PR policy', protect_pr_required({ require_pr = false }), false)
+    eq('listed repository owner may merge', protect_can_merge(rec, { username = 'owner' }), true)
+    eq('unlisted site administrator cannot merge', protect_can_merge(rec, { username = 'admin', admin = true }), false)
+    eq('listed account still needs management permission', protect_can_merge(rec, { username = 'contributor' }), false)
+    eq('disabled listed owner cannot merge', protect_can_merge(rec, { username = 'owner', disabled = true }), false)
+    eq('policy rejects a nonboolean switch', protect_policy_check({ require_pr = 'yes' }), nil)
+    eq('policy rejects a scalar allowlist', protect_policy_check({ merge_users = 'owner' }), nil)
 end
 
 out(string.format('\n[unit] %s (%d checks, %d failure(s))\n',

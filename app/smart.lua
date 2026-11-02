@@ -142,7 +142,12 @@ local function service_rpc(req, ctx, prefix, service)
     -- the child's environment, which is the only channel a hook has: it is a
     -- separate process that knows its three arguments and nothing else.
     if spec.write then
+        if protect_pr_required(rec) and not protect_hooks_dir() then
+            return http_response_error(503, 'required pull request policy is unavailable')
+        end
         env.GITLOOM_PROTECT_REFS = protect_refs_for(rec)
+        env.GITLOOM_REQUIRE_PR_REFS = protect_pr_ref(rec) or ''
+        env.GITLOOM_CAN_INITIALIZE = auth_can_manage(rec, user) and '1' or '0'
     end
     local result_type = 'application/x-git-' .. spec.verb .. '-result'
 

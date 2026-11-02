@@ -141,15 +141,15 @@ local function boot_async()
         local pok, perr = protect_setup()
         if not pok then
             cfg_log_error('branch protection is on and cannot be armed: %s', tostring(perr))
-            cfg_log_error('point HOOKS_DIR at the directory holding `update`, ' ..
-                          'or set PROTECT_DEFAULT_BRANCH=off to run without it')
+            cfg_log_error('point HOOKS_DIR at the directory holding `update` ' ..
+                          'and review the configured protection policies')
             xthread.stop(1)
             return
         end
         cfg_log_system('branch protection: default branches guarded, hooks at %q',
             protect_hooks_dir())
     else
-        cfg_log_warn('branch protection is OFF — a force-push may rewrite any branch')
+        cfg_log_warn('history protection is OFF; required PR policies are checked separately')
     end
     -- Says whether X-Forwarded-For is honoured, and from whom. Silent
     -- misconfiguration here makes every audit line and every rate-limit
@@ -164,6 +164,17 @@ local function boot_async()
     -- The stores, and only now: under MySQL every one of these is a query, and
     -- __init runs on the main state where a yield is not possible.
     if not repo_index_load() then xthread.stop(1); return end
+    local needs_pr_hook = cfg_bool('REQUIRE_PR_DEFAULT_BRANCH', false)
+    for _, rec in ipairs(repo_list()) do
+        if protect_pr_required(rec) then needs_pr_hook = true end
+    end
+    if needs_pr_hook and not protect_hooks_dir() then
+        local ready, reason = protect_setup()
+        if not ready then
+            cfg_log_error('required pull request policy cannot be armed: %s', tostring(reason))
+            xthread.stop(1); return
+        end
+    end
     if not issue_index_load() then xthread.stop(1); return end
     if not org_index_load() then xthread.stop(1); return end
     if not pr_index_load() then xthread.stop(1); return end
