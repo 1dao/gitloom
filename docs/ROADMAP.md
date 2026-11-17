@@ -1692,7 +1692,7 @@ not on the table), and search.
 
 ## Deliberately out of scope
 
-LFS, package registries, CI/Actions, mirroring, GitHub import, and i18n. Each is
+Package registries, CI/Actions, mirroring, GitHub import, and i18n. Each is
 a large subsystem in gitea and none is needed for a working git host. Revisit
 individually, never as a batch.
 
@@ -1710,3 +1710,17 @@ individually, never as a batch.
 3. **Multi-process.** One process with `GIT_WORKERS` threads, or several
    processes behind a load balancer? The second needs shared storage and a
    shared session/index authority — i.e. it needs decision 1 resolved first.
+
+## Git LFS Basic transfers (2026-11-17)
+
+Implemented the Batch and Basic HTTP transfer APIs with repository read/write
+permissions, SHA-256 and size validation, atomic publication, and disk streaming
+for downloads. Objects and incomplete uploads live inside each bare repository,
+so lifecycle operations and filesystem backups include LFS without a database
+migration. There is deliberately no global hash lookup or deduplication across
+repositories. Linux streams uploads regardless of the Git subprocess transport;
+Windows retains the HTTP request-buffer ceiling. OpenSSL hashing runs in the
+existing worker pool and is checked at boot. Configuration and operational
+limits are documented in README.md. File locking, external object storage,
+resumable uploads, quotas, pointer enforcement, and object garbage collection
+remain future work.

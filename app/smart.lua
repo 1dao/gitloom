@@ -1,6 +1,6 @@
 -- app/smart.lua — the git smart-HTTP transport.
 --
--- Exports: smart_install
+-- Exports: smart_install, smart_authorise
 --
 -- Three endpoints make up the whole of clone/fetch/push over HTTP:
 --
@@ -42,7 +42,7 @@ end
 -- credentials and retrying. An authenticated client that is refused gets a 404,
 -- not a 403: confirming that a private repository exists to someone who may not
 -- read it is itself a disclosure.
-local function authorise(req, prefix, want_write)
+function g_exports.smart_authorise(req, prefix, want_write)
     local owner, name = repo_parse_url(prefix)
     if not owner then return nil, http_response_error(404, 'not found') end
 
@@ -99,7 +99,7 @@ local function info_refs(req, prefix)
         return http_response_text(403, 'unsupported service: ' .. tostring(service) .. '\n')
     end
 
-    local rec, dir_or_resp, user = authorise(req, prefix, spec.write)
+    local rec, dir_or_resp, user = smart_authorise(req, prefix, spec.write)
     if not rec then return dir_or_resp end
 
     local body, err = git_advertise(dir_or_resp, service,
@@ -134,7 +134,7 @@ local function service_rpc(req, ctx, prefix, service)
         return http_response_text(415, 'expected Content-Type: ' .. want .. '\n')
     end
 
-    local rec, dir_or_resp, user = authorise(req, prefix, spec.write)
+    local rec, dir_or_resp, user = smart_authorise(req, prefix, spec.write)
     if not rec then return dir_or_resp end
 
     local env = git_env_for_request(req, user)

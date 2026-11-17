@@ -297,11 +297,55 @@ staging once that is reached. The main thread never blocks either way: a request
 coroutine yields on the RPC (or on the child's stdout) and the event loop keeps
 serving.
 
+## Git LFS
+
+Git LFS Basic HTTP transfers are enabled by default. Install the Git LFS client
+on developer machines, then use the usual workflow:
+
+```sh
+git lfs install
+git lfs track '*.bin'
+git add .gitattributes model.bin
+git commit -m 'Track binary with LFS'
+git push origin main
+```
+
+Clients discover `/<owner>/<repo>.git/info/lfs` automatically. Batch upload and
+download, raw object PUT/GET, and upload verification use the same repository
+read/write permissions and HTTP Basic credentials or access tokens as Git.
+Private repositories remain hidden from authenticated users without access.
+The implementation follows the [Git LFS Basic transfer API](https://github.com/git-lfs/git-lfs/blob/main/docs/api/basic-transfers.md).
+
+Objects are stored at `<REPO_ROOT>/<owner>/<repo>.git/lfs/objects/`, scoped to
+each repository. Repository rename, deletion, and filesystem backup include
+these files. There is no cross-repository deduplication or automatic object
+collection: deleting a Git branch or running `git gc` retains its LFS objects.
+Back up the entire bare repository, not just Git refs and packfiles. Git-only
+mirror clones do not back up LFS content.
+
+The server requires OpenSSL (`LFS_OPENSSL_BIN`, default `openssl`) for SHA-256
+verification in its worker pool; boot checks this dependency. Set
+`LFS_ENABLED=0` to disable LFS. `LFS_MAX_OBJECT_MB` defaults to 1024 MiB per
+object and `LFS_HASH_TIMEOUT_SEC` to 300 seconds. Linux receives uploads directly
+into temporary files with bounded buffering, independently of `GIT_STREAM`;
+Windows buffers uploads and also applies `MAX_REQUEST_SIZE_MB` (64 MiB by
+default, including HTTP overhead). Downloads stream from disk on both systems.
+Incomplete uploads are removed on failure or the next restart; only objects
+with matching length and SHA-256 are published.
+
+Behind a reverse proxy, preserve Host and configure trusted proxy handling as
+usual. `LFS_PUBLIC_URL=https://git.example.test` can pin the external origin
+(and optionally a proxy mount prefix) used in action URLs. Configure proxy body
+limits and timeouts for the intended object size. Batch requests accept up to
+100 objects and 1 MiB of JSON. File locking, resumable transfers, S3 storage,
+quotas, and garbage collection are not implemented. Pushes do not inspect LFS
+pointers to enforce object availability; clients must upload objects normally.
+
 ## Known limits
 
 | Limit | Detail |
 |---|---|
-| Push size | Unbounded on Linux. A smart-HTTP POST is dispatched as soon as its headers arrive and its body goes to `git` in pieces, so `MAX_REQUEST_SIZE_MB` does not apply to it; `MAX_PUSH_SIZE_MB` (default 0, no limit) is there if disk is what needs bounding. Everything else is still buffered whole and refused with 413 above `MAX_REQUEST_SIZE_MB` (default 64), enforced on the running total so an over-size body is never allocated — leave it a few MiB of headroom for read-ahead, as `gitloom.cfg` explains. Streaming a body means pausing the connection when the handler falls behind, which the runtime only does correctly on POSIX, so Windows buffers pushes too and there the ceiling still is the push limit. |
+| Push size | Unbounded on Linux. A smart-HTTP POST is dispatched as soon as its headers arrive and its body goes to `git` in pieces, so `MAX_REQUEST_SIZE_MB` does not apply to it; `MAX_PUSH_SIZE_MB` (default 0, no limit) is there if disk is what needs bounding. Other requests except Linux LFS object uploads are still buffered whole and refused with 413 above `MAX_REQUEST_SIZE_MB` (default 64), enforced on the running total so an over-size body is never allocated — leave it a few MiB of headroom for read-ahead, as `gitloom.cfg` explains. Streaming a body means pausing the connection when the handler falls behind, which the runtime only does correctly on POSIX, so Windows buffers pushes too and there the ceiling still is the push limit. |
 | Clone start-up latency | Windows only. There the response waits for `git` to finish, because Content-Length is unknowable before then — a 20 MiB clone measured ~5.6 s. On Linux the streaming path sends each chunk as git produces it (`GIT_STREAM=auto`). |
 | Concurrency | Bounded, by two counters. A staged clone or push occupies one of `GIT_WORKERS` pool threads for its whole duration; a streamed one takes one of `GIT_STREAM_MAX` slots (default `GIT_WORKERS`) and falls back to staging when they are all busy — so an instance runs at most `GIT_STREAM_MAX + GIT_WORKERS` git processes. A client that disconnects does not stop the `git` it started; `GIT_TIMEOUT_SEC` (default 600) is what bounds that. |
 | HTTP only | No SSH transport. git speaks HTTP Basic and re-sends the credential on **every** request, so set `HTTPS=1` or front gitloom with TLS before exposing it. |

@@ -28,7 +28,7 @@ local routes    = {}    -- method -> { {segs, names, handler, raw}, ... }
 local fallbacks = {}
 local server    = nil
 local is_https  = false
-local body_stream_wanted = nil   -- see http_body_stream
+local body_stream_predicates = {}   -- see http_body_stream
 
 -- ---------------------------------------------------------------------------
 -- Response helpers
@@ -163,13 +163,13 @@ end
 -- Register the predicate that decides whether a request's body reaches its
 -- handler in pieces instead of whole. It is called with the parsed request HEAD
 -- — method, path, headers, content_length, chunked — and returns true to stream.
--- One predicate; the last registration wins.
+-- Predicates are checked in order. An optional second result sets the byte limit.
 --
 -- A hook rather than a rule because this module knows nothing about git, and
 -- streaming is only ever right for a handler that consumes bytes as they
 -- arrive. See "Streamed request bodies" in the serve loop below.
 function g_exports.http_body_stream(fn)
-    body_stream_wanted = fn
+    body_stream_predicates[#body_stream_predicates + 1] = fn
 end
 
 local function match_route(method, path)
@@ -743,7 +743,7 @@ local function body_feed(conn, st, data)
             end
             if b.remaining == 0 then b.eof = true end
         end
-        if MAX_PUSH > 0 and b.total > MAX_PUSH and not b.err then
+        if b.limit > 0 and b.total > b.limit and not b.err then
             b.err = 'request body too large'
         end
     end
@@ -871,8 +871,9 @@ end
 -- Dispatch a request whose body the handler will read in pieces. `req` is the
 -- head as parse_request_head returned it: everything parse_request produces
 -- except `body`, which is replaced by `body_stream`.
-local function serve_streamed(conn, st, req, body_start)
-    local b = { q = {}, n = 0, total = 0, eof = false, err = nil, waiter = nil }
+local function serve_streamed(conn, st, req, body_start, limit)
+    local b = { q = {}, n = 0, total = 0, eof = false, err = nil, waiter = nil,
+                limit = limit or MAX_PUSH }
     if req.chunked then
         b.dec = chunked_decoder(function(piece)
             b.q[#b.q + 1] = piece
@@ -930,8 +931,11 @@ local function serve_one(conn, st)
         st.head_done = true
         -- A head that will not parse is left to parse_request below, which
         -- produces the same error and already knows how to answer it.
-        if head and body_stream_wanted and body_stream_wanted(head) then
-            return serve_streamed(conn, st, head, body_start)
+        if head then
+            for _, predicate in ipairs(body_stream_predicates) do
+                local wanted, limit = predicate(head)
+                if wanted then return serve_streamed(conn, st, head, body_start, limit) end
+            end
         end
     end
 

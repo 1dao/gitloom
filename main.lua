@@ -64,6 +64,7 @@ boot.load_script('app/http.lua')     -- http_*
 boot.load_script('app/stream.lua')   -- stream_*, stream_response
 boot.load_script('app/browse.lua')   -- browse_*
 boot.load_script('app/smart.lua')    -- smart_install
+boot.load_script('app/lfs.lua')      -- Git LFS Basic transfers
 boot.load_script('app/api.lua')      -- api_install
 boot.load_script('app/web.lua')      -- web_install
 
@@ -180,6 +181,11 @@ local function boot_async()
     if not pr_index_load() then xthread.stop(1); return end
     if not auth_load() then xthread.stop(1); return end
     auth_bootstrap()
+    local lok, lerr = lfs_setup()
+    if not lok then
+        cfg_log_error('LFS setup failed: %s', tostring(lerr))
+        xthread.stop(1); return
+    end
     cfg_log_system('store: %s', store_describe())
 
     -- LAST. Nothing is accepted until git has been checked and the stores have
@@ -230,6 +236,7 @@ local function __init()
     -- invocation.
     util_dir_make(git_home_dir())
 
+    lfs_install()     -- before smart HTTP: LFS has its own objects URLs
     smart_install()   -- git transport, as a path fallback
     web_install()     -- same-origin repository browser, as routes
     api_install()     -- JSON API, as routes

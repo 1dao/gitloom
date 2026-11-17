@@ -41,6 +41,8 @@ boot.load_script('app/auth.lua')
 boot.load_script('app/http.lua')
 boot.load_script('app/stream.lua')
 boot.load_script('app/browse.lua')
+boot.load_script('app/smart.lua')
+boot.load_script('app/lfs.lua')
 boot.load_script('app/web.lua')
 boot.load_script('test/module_scope.lua')
 local codec = dofile('scripts/core/share/xhttp_codec.lua')
@@ -55,6 +57,17 @@ end
 local function eq(name, got, want)
     check(name, got == want, string.format('got %q want %q', tostring(got), tostring(want)))
 end
+
+-- LFS identifiers form filesystem paths; reject alternate spellings and traversal.
+check('LFS accepts SHA-256', __lfs_valid_oid(string.rep('a', 64)))
+check('LFS rejects uppercase hashes', not __lfs_valid_oid(string.rep('A', 64)))
+check('LFS rejects path traversal', not __lfs_valid_oid('../' .. string.rep('a', 61)))
+check('LFS rejects short hashes', not __lfs_valid_oid('abc'))
+check('LFS accepts empty objects', __lfs_valid_size(0))
+check('LFS rejects negative sizes', not __lfs_valid_size(-1))
+check('LFS rejects fractional sizes', not __lfs_valid_size(1.5))
+check('LFS rejects infinite sizes', not __lfs_valid_size(math.huge))
+check('LFS rejects string sizes', not __lfs_valid_size('10'))
 
 -- ── module isolation and exports ───────────────────────────────────────────
 check('g_exports is the only app registry in root _G',

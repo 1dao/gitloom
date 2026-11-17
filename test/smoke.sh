@@ -496,7 +496,14 @@ curl -s -u "admin:$ADMIN_PW" -X POST -H 'Content-Type: application/json' \
 sleep 1
 ( cd "$WORK/w1" && $GIT push -q \
     "http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/zulu.git" HEAD:refs/heads/main ) >/dev/null 2>&1
-first=$(curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/repos" | grep -o '"full_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+# Streaming receive-pack can finish at the client before repo_after_push has
+# stamped the index. Wait for that observable update rather than racing it.
+i=0
+while [ "$i" -lt 25 ]; do
+    first=$(curl -s -u "admin:$ADMIN_PW" "$BASE/api/v1/repos" | grep -o '"full_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+    [ "$first" = 'admin/zulu' ] && break
+    i=$((i+1)); sleep 0.2
+done
 check 'the listing leads with the most recently pushed' "$first" 'admin/zulu'
 
 # ── Private repositories ────────────────────────────────────────────────────
@@ -2141,6 +2148,106 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -u "offboard:$OFF_TOKEN" "$BASE/ap
 check 'enabling account never restores revoked tokens' "$code" '401'
 code=$(curl -s -o /dev/null -w '%{http_code}' -u offboard:offboard-password-1 "$BASE/api/v1/user")
 check 'enabled account can authenticate with its password' "$code" '200'
+
+# == Git LFS ================================================================
+# Separate repositories keep LFS commits out of the ordinary Git assertions.
+LFS="$BASE/admin/lfs-check.git/info/lfs"
+curl -sf -u "admin:$ADMIN_PW" -H 'Content-Type: application/json' \
+    -d '{"name":"lfs-check","private":true}' "$BASE/api/v1/repos" >/dev/null
+curl -sf -u "admin:$ADMIN_PW" -H 'Content-Type: application/json' \
+    -d '{"name":"lfs-other"}' "$BASE/api/v1/repos" >/dev/null
+printf abc > "$WORK/lfs-object"
+OID=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+LFS_JSON=application/vnd.git-lfs+json
+BATCH="{\"operation\":\"upload\",\"objects\":[{\"oid\":\"$OID\",\"size\":3}]}"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Content-Type: $LFS_JSON" -d "$BATCH" "$LFS/objects/batch")
+check 'LFS private batch challenges anonymous clients' "$code" '401'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 \
+    -H "Content-Type: $LFS_JSON" -d "$BATCH" "$LFS/objects/batch")
+check 'LFS private batch hides repository from strangers' "$code" '404'
+code=$(curl -s -o "$WORK/lfs-batch" -w '%{http_code}' -u "admin:$ADMIN_PW" \
+    -H "Content-Type: $LFS_JSON" -d "$BATCH" "$LFS/objects/batch")
+check 'LFS upload batch succeeds' "$code" '200'
+grep -q '"upload"' "$WORK/lfs-batch" && ok 'LFS batch supplies upload action' || bad 'LFS batch supplies upload action' 'missing'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PUT --data-binary xyz "$LFS/objects/$OID?size=3")
+check 'LFS rejects corrupt object hash' "$code" '422'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" "$LFS/objects/$OID")
+check 'LFS never publishes corrupt uploads' "$code" '404'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PUT --data-binary abc "$LFS/objects/$OID?size=2")
+check 'LFS rejects incorrect object size' "$code" '422'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PUT --data-binary @"$WORK/lfs-object" "$LFS/objects/$OID?size=3")
+check 'LFS accepts verified upload' "$code" '200'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PUT -H 'Transfer-Encoding: chunked' --data-binary abc "$LFS/objects/$OID?size=3")
+check 'LFS accepts chunked upload' "$code" '200'
+body=$(curl -s -u "admin:$ADMIN_PW" -H "Content-Type: $LFS_JSON" \
+    -d "{\"operation\":\"upload\",\"objects\":[{\"oid\":\"$OID\",\"size\":1073741825}]}" "$LFS/objects/batch")
+printf '%s' "$body" | grep -q '"code":413' && ok 'LFS rejects oversized objects in batch' || bad 'LFS rejects oversized objects in batch' "$body"
+EMPTY=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PUT --data-binary '' "$LFS/objects/$EMPTY?size=0")
+check 'LFS accepts empty object' "$code" '200'
+code=$(curl -s -o "$WORK/lfs-down" -w '%{http_code}' -u "admin:$ADMIN_PW" "$LFS/objects/$OID")
+check 'LFS downloads stored object' "$code" '200'
+cmp -s "$WORK/lfs-object" "$WORK/lfs-down" && ok 'LFS download preserves bytes' || bad 'LFS download preserves bytes' 'mismatch'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin/lfs-other.git/info/lfs/objects/$OID")
+check 'LFS hash cannot cross repository boundaries' "$code" '404'
+body=$(curl -s -u "admin:$ADMIN_PW" -H "Content-Type: $LFS_JSON" -d "$BATCH" "$LFS/objects/batch")
+printf '%s' "$body" | grep -q '"actions"' && bad 'LFS repeated upload omits actions' "$body" || ok 'LFS repeated upload omits actions'
+body=$(curl -s -u "admin:$ADMIN_PW" -H "Content-Type: $LFS_JSON" \
+    -d "{\"operation\":\"download\",\"objects\":[{\"oid\":\"$OID\",\"size\":4}]}" "$LFS/objects/batch")
+printf '%s' "$body" | grep -q '"code":422' && ok 'LFS batch rejects wrong known size' || bad 'LFS batch rejects wrong known size' "$body"
+curl -sf -u "admin:$ADMIN_PW" -X PUT -H 'Content-Type: application/json' \
+    -d '{"permission":"read"}' "$BASE/api/v1/repos/admin/lfs-check/collaborators/bob" >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 "$LFS/objects/$OID")
+check 'LFS read collaborator can download' "$code" '200'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X PUT --data-binary abc "$LFS/objects/$OID?size=3")
+check 'LFS read collaborator cannot upload' "$code" '404'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -H "Content-Type: $LFS_JSON" -d "$BATCH" "$LFS/objects/batch")
+check 'LFS read collaborator cannot request upload actions' "$code" '404'
+curl -sf -u "admin:$ADMIN_PW" -X PATCH -H 'Content-Type: application/json' -d '{"disabled":true}' "$BASE/api/v1/users/bob" >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 "$LFS/objects/$OID")
+check 'LFS cached credentials stop working when account is disabled' "$code" '401'
+curl -sf -u "admin:$ADMIN_PW" -X PATCH -H 'Content-Type: application/json' -d '{"disabled":false}' "$BASE/api/v1/users/bob" >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PUT --data-binary abc "$BASE/admin/lfs-other.git/info/lfs/objects/$OID?size=3")
+check 'LFS public repository accepts owner upload' "$code" '200'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin/lfs-other.git/info/lfs/objects/$OID")
+check 'LFS public object allows anonymous download' "$code" '200'
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary abc "$BASE/admin/lfs-other.git/info/lfs/objects/$OID?size=3")
+check 'LFS public repository refuses anonymous upload' "$code" '401'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -H "Content-Type: $LFS_JSON" \
+    -d "{\"oid\":\"$OID\",\"size\":3}" "$LFS/objects/$OID/verify")
+check 'LFS upload verification succeeds' "$code" '200'
+if git lfs version >/dev/null 2>&1; then
+    mkdir "$WORK/lfs-client"
+    (
+        cd "$WORK/lfs-client" && git init -q && git checkout -qb main &&
+        git config user.name Smoke && git config user.email smoke@example.test &&
+        git lfs install --local && git lfs track '*.bin' &&
+        dd if=/dev/urandom of=payload.bin bs=1048576 count="${LFS_MB:-3}" 2>/dev/null &&
+        git add .gitattributes payload.bin && git commit -qm 'LFS object' &&
+        git remote add origin "http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/lfs-check.git" &&
+        $GIT push -u origin main && $GIT lfs push --all origin
+    ) >"$WORK/lfs-client.log" 2>&1
+    if [ $? -eq 0 ]; then ok 'real Git LFS pushes and repeats upload'
+    else bad 'real Git LFS pushes and repeats upload' "$(tail -20 "$WORK/lfs-client.log")"; fi
+    $GIT clone -c 'filter.lfs.process=git-lfs filter-process' -c filter.lfs.required=true "http://admin:$ADMIN_PW@127.0.0.1:$PORT/admin/lfs-check.git" "$WORK/lfs-clone" >"$WORK/lfs-clone.log" 2>&1
+    if [ $? -eq 0 ] && cmp -s "$WORK/lfs-client/payload.bin" "$WORK/lfs-clone/payload.bin"; then
+        ok 'real Git LFS clone restores original binary'
+    else bad 'real Git LFS clone restores original binary' "$(tail -20 "$WORK/lfs-clone.log")"; fi
+    (
+        cd "$WORK/lfs-clone" && git lfs install --local && rm payload.bin && $GIT lfs pull
+    ) >"$WORK/lfs-pull.log" 2>&1
+    if [ $? -eq 0 ] && cmp -s "$WORK/lfs-client/payload.bin" "$WORK/lfs-clone/payload.bin"; then
+        ok 'real Git LFS pull restores missing file'
+    else bad 'real Git LFS pull restores missing file' "$(tail -20 "$WORK/lfs-pull.log")"; fi
+else
+    skip 'real Git LFS client unavailable'
+fi
+# Rename carries object storage with the bare repository.
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" -X PATCH \
+    -H 'Content-Type: application/json' -d '{"name":"lfs-renamed"}' "$BASE/api/v1/repos/admin/lfs-check")
+check 'LFS repository rename succeeds' "$code" '200'
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$ADMIN_PW" "$BASE/admin/lfs-renamed.git/info/lfs/objects/$OID")
+check 'LFS object survives repository rename' "$code" '200'
 
 # == Delete ==================================================================
 code=$(curl -s -o /dev/null -w '%{http_code}' -u bob:bob-password-1 -X DELETE \
